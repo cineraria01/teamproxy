@@ -277,3 +277,31 @@ test('a client that stays refused fails only the refresh: no auth-revoked park, 
     server.close();
   }
 });
+
+test('a client saved to the config after a client-less start is adopted and used by the refresh', async () => {
+  const { adoptAgyClientFromConfig } = await import('../src/agy.js');
+  const seen = [];
+  const token = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      seen.push(new URLSearchParams(body).get('client_id'));
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ access_token: 'new', expires_in: 3600 }));
+    });
+  });
+  await new Promise(resolve => token.listen(0, '127.0.0.1', resolve));
+  const tokenUrl = `http://127.0.0.1:${token.address().port}/token`;
+  try {
+    const manager = new AccountManager([agyAccount('a')]);
+    manager.agyOAuth = { tokenUrl }; // the server started before any client existed
+    await assert.rejects(manager._refreshAgy('r'), /not configured/);
+    assert.equal(adoptAgyClientFromConfig(manager, {}), false); // nothing on disk yet
+    assert.equal(adoptAgyClientFromConfig(manager, { agyOAuthClientId: 'cid', agyOAuthClientSecret: 'sec' }), true);
+    await manager._refreshAgy('r');
+    assert.deepEqual(seen, ['cid']);
+    assert.equal(adoptAgyClientFromConfig(manager, { agyOAuthClientId: 'other', agyOAuthClientSecret: 'x' }), false); // never replaces a working client
+  } finally {
+    token.close();
+  }
+});

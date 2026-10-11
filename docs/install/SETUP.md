@@ -1,9 +1,8 @@
 # TeamCodex 프록시 준비
 
 인자 없이(또는 Codex 옵션만 붙여) 실행하는 `teamcodex`가 실행기와 상태줄입니다. OAuth 로그인과 계정 자동 전환은
-[sangrokjung/teamclaude의 TeamCodex](https://github.com/sangrokjung/teamclaude)가 담당합니다.
-이 안내는 macOS에서 확인한 upstream **1.3.0**, 커밋
-`408297e8300a0ac8ad7d7e895e14612e7db7e303`을 고정해 사용합니다.
+이 저장소(`cineraria01/teamproxy`)의 프록시가 담당합니다. 업스트림(`sangrokjung/teamclaude`)에서는 설치하지 않습니다.
+이 안내는 이 포크의 `main` 브랜치를 설치합니다.
 Node.js/npm, Python 3.9 이상, 공식 `codex` 명령이 먼저 설치되어 있어야 합니다.
 
 이미 `teamcodex status`가 정상이고 설정이 `~/.config/teamcodex.json`에 있다면
@@ -40,14 +39,14 @@ systemctl --user restart teamcodex  # 필요할 때 재시작
 
 아래는 자동 설치 대신 직접 설치할 때 사용하는 명령입니다.
 
-upstream 패키지는 `teamclaude` 명령도 포함하므로 별도 npm prefix에 설치합니다.
+이 포크의 패키지는 `teamclaude` 명령도 포함하므로 별도 npm prefix에 설치합니다.
 아래 PATH를 셸 시작 파일에도 추가하세요.
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.local/bin"
 npm install --global --prefix "$HOME/.local/share/teamcodex-global" --ignore-scripts \
-  git+https://github.com/sangrokjung/teamclaude.git#408297e8300a0ac8ad7d7e895e14612e7db7e303
+  git+https://github.com/cineraria01/teamproxy.git#main
 ```
 
 `teamcodex` 명령만 노출합니다. 아래 블록은 기존 파일이 있으면 덮어쓰지 않고 실패합니다.

@@ -584,3 +584,16 @@ export function buildAgyRunEnv(env, port) {
   delete child.TEAMCLAUDE_CONFIG;
   return child;
 }
+
+/**
+ * A server started before the OAuth client existed (no agy installed yet, or no accounts) keeps an empty
+ * client forever; a login later caches the client in the config. Adopt it on the account reload.
+ */
+export function adoptAgyClientFromConfig(accountManager, diskConfig) {
+  const clientId = nonEmpty(diskConfig?.agyOAuthClientId);
+  const clientSecret = nonEmpty(diskConfig?.agyOAuthClientSecret);
+  const current = accountManager.agyOAuth || {};
+  if (!clientId || !clientSecret || (current.clientId && current.clientSecret)) return false;
+  accountManager.agyOAuth = { clientId, clientSecret, tokenUrl: current.tokenUrl };
+  return true;
+}
