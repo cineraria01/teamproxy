@@ -14,7 +14,7 @@
   브랜치 tip을 받지 않는다. 런타임 의존성은 0이다.
 - `~/.local/bin/{teamclaude,teamcodex,teamagy}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄(tmux)·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
 - 설정 `~/.config/{teamclaude,teamcodex,teamagy}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`, `proxy.allowNoAccounts`를 `true`로 적는다.
-  이미 있으면 계정·키를 그대로 두고 `proxy.host`·`proxy.allowNoAccounts`가 비어 있을 때만 각각 `127.0.0.1`·`true`를 더한다.
+  앱 설치 전부터 있던 설정은 **바꾸지 않는다**(끝 줄과 단계 줄에 `"config":"existing_kept"`, 매니페스트에도 기록). 앱이 만든 설정만 새 키를 채우고 `--purge`로 지운다.
 - launchd 사용자 에이전트 `kr.selvi.teamproxy.<풀>`: `<래퍼> server`, `RunAtLoad`·`KeepAlive`·`ThrottleInterval 10`,
   로그 `~/Library/Logs/teamproxy/<풀>.log`. 설치 기록은 `~/.local/share/teamproxy-app/manifest.json`.
 
@@ -33,9 +33,9 @@
 | `--app [--pools claude,codex,agy] [--node 절대경로] [--with-codex-cli 버전] [--prefix 홈]` | 설치(기본 세 풀). `--node` 기본값은 설치기를 실행한 node. 같은 버전이면 `skip`, 다른 버전이면 갱신하고 에이전트를 다시 올린다 |
 | `--status` | 설치 여부·버전·풀별 로드·응답·계정 수 |
 | `--uninstall [--purge]` | 에이전트·래퍼·설치 폴더 제거. 설정(토큰)은 `--purge`일 때만 지운다 |
-| `--login-command <풀>` | 로그인에 쓸 argv와 다음 계정 이름(기존 계정 수 + 1) |
+| `--login-command <풀>` | 로그인에 쓸 argv와 비어 있는 첫 `<풀>-N` 이름 |
 
-`--prefix`는 홈 디렉터리 기준을 바꾼다(시험용). 기존 대화형 `scripts/install.py`는 그대로이고 앱 모드와 무관하다.
+`--prefix`는 홈 디렉터리 기준을 바꾸는 **시험 전용** 옵션이다(래퍼는 실행 때의 `$HOME/.config/…`를 읽으므로 운영에서 쓰지 않는다). 기존 대화형 `scripts/install.py`는 그대로이고 앱 모드와 무관하다.
 
 ### 진행 줄
 
@@ -117,7 +117,7 @@
   - **teamcodex**는 공식 `codex login`을 감싸 그 출력의 URL을 옮긴다. macOS에서 Codex CLI는 브라우저를 스스로 연다(막을 수 없음). 그래서 이벤트에 `"browser_opened":true`가 붙고 앱은 다시 열지 않는다.
   - `--device-auth`를 주면 `{"event":"auth_url","url":"…","user_code":"ABCD-12345","browser_opened":false}`로 코드를 함께 준다(앱이 코드를 보여 주고 URL을 연다).
 - `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.
-- 끝 줄 `done`. 오류 코드: `cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
+- 끝 줄 `done`. 오류 코드: `name_taken`(이미 있는 `--name`, 덮어쓰기·토큰 폐기를 막으려 거절)·`cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
 - SIGTERM/SIGINT: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`.
 - 로그인이 끝나면 실행 중인 서버에 SIGHUP을 보내 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다).
 
@@ -134,4 +134,5 @@ node scripts/build-app-bundle.mjs [출력 폴더]   # 기본 dist/
 ## `proxy.host` (서버 설정)
 
 설정의 `proxy.host`가 서버(supervisor)의 바인딩 주소다. 앱 설치는 `127.0.0.1`로 적어 같은 PC에서만 받는다.
+제약: 값을 루프백이 아닌 주소나 `::1`로 두면 CLI(`status`·`stop`·`--json` 명령)가 `127.0.0.1`만 찾으므로 서버를 못 찾는다. 앱 설치는 `127.0.0.1`이다.
 값이 없으면 지금처럼 호스트를 지정하지 않아 모든 인터페이스에서 받는다(원격 사용자 호환). 원격에 열려면 값을 지우거나 `0.0.0.0`으로 둔다.

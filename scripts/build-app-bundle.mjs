@@ -2,6 +2,7 @@
 // Build the deterministic app bundle teamproxy-app-<version>.tar.gz and print its SHA-256.
 // Usage: node scripts/build-app-bundle.mjs [OUT_DIR]   (default: dist/)
 // Same sources -> same bytes: sorted entries, fixed mtime/owner/mode, no gzip name or time.
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -19,11 +20,25 @@ function walk(dir, keep) {
   });
 }
 
+// Tracked files only, so a stray .DS_Store or local note never changes the bundle. An unpacked bundle
+// (no .git) falls back to walking the folder.
+function tracked() {
+  try {
+    return execFileSync('git', ['ls-files', '-z', '--', 'src', 'scripts'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 function members() {
-  const found = FILES.map(name => join(ROOT, name));
-  found.push(...walk(join(ROOT, 'src'), () => true));
-  found.push(...walk(join(ROOT, 'scripts'), name => /^install.*\.(py|mjs)$/.test(name)));
-  return found.map(path => relative(ROOT, path).split(sep).join('/')).sort();
+  const wanted = name => name.startsWith('src/') || /^scripts\/install[^/]*\.(py|mjs)$/.test(name);
+  const listed = tracked();
+  const found = listed
+    ? listed.filter(wanted)
+    : [...walk(join(ROOT, 'src'), () => true), ...walk(join(ROOT, 'scripts'), name => /^install.*\.(py|mjs)$/.test(name))]
+      .map(path => relative(ROOT, path).split(sep).join('/'));
+  return [...FILES, ...found].sort();
 }
 
 const octal = (value, length) => `${value.toString(8).padStart(length - 1, '0')}\0`;

@@ -1,0 +1,367 @@
+{
+  "version": 1,
+  "jobId": "271e44dc-f2f3-474a-9666-4cd18f13b7f4",
+  "sessionId": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+  "scopeKey": "e55bb9db2d8be7e57f0a8f176460c4b674bcb9df9e6bfed5850f215f80030b4a",
+  "revision": 60,
+  "createdAt": "2026-10-11T18:04:00.608Z",
+  "updatedAt": "2026-10-11T18:04:32.035Z",
+  "producerGraceExpiresAt": "2026-10-11T18:04:30.608Z",
+  "bestEffortDeadlineAt": "2026-10-11T18:05:23.608Z",
+  "producers": {
+    "core": {
+      "state": "sealed",
+      "intentKey": "ddff6bc08284db39eb490e994a551a4708c8084ef88746f2db7c9e8552d88417",
+      "payloadDigest": "ddff6bc08284db39eb490e994a551a4708c8084ef88746f2db7c9e8552d88417",
+      "sealedAt": "2026-10-11T18:04:30.934Z",
+      "sealedBy": "recovery"
+    },
+    "wiki": {
+      "state": "no-op",
+      "sealedAt": "2026-10-11T18:04:00.627Z",
+      "sealedBy": "wiki-producer"
+    }
+  },
+  "actions": {
+    "foreground-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "ef4a3e4a2ec8d028712391ea9fa1ec74b8caf37cc301906e3f3f02cfb2088799",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-11T18:04:30.654Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "01e64af6-47ae-49de-adc3-d43d08c6586b",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:30.925Z"
+    },
+    "wiki-capture": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 0,
+      "idempotencyKey": "8dc1fb9b5d0fc576fd7d87bb0e65a1a19f1dcf61c1a6df4ec1ddfe2ca0c1f928",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "completedAt": "2026-10-11T18:04:00.627Z"
+    },
+    "team-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "d6ad935b9836c9aee44c79fc6ef6d4131bcb7f3091f199e21e956d5b09095429",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-11T18:04:30.957Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "1f0f0204-1056-4ce4-b188-8a10900cda4b",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.097Z"
+    },
+    "python-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "d1ec1da5bd9c21457bba28ca30e88e7249aa7266aa68ad293b6e0c64f7431bdb",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-11T18:04:31.117Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "5064b17a-b220-4aed-9755-6fcb64943d0b",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.263Z"
+    },
+    "reply-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "5c22104ae09ed02381dbbb8d15bc0f29f31b9a9c86d518396e06b9a6040cc8c5",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-10-11T18:04:31.282Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "b8939bcf-769e-44f9-976a-784ae2a65b49",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.413Z"
+    },
+    "callback": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "ae607a68522ddc7e9b6e9b42f79b413145647a5f36d77448cc82771c4c54a85b",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-11T18:04:31.432Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "eed11212-e551-495e-8447-218903391656",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.574Z"
+    },
+    "notification": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "19b40a0181b23b886a07cc0443705c34b1071510a5a12af4e5e143fca7821eee",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-11T18:04:31.593Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "f9a9eb98-1dd1-414d-a775-bd56857cdc00",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.713Z"
+    },
+    "openclaw": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "3e4dee314b1b1ed9476c8d2413ec6c52e3739fddb04d74a3b4746dd5ccaf4521",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {},
+        "metrics": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "ended_at": "2026-10-11T18:04:30.784Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        }
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-11T18:04:31.731Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "05cca6b0-b7fe-47d3-bf8a-4730524226b9",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.857Z"
+    },
+    "spawn-next": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "5cc55508b0c4052d10eaf32d50b0a5482db2fb5d94609bde5b9328ece43ca4ff",
+      "payload": {
+        "transcriptPath": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+        "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+        "reason": "other",
+        "input": {
+          "session_id": "3d001f6e-22ad-40b3-95ce-01202d1be4b5",
+          "transcript_path": "/Users/hyeongsu/.claude/projects/-Users-hyeongsu-src-teamproxy-wt-app-installer/3d001f6e-22ad-40b3-95ce-01202d1be4b5.jsonl",
+          "cwd": "/Users/hyeongsu/src/teamproxy.wt/app-installer",
+          "prompt_id": "655deeae-422f-48dd-b085-0735cf01a5d2",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "initialTeamNames": [],
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-10-11T18:04:31.876Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "72088961-8f8a-4a4b-a0fe-f7fda89349d2",
+        "phase": "terminal",
+        "deadlineAt": "2026-10-11T18:04:40.610Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-10-11T18:04:31.997Z"
+    }
+  },
+  "owner": null,
+  "phase": "complete",
+  "recoverableFailure": {
+    "reason": "actions-settled",
+    "releasedAt": "2026-10-11T18:04:32.016Z",
+    "ownerNonce": "21f988f2-5a6d-494f-96d6-e89c99eff128"
+  },
+  "completion": {
+    "completedAt": "2026-10-11T18:04:32.016Z",
+    "terminalDigest": "385228a493ffe66ec34b3b3f587438221b524a6833d892b43e48cf9e574c7ad2",
+    "terminalRevision": 59
+  }
+}

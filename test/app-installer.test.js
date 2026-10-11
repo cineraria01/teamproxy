@@ -104,7 +104,7 @@ test('--app installs wrappers, config, launchd agents and nothing else', () => {
   assert.equal(done.done && done.ok, true);
   assert.deepEqual(Object.keys(done.pools).sort(), ['agy', 'claude', 'codex']);
   for (const [pool, cmd] of [['claude', 'teamclaude'], ['codex', 'teamcodex'], ['agy', 'teamagy']]) {
-    assert.deepEqual(done.pools[pool], { port: t.ports[pool], label: labelOf(pool), installed: true, running: false });
+    assert.deepEqual(done.pools[pool], { port: t.ports[pool], label: labelOf(pool), installed: true, running: false, config: 'created' });
     const wrapper = join(t.home, '.local/bin', cmd);
     accessSync(wrapper, constants.X_OK);
     const text = readFileSync(wrapper, 'utf8');
@@ -207,7 +207,7 @@ test('--with-codex-cli installs the pinned CLI and the codex wrapper uses it', (
   assert.equal(done.ok, true);
   const bin = join(t.home, '.local/share/teamproxy-app/codex-cli/bin/codex');
   assert.equal(existsSync(bin), true);
-  assert.ok(readFileSync(join(t.home, '.local/bin/teamcodex'), 'utf8').includes(`TEAMCODEX_CODEX_BIN="\${TEAMCODEX_CODEX_BIN:-${bin}}"`));
+  assert.ok(readFileSync(join(t.home, '.local/bin/teamcodex'), 'utf8').includes(`[ -n "$TEAMCODEX_CODEX_BIN" ] || TEAMCODEX_CODEX_BIN='${bin}'`));
   assert.match(readFileSync(t.npmLog, 'utf8'), /@openai\/codex@0\.130\.0/);
   assert.equal(steps.find(s => s.step === 'codex-cli' && s.status !== 'start').status, 'ok');
   assert.equal(app(['--app', '--pools', 'codex', '--with-codex-cli', '0.130.0']).steps.find(s => s.step === 'codex-cli').status, 'skip');
@@ -234,6 +234,7 @@ test('--uninstall keeps the config, --purge removes it, and foreign files stay',
   assert.equal(existsSync(join(t.launchd, labelOf('codex'))), false);
   assert.equal(existsSync(join(t.home, '.local/share/teamproxy-app')), false);
   assert.equal(existsSync(config), true);
+  rmSync(config); // a plain uninstall leaves the config, and a later install then treats it as pre-existing (kept)
   app(['--app']);
   app(['--uninstall', '--purge']);
   assert.equal(existsSync(config), false);
@@ -244,14 +245,46 @@ test('--uninstall keeps the config, --purge removes it, and foreign files stay',
   assert.equal(existsSync(mine), true);
 });
 
-test('--login-command names the next account (existing accounts + 1) and gives an argv array', () => {
+test('--login-command gives the first free <pool>-N, never a name already in use', () => {
   assert.equal(app(['--login-command', 'codex']).done.account, 'codex-1');
   mkdirSync(join(t.home, '.config'), { recursive: true });
-  writeFileSync(join(t.home, '.config/teamcodex.json'), JSON.stringify({ accounts: [{ name: 'codex-1' }, { name: 'x' }] }));
+  const config = join(t.home, '.config/teamcodex.json');
+  writeFileSync(config, JSON.stringify({ accounts: [{ name: 'codex-2' }] }));
   const { done } = app(['--login-command', 'codex']);
-  assert.deepEqual(done.argv, [join(t.home, '.local/bin/teamcodex'), 'login', '--name', 'codex-3']);
+  assert.deepEqual(done.argv, [join(t.home, '.local/bin/teamcodex'), 'login', '--name', 'codex-1']);
+  writeFileSync(config, JSON.stringify({ accounts: [{ name: 'codex-1' }, { name: 'x' }, { name: 'codex-3' }] }));
+  assert.equal(app(['--login-command', 'codex']).done.account, 'codex-2');
   const bad = app(['--login-command', 'constructor'], { expect: 2 });
   assert.equal(bad.done.ok, false);
+});
+
+test('paths with quotes, $(), backticks and spaces are inert in the wrapper', () => {
+  const evil = join(t.dir, 'a"b$(touch INJECTED)`touch INJECTED2` c');
+  mkdirSync(join(evil, 'bin'), { recursive: true });
+  symlinkSync(join(t.dir, 'noderoot/lib'), join(evil, 'lib'));
+  symlinkSync(process.execPath, join(evil, 'bin/node'));
+  const { done } = app(['--app', '--pools', 'claude', '--node', join(evil, 'bin/node')], { node: false });
+  assert.equal(done.ok, true);
+  const wrapper = join(t.home, '.local/bin/teamclaude');
+  assert.equal(spawnSync('sh', ['-n', wrapper]).status, 0);
+  const run = spawnSync(wrapper, ['--help'], { env: t.env, encoding: 'utf8', cwd: t.dir });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(existsSync(join(t.dir, 'INJECTED')) || existsSync(join(t.dir, 'INJECTED2')), false);
+});
+
+test('a config that existed before the app is kept untouched and survives --purge', () => {
+  mkdirSync(join(t.home, '.config'), { recursive: true });
+  const config = join(t.home, '.config/teamcodex.json');
+  const mine = JSON.stringify({ proxy: { port: t.ports.codex, apiKey: 'tc-mine' }, accounts: [] });
+  writeFileSync(config, mine);
+  const { steps, done } = app(['--app', '--pools', 'codex']);
+  assert.equal(done.pools.codex.config, 'existing_kept');
+  assert.equal(steps.find(s => s.step === 'config:codex').config, 'existing_kept');
+  assert.equal(readFileSync(config, 'utf8'), mine);
+  app(['--app', '--pools', 'codex']);
+  assert.equal(readFileSync(config, 'utf8'), mine);
+  app(['--uninstall', '--purge']);
+  assert.equal(readFileSync(config, 'utf8'), mine);
 });
 
 test('the wrapper runs the pool entry with its own config', () => {

@@ -253,3 +253,22 @@ test('codex login --json reports a missing CLI as codex_not_found', async () => 
   assert.equal(code, 1);
   assert.equal(run.events.at(-1).error, 'codex_not_found');
 });
+
+test('login --json refuses a name that already exists (no overwrite) and never contacts the provider', async () => {
+  const run = login(['login', '--name', 'main', '--json']);
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events, [{ done: true, ok: false, error: 'name_taken', message: 'Account "main" already exists' }]);
+  assert.equal(readConfig().accounts.find(a => a.name === 'main').accessToken, 'AT-SECRET');
+});
+
+test('cancelling a codex login reports cancelled every time (20 runs)', async () => {
+  for (let i = 0; i < 20; i += 1) {
+    const run = login(['codex', 'login', '--name', `c-${i}`, '--json'], { TEAMCODEX_CODEX_BIN: fakeCodex(), FAKE_CODEX_HANG: '1', FAKE_CODEX_HOME_FILE: join(t.dir, 'h'), FAKE_CODEX_PID_FILE: join(t.dir, 'p') });
+    await run.next(e => e.event === 'waiting');
+    run.child.kill('SIGTERM');
+    const [code] = await run.exit;
+    assert.equal(code, 1);
+    assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }], `run ${i}`);
+  }
+});

@@ -111,11 +111,13 @@ function wrapperText(L, pool, node, codexBin) {
   const [script, ...rest] = entry;
   // LC_ALL=C: the server (launchd) and the CLI must print process start times alike, or live reload refuses (lifecycle identity unverified).
   // Codex login needs the Codex CLI; use the app-installed one when there is one.
-  const codex = pool === 'codex' && codexBin ? `TEAMCODEX_CODEX_BIN="\${TEAMCODEX_CODEX_BIN:-${codexBin}}" ` : '';
-  const path = `${dirname(node)}:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH`;
+  // Paths are single-quoted (shq) and joined to the double-quoted $-expansions, so a quote, $, backtick or space in a path is inert.
+  const codex = pool === 'codex' && codexBin
+    ? `[ -n "$TEAMCODEX_CODEX_BIN" ] || TEAMCODEX_CODEX_BIN=${shq(codexBin)}\nexport TEAMCODEX_CODEX_BIN\n` : '';
+  const path = `${shq(dirname(node))}":$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"`;
   return `#!/bin/sh\n${MARKER} (${cmd}, pool ${pool}); removed by install-app.mjs --uninstall\n`
-    + `PATH="${path}"\n`
-    + `exec env ${env}LC_ALL=C TEAMCLAUDE_CONFIG="$HOME/.config/${config}" ${codex}`
+    + `PATH=${path}\n${codex}`
+    + `exec env ${env}LC_ALL=C TEAMCLAUDE_CONFIG="$HOME/.config/${config}" `
     + `${[shq(node), shq(join(L.pkg(pool), script)), ...rest].join(' ')} "$@"\n`;
 }
 
@@ -223,7 +225,11 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
 
   const configPath = L.config(pool);
   const existing = readJson(configPath, null);
-  if (existing) {
+  const previous = manifest.pools[pool];
+  // 'created' = the app wrote this file (it may fill in newer keys and --purge may delete it);
+  // 'existing_kept' = it was there before the app, so it is never modified or purged.
+  let origin = previous ? previous.config ?? 'created' : 'existing_kept';
+  if (existing && origin === 'created') {
     // host pins loopback; allowNoAccounts keeps the server up (and launchd quiet) until the first login.
     const added = ['host', 'allowNoAccounts'].filter(key => existing.proxy?.[key] === undefined);
     if (!added.length) {
@@ -233,7 +239,11 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
       writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 0o600);
       step(`config:${pool}`, 'ok', `${configName}에 proxy.${added.join('·proxy.')}를 더했습니다`);
     }
+  } else if (existing) {
+    origin = 'existing_kept';
+    emit({ step: `config:${pool}`, status: 'skip', detail: `${configName}은 앱 설치 전부터 있어 바꾸지 않았습니다`, config: 'existing_kept' });
   } else {
+    origin = 'created';
     // createDefaultConfig keys its provider (and port) on the env at call time.
     const { createDefaultConfig } = await import(pathToFileURL(join(SOURCE, 'src/config.js')).href);
     if (pool === 'claude') delete process.env.TEAMCLAUDE_PROVIDER; else process.env.TEAMCLAUDE_PROVIDER = pool;
@@ -252,12 +262,17 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
     step(`launchd:${pool}`, 'skip', `${L.label(pool)}가 이미 실행 중입니다`);
   } else {
     launchctl('bootout', `${domain()}/${L.label(pool)}`);
+    for (let i = 0; i < 20 && isLoaded(L, pool); i += 1) await sleep(100); // bootout is asynchronous
     writeFile(plist, want, 0o600);
-    const result = launchctl('bootstrap', domain(), plist);
+    let result = launchctl('bootstrap', domain(), plist);
+    for (let i = 0; i < 5 && result.status !== 0; i += 1) {
+      await sleep(300);
+      result = launchctl('bootstrap', domain(), plist);
+    }
     if (result.status !== 0) throw new Fail('launchd_failed', `${pool}: launchd 등록에 실패했습니다 (${(result.stderr ?? '').trim().slice(-200)})`);
     step(`launchd:${pool}`, 'ok', `${L.label(pool)}를 등록했습니다`);
   }
-  manifest.pools[pool] = { version };
+  manifest.pools[pool] = { version, config: origin };
   writeFile(L.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o644);
 }
 
@@ -295,7 +310,7 @@ async function runInstall(L, pools, nodeArg, codexCliVersion) {
     writeFile(L.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o644);
     for (const pool of pools) {
       const running = await waitRunning(poolPort(L, pool));
-      done.pools[pool] = { ...poolReport(L, pool, true), running };
+      done.pools[pool] = { ...poolReport(L, pool, true), running, config: manifest.pools[pool].config };
       step(`health:${pool}`, running ? 'ok' : 'skip',
         running ? '서버가 응답합니다' : '서버가 아직 응답하지 않습니다(계정이 없으면 정상, 로그: Library/Logs/teamproxy)');
     }
@@ -334,7 +349,7 @@ function runUninstall(L, purge) {
     rmSync(L.plist(pool), { force: true });
     if ((readText(L.wrapper(pool)) ?? '').includes(MARKER)) rmSync(L.wrapper(pool), { force: true });
     rmSync(L.prefix(pool), { recursive: true, force: true });
-    if (purge) {
+    if (purge && (manifest.pools[pool].config ?? 'created') === 'created') { // never a config the app did not write
       const config = L.config(pool).replace(/\.json$/, '');
       for (const suffix of ['.json', '.server.json', '.quota.json']) rmSync(config + suffix, { force: true });
     }
@@ -351,7 +366,10 @@ function runUninstall(L, purge) {
 
 function runLoginCommand(L, pool) {
   if (!Object.hasOwn(POOLS, pool)) throw new Fail('usage', 'Usage: --login-command claude|codex|agy --json');
-  const account = `${pool}-${(readJson(L.config(pool), {}).accounts ?? []).length + 1}`;
+  const taken = new Set((readJson(L.config(pool), {}).accounts ?? []).map(a => a.name));
+  let n = 1;
+  while (taken.has(`${pool}-${n}`)) n += 1; // first free number: a name in use would overwrite that account
+  const account = `${pool}-${n}`;
   emit({ done: true, ok: true, pool, account, argv: [L.wrapper(pool), 'login', '--name', account] });
   return 0;
 }

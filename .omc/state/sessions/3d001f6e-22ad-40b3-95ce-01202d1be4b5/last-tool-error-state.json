@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"pgrep -fl \\\"/tmp/inj\\\" | head; pkill -f \\\"/tmp/inj2\\\" ; pkill -f \\\"/tmp/inj.Cehw\\\"; sleep 1; pgrep -fl \\\"/tmp/inj\\\" ; echo \\\"남은 프로세스 확인 끝\\\"; cat /private/tmp/claude-501/-Users-hyeongsu-src...",
+  "error": "Exit code 1\n58127 /bin/zsh -c source /Users/hyeongsu/.claude/shell-snapshots/snapshot-zsh-1791741393483-my41n1.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'N=$(which node); D=$(mktemp -d /tmp/inj2.XXXX); R=\"$D/a\\$(echo INJECTED-RAN >&2)b\"; mkdir -p \"$R/bin\" \"$R/lib/node_modules/npm/bin\" \"$D/home\"; ln -s \"$N\" \"$R/bin/node\"; cp /tmp/inj.Cehw/n\\\"o*/lib/...",
+  "timestamp": "2026-10-11T18:01:51.584Z",
+  "retry_count": 2
+}

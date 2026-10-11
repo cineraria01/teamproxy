@@ -38,7 +38,7 @@ import {
   isCodexResponsesPath,
 } from './codex-recovery.js';
 import { TUI, applyTuiAccountMutation } from './tui.js';
-import { accountViews, emit, enableMachineLogin, errorCode } from './app-json.js';
+import { accountViews, emit, emitDone, enableMachineLogin, errorCode } from './app-json.js';
 import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
 import { runClaudeWithRecovery } from './claude-recovery.js';
@@ -69,6 +69,7 @@ import {
 import { installClaudeWrapper, uninstallClaudeWrapper } from './claude-wrapper.js';
 import {
   AGY_DEFAULT_UPSTREAM,
+  adoptAgyClientFromConfig,
   agyCliNotFoundMessage,
   buildAgyRunEnv,
   loadAgyCodeAssist,
@@ -1657,6 +1658,7 @@ async function proxyWorkerCommand() {
         throw new Error(`${getConfigPath()} now holds a "${diskConfig.provider ?? 'unset'}" provider config; not reloading it`);
       }
       await syncAccountsFromDisk(diskConfig, config, accountManager);
+      if (agyMode) adoptAgyClientFromConfig(accountManager, diskConfig); // first login after a client-less start
       if (codexMode || agyMode) await server.refreshQuotaAll();
       if (process.connected) {
         process.send({
@@ -2580,6 +2582,13 @@ async function machineCommand() {
 async function loginMachineCommand(config) {
   enableMachineLogin();
   try {
+    const wanted = argValue('--name');
+    if (wanted && config.accounts.some(a => a.name === wanted)) {
+      // login --name on an existing name replaces that account (and revokes a Codex grant): the app never means that.
+      const taken = new Error(`Account "${wanted}" already exists`);
+      taken.code = 'name_taken';
+      throw taken;
+    }
     let account;
     if (isAgyMode(config)) {
       const { clientId, clientSecret } = await ensureAgyOAuthClient(config);
@@ -2594,9 +2603,9 @@ async function loginMachineCommand(config) {
       const creds = await loginOAuth();
       account = await upsertOAuthAccount(argValue('--name'), creds, 'login');
     }
-    emit({ done: true, ok: true, account });
+    emitDone({ ok: true, account });
   } catch (err) {
-    emit({ done: true, ok: false, error: errorCode(err), message: err.message });
+    emitDone({ ok: false, error: errorCode(err), message: err.message });
     process.exit(1);
   }
 }

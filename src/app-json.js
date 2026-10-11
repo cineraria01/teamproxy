@@ -2,9 +2,16 @@
 // account views for `<pool> accounts|status --json` and the line-JSON login events.
 import { createInterface } from 'node:readline';
 
-export const machine = { json: false, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [] };
+export const machine = { json: false, cancelling: false, finished: false, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [] };
 
 export const emit = fields => process.stdout.write(`${JSON.stringify(fields)}\n`);
+
+/** The single final line of a login run; a cancel and the failure it causes must not both report. */
+export function emitDone(fields) {
+  if (machine.finished) return;
+  machine.finished = true;
+  emit({ done: true, ...(machine.cancelling ? { ok: false, error: 'cancelled' } : fields) });
+}
 
 /** a***@gmail.com — the app never needs the full address. */
 export function maskEmail(email) {
@@ -45,7 +52,8 @@ export function accountViews(configAccounts, liveStatus) {
 
 export function errorCode(err) {
   const text = String(err?.message ?? err);
-  if (err?.code === 'cancelled') return 'cancelled';
+  if (err?.code === 'cancelled' || machine.cancelling) return 'cancelled';
+  if (err?.code === 'name_taken') return 'name_taken';
   if (/timed out/i.test(text)) return 'login_timeout';
   if (/state mismatch/i.test(text)) return 'state_mismatch';
   if (/OAuth error/i.test(text)) return 'oauth_denied';
@@ -60,8 +68,9 @@ export function enableMachineLogin() {
   machine.json = true;
   console.log = (...parts) => console.error(...parts);
   const cancel = async () => {
+    machine.cancelling = true; // errors caused by killing the child are not login failures
     for (const cleanup of machine.cleanups.splice(0)) await Promise.resolve(cleanup()).catch(() => {});
-    emit({ done: true, ok: false, error: 'cancelled' });
+    emitDone({});
     process.exit(1);
   };
   process.once('SIGTERM', cancel);
