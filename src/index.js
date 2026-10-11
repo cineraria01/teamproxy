@@ -1360,7 +1360,9 @@ async function superviseServerCommand() {
       handleServerListenError(err, port);
     };
     listener.once('error', onListenError);
-    listener.listen(port, () => {
+    // proxy.host pins the bind address (app installs use 127.0.0.1); unset keeps all interfaces.
+    const host = typeof config?.proxy?.host === 'string' ? config.proxy.host.trim() : '';
+    listener.listen(...(host ? [port, host] : [port]), () => {
       listener.removeListener('error', onListenError);
       listener.on('error', err => {
         console.error(

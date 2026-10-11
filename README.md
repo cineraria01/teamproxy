@@ -53,7 +53,8 @@ Claude·Codex 쪽도 agy 설정을 거부한다.
 ## 빠른 시작
 
 설치 절차의 정본은 [`docs/install/INSTALL-ALL.md`](docs/install/INSTALL-ALL.md)다. 세 풀, 래퍼, 계정 로그인,
-운영 설정값, launchd, 상태줄까지 순서대로 들어 있다. 새 머신의 Claude Code나 Codex에게 이렇게 시키면 된다.
+운영 설정값, launchd, 상태줄까지 순서대로 들어 있다. 앱(셀비 등)이 동의를 받은 뒤 설치하는 비대화형 모드는
+[`docs/install/APP-INSTALL.md`](docs/install/APP-INSTALL.md)다. 새 머신의 Claude Code나 Codex에게 이렇게 시키면 된다.
 
 > https://raw.githubusercontent.com/cineraria01/teamproxy/main/docs/install/INSTALL-ALL.md 를 읽고 그 절차를 순서대로 수행해. 업스트림 저장소에서는 절대 설치하지 마.
 
@@ -350,6 +351,7 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 | 문서 | 내용 |
 |---|---|
 | [`docs/install/INSTALL-ALL.md`](docs/install/INSTALL-ALL.md) | 새 머신에 세 풀과 상태줄 전부 설치(정본) |
+| [`docs/install/APP-INSTALL.md`](docs/install/APP-INSTALL.md) | 앱용 비대화형 설치(`install-app.mjs --app --json`, Node만 필요), 묶음, `proxy.host` |
 | [`docs/install/HUD.md`](docs/install/HUD.md) | 하단 줄 상세, 에이전트용 `teamcodex run -- exec`, OmO 연결 |
 | [`docs/install/SETUP.md`](docs/install/SETUP.md) | Codex 프록시 준비, Linux systemd, macOS 자동 시작 |
 | [`statusline/README.md`](statusline/README.md) | Claude 상태줄과 계정 선택기 |
