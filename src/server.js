@@ -2005,7 +2005,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // auth401 = accounts that answered 401 after their refresh chance (cascade
         // guard input + per-request exclusion); authParked = what THIS request parked,
         // kept so a cascade can put it back.
-        const ctx = { account: null, status: null, model: null, provider, authRetried: new Set(), auth401: new Set(), authParked: [], authCascade: false, tried429: new Set(), tried5xx: new Set(), triedCapacity: new Set(), overloadRetries: 0, capacityWaits: 0, held: null, queueTimeoutMs, abortSignal: null, affinityKey: sessionAffinity ? (agySessionKey ? agyAffinityObject(agySessionKey) : req.socket) : null, preferredAccountUuid: recoveryAccountUuid, sawModelWeekly: false, byok: byokMatch != null, continuity, continuityDeadlineAt: null, failedFast: false, last429: null, modelFallbacks: config.modelFallbacks || null, fallbackQueue: undefined, streamRecovery, maxResponseBytes, reserveResponseBytes, releaseReservedResponseBytes, reserveAuxiliaryResponseBytes, releaseAuxiliaryResponseBytes, reserveLogResponseBytes, releaseLogResponseBytes, registerIdleLogReservation, upstreamResponseTimeoutMs, streamIdleTimeoutMs, streamTotalTimeoutMs, subscriptionRecheckIntervalMs, resetCredits: resetCreditController, resetCreditAttempts: 0, resetCreditRetried: new Set(), resetCreditBackstopYielded: false, agyExhausted };
+        const ctx = { account: null, status: null, model: null, provider, authRetried: new Set(), auth401: new Set(), authParked: [], authCascade: false, tried429: new Set(), tried5xx: new Set(), triedCapacity: new Set(), overloadRetries: 0, capacityWaits: 0, held: null, queueTimeoutMs, abortSignal: null, affinityKey: sessionAffinity ? (agySessionKey ? agyAffinityObject(agySessionKey) : req.socket) : null, preferredAccountUuid: recoveryAccountUuid, sawModelWeekly: false, byok: byokMatch != null, continuity, continuityDeadlineAt: null, failedFast: false, last429: null, modelFallbacks: config.modelFallbacks || null, fallbackQueue: undefined, streamRecovery, maxResponseBytes, reserveResponseBytes, releaseReservedResponseBytes, reserveAuxiliaryResponseBytes, releaseAuxiliaryResponseBytes, reserveLogResponseBytes, releaseLogResponseBytes, registerIdleLogReservation, upstreamResponseTimeoutMs, streamIdleTimeoutMs, streamTotalTimeoutMs, subscriptionRecheckIntervalMs, resetCredits: resetCreditController, resetCreditAttempts: 0, resetCreditRetried: new Set(), resetCreditBackstopYielded: false, agyExhausted, allowNoAccounts: config.proxy?.allowNoAccounts === true };
         try {
           if (isStatusRequest) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2748,7 +2748,7 @@ function codexRecoveryResponseHeaders(req, body, ctx, method, headers = {}) {
 
 async function forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir) {
   const maxRetries = accountManager.accounts.length;
-  if (maxRetries === 0) { // proxy.allowNoAccounts before the first login: say so instead of "0 accounts exhausted"
+  if (maxRetries === 0 && ctx.allowNoAccounts) { // proxy.allowNoAccounts before the first login: say so instead of "0 accounts exhausted"
     res.writeHead(503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       type: 'error',
