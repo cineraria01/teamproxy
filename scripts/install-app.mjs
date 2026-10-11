@@ -223,12 +223,14 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
   const configPath = L.config(pool);
   const existing = readJson(configPath, null);
   if (existing) {
-    if (existing.proxy?.host) {
+    // host pins loopback; allowNoAccounts keeps the server up (and launchd quiet) until the first login.
+    const added = ['host', 'allowNoAccounts'].filter(key => existing.proxy?.[key] === undefined);
+    if (!added.length) {
       step(`config:${pool}`, 'skip', `${configName}이 이미 있습니다`);
     } else {
-      existing.proxy = { ...existing.proxy, host: '127.0.0.1' };
+      existing.proxy = { allowNoAccounts: true, host: '127.0.0.1', ...existing.proxy };
       writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 0o600);
-      step(`config:${pool}`, 'ok', `${configName}에 proxy.host 127.0.0.1을 더했습니다`);
+      step(`config:${pool}`, 'ok', `${configName}에 proxy.${added.join('·proxy.')}를 더했습니다`);
     }
   } else {
     // createDefaultConfig keys its provider (and port) on the env at call time.
@@ -236,6 +238,7 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
     if (pool === 'claude') delete process.env.TEAMCLAUDE_PROVIDER; else process.env.TEAMCLAUDE_PROVIDER = pool;
     const config = createDefaultConfig();
     config.proxy.host = '127.0.0.1';
+    config.proxy.allowNoAccounts = true;
     if (envPort(pool)) config.proxy.port = Number(envPort(pool));
     writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 0o600);
     step(`config:${pool}`, 'ok', `${configName}을 만들었습니다`);

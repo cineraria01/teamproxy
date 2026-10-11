@@ -1396,7 +1396,9 @@ async function proxyWorkerCommand() {
   const logTo = argValue('--log-to');
   if (logTo) config.logDir = logTo;
 
-  if (config.accounts.length === 0) {
+  // proxy.allowNoAccounts (app installs): stay up with no accounts until the first login's SIGHUP adds one.
+  const allowNoAccounts = config.proxy?.allowNoAccounts === true;
+  if (config.accounts.length === 0 && !allowNoAccounts) {
     console.error('No accounts configured.\n');
     console.error('Add an account first:');
     if (codexMode) {
@@ -1414,7 +1416,7 @@ async function proxyWorkerCommand() {
   }
 
   const accounts = await resolveAccounts(config);
-  if (accounts.length === 0) {
+  if (accounts.length === 0 && !(allowNoAccounts && config.accounts.length === 0)) {
     console.error('No valid accounts after initialization');
     process.exit(1);
   }

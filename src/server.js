@@ -2748,6 +2748,14 @@ function codexRecoveryResponseHeaders(req, body, ctx, method, headers = {}) {
 
 async function forwardRequest(req, res, body, accountManager, upstream, retryCount, hooks, reqId, ctx, logDir) {
   const maxRetries = accountManager.accounts.length;
+  if (maxRetries === 0) { // proxy.allowNoAccounts before the first login: say so instead of "0 accounts exhausted"
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: '계정이 없습니다. 로그인하세요 (No accounts configured; log in first).' },
+    }));
+    return;
+  }
   // A recovery identity must not lock inference to rejected/exhausted quota.
   // Missing, disabled, or auth-failed identities still fail closed.
   const recoveryAccount = typeof ctx.preferredAccountUuid === 'string'

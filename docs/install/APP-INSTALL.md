@@ -13,16 +13,16 @@
   npm은 시스템 것이 아니라 `--node`와 같은 배포본의 `lib/node_modules/npm/bin/npm-cli.js`(node가 심볼릭 링크면 실제 경로 쪽도 찾는다)를 그 node로 실행한다.
   브랜치 tip을 받지 않는다. 런타임 의존성은 0이다.
 - `~/.local/bin/{teamclaude,teamcodex,teamagy}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄(tmux)·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
-- 설정 `~/.config/{teamclaude,teamcodex,teamagy}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`로 적는다.
-  이미 있으면 계정·키를 그대로 두고 `proxy.host`가 비어 있을 때만 `127.0.0.1`을 더한다.
+- 설정 `~/.config/{teamclaude,teamcodex,teamagy}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`, `proxy.allowNoAccounts`를 `true`로 적는다.
+  이미 있으면 계정·키를 그대로 두고 `proxy.host`·`proxy.allowNoAccounts`가 비어 있을 때만 각각 `127.0.0.1`·`true`를 더한다.
 - launchd 사용자 에이전트 `kr.selvi.teamproxy.<풀>`: `<래퍼> server`, `RunAtLoad`·`KeepAlive`·`ThrottleInterval 10`,
   로그 `~/Library/Logs/teamproxy/<풀>.log`. 설치 기록은 `~/.local/share/teamproxy-app/manifest.json`.
 
-- `--with-codex-cli <버전>`이면 같은 node·npm으로 `@openai/codex@<버전>`을 `~/.local/share/teamproxy-app/codex-cli`(npm prefix)에 설치하고, teamcodex 래퍼가 `TEAMCODEX_CODEX_BIN=<그 폴더>/bin/codex`를 쓴다(사용자가 이미 `TEAMCODEX_CODEX_BIN`을 정해 두면 그 값이 우선). 이 CLI의 `#!/usr/bin/env node`가 같은 node를 찾도록 래퍼 PATH가 node 폴더로 시작한다.
+- `--with-codex-cli <버전>`이면(실제 npm으로 0.162.1을 `--ignore-scripts`로 설치해 플랫폼 선택 의존성 `@openai/codex-darwin-arm64`가 깔리고 `codex --version`이 도는 것을 확인했다) 같은 node·npm으로 `@openai/codex@<버전>`을 `~/.local/share/teamproxy-app/codex-cli`(npm prefix)에 설치하고, teamcodex 래퍼가 `TEAMCODEX_CODEX_BIN=<그 폴더>/bin/codex`를 쓴다(사용자가 이미 `TEAMCODEX_CODEX_BIN`을 정해 두면 그 값이 우선). 이 CLI의 `#!/usr/bin/env node`가 같은 node를 찾도록 래퍼 PATH가 node 폴더로 시작한다.
 
 하지 않는 일: 셸 rc, `~/.claude/settings.json`, 상태줄, tmux 하단 줄, 계정 로그인, sudo.
 
-계정이 하나도 없으면 서버는 "No accounts configured"로 종료하고 launchd가 10초마다 다시 띄운다. 첫 로그인이 끝나면 곧 올라온다.
+설정에 `proxy.allowNoAccounts: true`를 적으므로 계정이 0개여도 서버가 떠 있다(launchd 재기동 없음). `/teamclaude/status`는 200과 `totalCount: 0`, API 요청은 503 "계정이 없습니다. 로그인하세요"를 준다. `<풀> login`이 끝나면 실행 중인 서버에 SIGHUP을 보내 재시작 없이 새 계정을 쓴다. 플래그가 없는 설정은 지금처럼 "No accounts configured"로 종료한다.
 
 ## 명령
 

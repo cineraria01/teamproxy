@@ -112,6 +112,7 @@ test('--app installs wrappers, config, launchd agents and nothing else', () => {
     assert.ok(text.includes(`'${t.node}'`), 'wrapper uses the given node, not PATH');
     const config = JSON.parse(readFileSync(join(t.home, '.config', `${cmd}.json`), 'utf8'));
     assert.equal(config.proxy.host, '127.0.0.1');
+    assert.equal(config.proxy.allowNoAccounts, true);
     assert.equal(config.proxy.port, t.ports[pool]);
     assert.ok(config.proxy.apiKey);
     assert.equal(config.provider, pool === 'claude' ? 'anthropic' : pool);
