@@ -2,7 +2,7 @@
 // account views for `<pool> accounts|status --json` and the line-JSON login events.
 import { createInterface } from 'node:readline';
 
-export const machine = { json: false, cancelling: false, finished: false, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [] };
+export const machine = { json: false, cancelling: false, finished: false, saved: null, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [] };
 
 export const emit = fields => process.stdout.write(`${JSON.stringify(fields)}\n`);
 
@@ -10,7 +10,9 @@ export const emit = fields => process.stdout.write(`${JSON.stringify(fields)}\n`
 export function emitDone(fields) {
   if (machine.finished) return;
   machine.finished = true;
-  emit({ done: true, ...(machine.cancelling ? { ok: false, error: 'cancelled' } : fields) });
+  // Cancelled after the account was already saved: the login did succeed, so say so.
+  const cancelled = machine.cancelling && !machine.saved;
+  emit({ done: true, ...(cancelled ? { ok: false, error: 'cancelled' } : machine.saved ? { ok: true, account: machine.saved } : fields) });
 }
 
 /** a***@gmail.com — the app never needs the full address. */
@@ -52,7 +54,7 @@ export function accountViews(configAccounts, liveStatus) {
 
 export function errorCode(err) {
   const text = String(err?.message ?? err);
-  if (err?.code === 'cancelled' || machine.cancelling) return 'cancelled';
+  if (err?.code === 'cancelled' || (machine.cancelling && !machine.saved)) return 'cancelled';
   if (err?.code === 'name_taken') return 'name_taken';
   if (/timed out/i.test(text)) return 'login_timeout';
   if (/state mismatch/i.test(text)) return 'state_mismatch';
@@ -71,7 +73,7 @@ export function enableMachineLogin() {
     machine.cancelling = true; // errors caused by killing the child are not login failures
     for (const cleanup of machine.cleanups.splice(0)) await Promise.resolve(cleanup()).catch(() => {});
     emitDone({});
-    process.exit(1);
+    process.exit(machine.saved ? 0 : 1);
   };
   process.once('SIGTERM', cancel);
   process.once('SIGINT', cancel);

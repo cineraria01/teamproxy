@@ -38,7 +38,7 @@ import {
   isCodexResponsesPath,
 } from './codex-recovery.js';
 import { TUI, applyTuiAccountMutation } from './tui.js';
-import { accountViews, emit, emitDone, enableMachineLogin, errorCode } from './app-json.js';
+import { accountViews, emit, emitDone, enableMachineLogin, errorCode, machine } from './app-json.js';
 import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
 import { runClaudeWithRecovery } from './claude-recovery.js';
@@ -2603,6 +2603,7 @@ async function loginMachineCommand(config) {
       const creds = await loginOAuth();
       account = await upsertOAuthAccount(argValue('--name'), creds, 'login');
     }
+    machine.saved = account;
     emitDone({ ok: true, account });
   } catch (err) {
     emitDone({ ok: false, error: errorCode(err), message: err.message });
@@ -3832,7 +3833,17 @@ Config: ${getConfigPath()}
 
 // ── shared account upsert ────────────────────────────────────
 
+/** login --json with an explicit --name: a name that appeared since the pre-check (a concurrent login) must not be overwritten. */
+function assertNameFree(cfg, requested) {
+  if (machine.json && requested && cfg.accounts.some(a => a.name === requested)) {
+    const error = new Error(`Account "${requested}" already exists`);
+    error.code = 'name_taken';
+    throw error;
+  }
+}
+
 async function upsertOAuthAccount(name, creds, source = 'unknown') {
+  const requested = name;
   // Fetch profile to auto-name and deduplicate by account UUID
   const profile = await fetchProfile(creds.accessToken);
   const profileOk = profile && !profile.error;
@@ -3847,6 +3858,7 @@ async function upsertOAuthAccount(name, creds, source = 'unknown') {
   }
   let action = 'Added';
   const savedConfig = await atomicConfigUpdate(cfg => {
+    assertNameFree(cfg, requested);
     if (!name) {
       // First FREE account-N (not `count + 1`, which collides after a delete)
       // against the fresh locked config, not the pre-login snapshot.
@@ -4084,6 +4096,7 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
   let action = 'Added';
   const savedConfig = await atomicConfigUpdate(cfg => {
     assertAgyConfig(cfg);
+    assertNameFree(cfg, explicitName);
     let idx = cfg.accounts.findIndex(a => a.accountUuid === creds.accountUuid);
     if (idx < 0 && name) idx = cfg.accounts.findIndex(a => a.name === name);
     const previous = idx >= 0 ? cfg.accounts[idx] : null;
@@ -4129,10 +4142,12 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
 }
 
 async function upsertCodexAccount(name, creds, source = 'unknown') {
+  const requested = name;
   if (!name) name = creds.email;
   let action = 'Added';
   let replaced = null; // [local patch: revoke-on-replace]
   const savedConfig = await atomicConfigUpdate(cfg => {
+    assertNameFree(cfg, requested);
     if (!name) {
       let n = 1;
       do { name = `codex-account-${n++}`; } while (cfg.accounts.some(a => a.name === name));

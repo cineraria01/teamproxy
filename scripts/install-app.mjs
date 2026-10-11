@@ -311,6 +311,8 @@ async function runInstall(L, pools, nodeArg, codexCliVersion) {
     for (const pool of pools) {
       const running = await waitRunning(poolPort(L, pool));
       done.pools[pool] = { ...poolReport(L, pool, true), running, config: manifest.pools[pool].config };
+      // A pre-existing config is never edited, so without proxy.host the server listens on all interfaces.
+      if (done.pools[pool].config === 'existing_kept' && !readJson(L.config(pool), {})?.proxy?.host) done.pools[pool].warning = 'host_unset';
       step(`health:${pool}`, running ? 'ok' : 'skip',
         running ? '서버가 응답합니다' : '서버가 아직 응답하지 않습니다(계정이 없으면 정상, 로그: Library/Logs/teamproxy)');
     }

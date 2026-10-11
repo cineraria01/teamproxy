@@ -15,6 +15,7 @@ const FILES = ['package.json', 'LICENSE', 'README.md', 'config.example.json', 'c
 function walk(dir, keep) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const path = join(dir, entry.name);
+    if (entry.name.startsWith('.')) return []; // .omc, .DS_Store, ...
     if (entry.isDirectory()) return entry.name === '__pycache__' ? [] : walk(path, keep);
     return entry.isFile() && keep(entry.name) ? [path] : [];
   });
@@ -38,7 +39,7 @@ function members() {
     ? listed.filter(wanted)
     : [...walk(join(ROOT, 'src'), () => true), ...walk(join(ROOT, 'scripts'), name => /^install.*\.(py|mjs)$/.test(name))]
       .map(path => relative(ROOT, path).split(sep).join('/'));
-  return [...FILES, ...found].sort();
+  return [...FILES, ...found.filter(name => !name.split('/').some(part => part.startsWith('.')))].sort();
 }
 
 const octal = (value, length) => `${value.toString(8).padStart(length - 1, '0')}\0`;

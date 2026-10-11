@@ -304,3 +304,27 @@ test('the bundle builder is deterministic', () => {
   assert.equal(sums[0], sums[1]);
   assert.match(sums[0], /^[0-9a-f]{64}$/);
 });
+
+test('the bundle holds no dot-path entries (.omc, .DS_Store) even when such files sit in src/', () => {
+  const stray = join(ROOT, 'src/.DS_Store-test');
+  writeFileSync(stray, 'x');
+  try {
+    const result = spawnSync(process.execPath, [BUILD, join(t.dir, 'dots')], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const names = spawnSync('tar', ['tzf', join(t.dir, 'dots/teamproxy-app-' + JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version + '.tar.gz')], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean);
+    assert.ok(names.length > 20);
+    assert.deepEqual(names.filter(n => n.split('/').some(part => part.startsWith('.'))), []);
+  } finally {
+    rmSync(stray, { force: true });
+  }
+  const tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' }).stdout.split('\n');
+  assert.deepEqual(tracked.filter(n => n.split('/').some(part => part === '.omc')), []);
+});
+
+test('a pre-existing config without proxy.host is kept and flagged host_unset', () => {
+  mkdirSync(join(t.home, '.config'), { recursive: true });
+  writeFileSync(join(t.home, '.config/teamcodex.json'), JSON.stringify({ proxy: { port: t.ports.codex, apiKey: 'k' }, accounts: [] }));
+  const { done } = app(['--app', '--pools', 'codex']);
+  assert.equal(done.pools.codex.warning, 'host_unset');
+  assert.equal(app(['--app', '--pools', 'claude']).done.pools.claude.warning, undefined);
+});

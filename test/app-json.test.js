@@ -33,8 +33,16 @@ beforeEach(async () => {
   // The token endpoint is faked; every other fetch (e.g. to the local server) passes through.
   writeFileSync(join(dir, 'mock-fetch.mjs'), `
 const real = globalThis.fetch;
-globalThis.fetch = (url, init) => {
+globalThis.fetch = async (url, init) => {
   const u = String(url);
+  if (u.includes('/v1/oauth/token')) {
+    if (process.env.RACE_NAME) { // a concurrent login saved this name between the pre-check and our save
+      const fs = await import('node:fs');
+      const c = JSON.parse(fs.readFileSync(process.env.TEAMCLAUDE_CONFIG, 'utf8'));
+      c.accounts.push({ name: process.env.RACE_NAME, type: 'apikey', apiKey: 'other' });
+      fs.writeFileSync(process.env.TEAMCLAUDE_CONFIG, JSON.stringify(c));
+    }
+  }
   if (u.includes('/v1/oauth/token')) return Promise.resolve(Response.json({ access_token: 'new-at', refresh_token: 'new-rt', expires_in: 3600 }));
   if (u.includes('/oauth/profile')) return Promise.resolve(Response.json({ error: 'no' }, { status: 500 }));
   return real(url, init);
@@ -271,4 +279,14 @@ test('cancelling a codex login reports cancelled every time (20 runs)', async ()
     assert.equal(code, 1);
     assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }], `run ${i}`);
   }
+});
+
+test('a name that appears between the pre-check and the save is not overwritten (name_taken)', async () => {
+  const run = login(['login', '--name', 'raced', '--json'], { RACE_NAME: 'raced' });
+  const auth = await run.next(e => e.event === 'auth_url');
+  await callback(auth.url);
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.equal(run.events.at(-1).error, 'name_taken');
+  assert.equal(readConfig().accounts.find(a => a.name === 'raced').apiKey, 'other');
 });

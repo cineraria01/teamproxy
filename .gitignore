@@ -15,3 +15,7 @@ review-snapshots/
 __pycache__/
 *.pyc
 dist/
+
+# Tool/session state
+.omc/
+.DS_Store
