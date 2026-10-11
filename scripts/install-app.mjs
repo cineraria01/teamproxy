@@ -109,12 +109,13 @@ const isOurs = (L, pool) => pool in readManifest(L).pools && existsSync(L.plist(
 function wrapperText(L, pool, node, codexBin) {
   const { cmd, config, entry, env } = POOLS[pool];
   const [script, ...rest] = entry;
+  // LC_ALL=C: the server (launchd) and the CLI must print process start times alike, or live reload refuses (lifecycle identity unverified).
   // Codex login needs the Codex CLI; use the app-installed one when there is one.
   const codex = pool === 'codex' && codexBin ? `TEAMCODEX_CODEX_BIN="\${TEAMCODEX_CODEX_BIN:-${codexBin}}" ` : '';
   const path = `${dirname(node)}:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH`;
   return `#!/bin/sh\n${MARKER} (${cmd}, pool ${pool}); removed by install-app.mjs --uninstall\n`
     + `PATH="${path}"\n`
-    + `exec env ${env}TEAMCLAUDE_CONFIG="$HOME/.config/${config}" ${codex}`
+    + `exec env ${env}LC_ALL=C TEAMCLAUDE_CONFIG="$HOME/.config/${config}" ${codex}`
     + `${[shq(node), shq(join(L.pkg(pool), script)), ...rest].join(' ')} "$@"\n`;
 }
 

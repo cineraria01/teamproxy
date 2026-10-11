@@ -83,6 +83,44 @@
 `--purge`는 설정과 `.server.json`·`.quota.json`, 로그 폴더까지 지운다(로그인한 계정을 잃는다).
 설치기가 만들지 않은 파일은 지우지 않는다.
 
+## 앱이 쓰는 관리 명령 (`--json`)
+
+설치된 래퍼(`~/.local/bin/team<풀>`)에 `--json`을 주면 표준 출력에 **JSON 객체 하나**만 쓴다(사람용 문구는 표준 오류). 토큰·refresh 값·이메일 원문은 없다(이메일은 `a***@gmail.com`). 실패는 `{"ok":false,"error":"<코드>","message":"…"}`와 종료 코드 1.
+래퍼가 `LC_ALL=C`를 걸어 launchd 서버와 CLI의 프로세스 시각 표기가 같아야 라이브 반영이 된다(다르면 `restart_required`).
+
+| 명령 | 출력 |
+|---|---|
+| `accounts --json` | `{"ok":true,"running":true,"accounts":[…]}` |
+| `status --json` | `{"ok":true,"running":true,"port":3457,"pid":123,"currentAccount":"codex-1","usableCount":1,"totalCount":2,"switchThreshold":0.98,"accounts":[…]}` (서버가 없어도 `running:false`로 ok) |
+| `enable <이름> --json`, `disable …` | `{"ok":true,"account":"codex-1","enabled":false,"applied":"live"}` |
+| `priority <이름> <숫자\|auto> --json` | `{"ok":true,"account":"codex-1","priority":5,"applied":"live"}` (`auto`는 `priority:null`) |
+| `remove <이름> --json` | `{"ok":true,"account":"codex-1","applied":"live"}` |
+| `reload --json` | `{"ok":true,"measured":2,"targets":2,"total":2}` (서버가 없으면 `not_running`, 트래픽이 아직 없으면 `reload_failed`) |
+
+`applied`: `live`(실행 중 서버에 SIGHUP으로 반영) · `config_only`(서버가 없어 설정만 바꿈) · `restart_required`(서버가 라이브 반영을 못 함).
+계정 항목: `name`, `type`(`oauth`|`api`), `provider`, `plan`, `email`(가림), `enabled`, `usable`(서버가 없으면 `null`), `priority`, `fiveHour`/`sevenDay`(`{"usedPct":12.3,"resetsAt":"ISO"}`, 서버가 없으면 `null`), `rateLimitedUntil`, `error`(짧은 코드: `subscription-disabled`·`auth-revoked`·`refresh-failed`·`auth-rejected`). agy는 `claudeGpt`(Claude/GPT 그룹 5시간·주간)도 준다.
+오류 코드: `account_not_found`·`usage`·`not_running`·`reload_unsupported`·`reload_failed`.
+
+## 앱용 로그인 (`login --name <이름> --json`)
+
+터미널 없이 앱이 브라우저를 열고 결과를 기다리는 모드다. 표준 출력은 줄마다 JSON이다.
+
+```json
+{"event":"auth_url","url":"https://claude.ai/oauth/authorize?…"}
+{"event":"waiting"}
+{"event":"need_code"}
+{"done":true,"ok":true,"account":"claude-2"}
+{"done":true,"ok":false,"error":"login_timeout","message":"Login timed out after 10 minutes"}
+```
+
+- `auth_url`: 앱이 이 주소를 브라우저로 연다(claude·agy는 CLI가 직접 열지 않는다). 콜백은 CLI가 띄운 루프백 서버가 받는다.
+  - **teamcodex**는 공식 `codex login`을 감싸 그 출력의 URL을 옮긴다. macOS에서 Codex CLI는 브라우저를 스스로 연다(막을 수 없음). 그래서 이벤트에 `"browser_opened":true`가 붙고 앱은 다시 열지 않는다.
+  - `--device-auth`를 주면 `{"event":"auth_url","url":"…","user_code":"ABCD-12345","browser_opened":false}`로 코드를 함께 준다(앱이 코드를 보여 주고 URL을 연다).
+- `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.
+- 끝 줄 `done`. 오류 코드: `cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
+- SIGTERM/SIGINT: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`.
+- 로그인이 끝나면 실행 중인 서버에 SIGHUP을 보내 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다).
+
 ## 묶음 만들기
 
 ```sh

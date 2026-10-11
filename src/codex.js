@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CODEX_ACTOR_AUTHORIZATION_HEADER } from './codex-recovery.js';
+import { announceAuthUrl, machine } from './app-json.js';
 
 const CODEX_REFRESH_ENDPOINT = 'https://auth.openai.com/oauth/token';
 const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -214,6 +215,7 @@ export async function loginCodexCredentials({
   const loginArgs = ['login', '-c', 'cli_auth_credentials_store="file"'];
   if (deviceAuth) loginArgs.push('--device-auth');
 
+  if (machine.json) return loginCodexMachine({ codexBin, loginArgs, codexHome, deviceAuth, env });
   try {
     const result = run(codexBin, loginArgs, {
       stdio: 'inherit',
@@ -233,6 +235,50 @@ export async function loginCodexCredentials({
     }
     return await importCodexCredentials(join(codexHome, 'auth.json'));
   } finally {
+    await rm(codexHome, { recursive: true, force: true });
+  }
+}
+
+// App mode (`login --json`): the official `codex login` prints its authorize URL; relay it as an event.
+// On macOS the Codex CLI opens the browser itself (not suppressible), so browser_opened tells the app not to.
+async function loginCodexMachine({ codexBin, loginArgs, codexHome, deviceAuth, env }) {
+  const child = spawn(codexBin, loginArgs, { env: { ...env, CODEX_HOME: codexHome }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const cleanup = async () => {
+    child.kill('SIGTERM');
+    await rm(codexHome, { recursive: true, force: true });
+  };
+  machine.cleanups.push(cleanup);
+  let announced = false;
+  let text = '';
+  const onData = chunk => {
+    text += chunk;
+    const url = text.match(/https:\/\/\S+/)?.[0];
+    if (announced || !url) return;
+    const userCode = deviceAuth ? text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4,}\b/)?.[0] : null;
+    if (deviceAuth && !userCode) return; // the code is printed after the URL
+    announced = true;
+    announceAuthUrl(url, deviceAuth
+      ? { user_code: userCode, browser_opened: false }
+      : { browser_opened: process.platform === 'darwin' });
+  };
+  child.stdout.on('data', onData);
+  child.stderr.on('data', onData);
+  try {
+    const status = await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    if (status !== 0) {
+      const error = new Error(`Codex login exited with status ${status}`);
+      error.exitCode = status;
+      throw error;
+    }
+    return await importCodexCredentials(join(codexHome, 'auth.json'));
+  } catch (err) {
+    if (err.code === 'ENOENT') throw new Error(codexCliNotFoundMessage(codexBin, env));
+    throw err;
+  } finally {
+    machine.cleanups = machine.cleanups.filter(fn => fn !== cleanup);
     await rm(codexHome, { recursive: true, force: true });
   }
 }

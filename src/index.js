@@ -38,6 +38,7 @@ import {
   isCodexResponsesPath,
 } from './codex-recovery.js';
 import { TUI, applyTuiAccountMutation } from './tui.js';
+import { accountViews, emit, enableMachineLogin, errorCode } from './app-json.js';
 import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
 import { runClaudeWithRecovery } from './claude-recovery.js';
@@ -185,6 +186,8 @@ if (cliProvider !== 'anthropic') {
   process.env.TEAMCLAUDE_PROVIDER = cliProvider;
 }
 const command = args[0];
+// Commands that take --json and print one machine-readable object (see machineCommand).
+const MACHINE_COMMANDS = new Set(['accounts', 'status', 'enable', 'disable', 'priority', 'remove', 'reload']);
 // agy mode = the `agy` prefix (which sets the env above) or an inherited
 // TEAMCLAUDE_PROVIDER=agy (the supervised worker, a wrapper).
 const AGY_MODE = process.env.TEAMCLAUDE_PROVIDER === 'agy';
@@ -220,6 +223,11 @@ if (command !== 'help' && command !== '--help' && command !== '-h') {
         + 'Run it with the agy prefix: teamagy …, or node src/index.js agy ….');
     process.exit(1);
   }
+}
+
+if (args.includes('--json') && MACHINE_COMMANDS.has(command)) {
+  await machineCommand();
+  process.exit(0);
 }
 
 switch (command) {
@@ -2252,6 +2260,10 @@ async function importCommand() {
 
 async function loginCommand() {
   const config = await loadOrCreateConfig();
+  if (args.includes('--json')) {
+    await loginMachineCommand(config);
+    return;
+  }
   if (isAgyMode(config)) {
     if (args.includes('--api')) {
       console.error('The Antigravity pool supports Google OAuth accounts only.');
@@ -2464,6 +2476,131 @@ async function codexSubscriptionCommand() {
     process.exit(1);
   }
 }
+// ── machine-readable commands (docs/install/APP-INSTALL.md) ──
+
+function machineFail(error, message) {
+  emit({ ok: false, error, message });
+  process.exit(1);
+}
+
+/** The running server's credential-free status (with account names), or null. */
+async function machineLiveStatus(config) {
+  const running = await findRunningServer(config).catch(() => null);
+  if (!running) return { running: null, data: null };
+  try {
+    const res = await fetch(`http://127.0.0.1:${running.port}/teamclaude/status`, {
+      headers: { 'x-api-key': config.proxy.apiKey, 'x-teamcodex-status-identity': '1' },
+      signal: AbortSignal.timeout(5000),
+    });
+    return { running, data: await res.json() };
+  } catch {
+    return { running, data: null };
+  }
+}
+
+/** applied: live (SIGHUP delivered) | config_only (no server) | restart_required (server cannot live-reload). */
+async function machineApplied(config) {
+  if (!await findRunningServer(config).catch(() => null)) return 'config_only';
+  return (await noteRunningServerReload(config, { quiet: true })) ? 'live' : 'restart_required';
+}
+
+async function machineCommand() {
+  console.log = (...parts) => console.error(...parts); // stdout carries exactly one JSON object
+  const positional = args.slice(1).filter(a => a !== '--json');
+  const [name, rawPriority] = positional;
+  const config = await loadOrCreateConfig();
+
+  if (command === 'accounts' || command === 'status') {
+    const { running, data } = await machineLiveStatus(config);
+    const accounts = accountViews(config.accounts, data);
+    if (command === 'accounts') return emit({ ok: true, running: Boolean(running), accounts });
+    return emit({
+      ok: true,
+      running: Boolean(running),
+      port: running?.port ?? config.proxy.port,
+      pid: running?.pid ?? null,
+      currentAccount: data?.currentAccount ?? null,
+      usableCount: data?.usableCount ?? 0,
+      totalCount: data?.totalCount ?? config.accounts.length,
+      switchThreshold: data?.switchThreshold ?? config.switchThreshold ?? null,
+      accounts,
+    });
+  }
+
+  if (command === 'reload') {
+    const running = await findRunningServer(config).catch(() => null);
+    if (!running) machineFail('not_running', 'The server is not running.');
+    try {
+      const res = await fetch(`http://127.0.0.1:${running.port}/teamclaude/reload`, {
+        method: 'POST',
+        headers: config.proxy.apiKey ? { 'x-api-key': config.proxy.apiKey } : undefined,
+        signal: AbortSignal.timeout(60_000),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.status === 404) machineFail('reload_unsupported', 'The running server does not support reload.');
+      if (!res.ok || data?.targets == null) machineFail('reload_failed', data?.error?.message || `HTTP ${res.status}`);
+      return emit({ ok: true, measured: data.measured, targets: data.targets, total: data.total });
+    } catch (err) {
+      return machineFail('reload_failed', err.message);
+    }
+  }
+
+  if (!name) machineFail('usage', `Usage: ${cliName()} ${command} <account-name>${command === 'priority' ? ' <number|auto>' : ''} --json`);
+  let found = false;
+  let result = {};
+  let removed = null;
+  let update;
+  if (command === 'enable' || command === 'disable') {
+    const enabled = command === 'enable';
+    update = acct => { acct.enabled = enabled; result = { enabled }; };
+  } else if (command === 'priority') {
+    const clearing = ['auto', 'clear', 'none', 'null'].includes(rawPriority);
+    const n = Math.floor(Number(rawPriority));
+    if (rawPriority === undefined || (!clearing && !Number.isFinite(n))) machineFail('usage', 'priority needs a number or "auto"');
+    update = acct => { if (clearing) delete acct.priority; else acct.priority = n; result = { priority: clearing ? null : n }; };
+  }
+  const saved = await atomicConfigUpdate(cfg => {
+    const idx = cfg.accounts.findIndex(a => a.name === name);
+    if (idx < 0) return;
+    found = true;
+    if (command === 'remove') {
+      removed = { ...cfg.accounts[idx], provider: cfg.accounts[idx].provider || cfg.provider };
+      cfg.accounts.splice(idx, 1);
+    } else {
+      update(cfg.accounts[idx]);
+    }
+  });
+  if (!found) machineFail('account_not_found', `Account "${name}" not found`);
+  const applied = await machineApplied(saved);
+  if (removed) await revokeReplacedCodexToken(removed, null, name);
+  return emit({ ok: true, account: name, ...result, applied });
+}
+
+/** `login --name X --json`: line-JSON events (auth_url, waiting, need_code) and a final {done} line. */
+async function loginMachineCommand(config) {
+  enableMachineLogin();
+  try {
+    let account;
+    if (isAgyMode(config)) {
+      const { clientId, clientSecret } = await ensureAgyOAuthClient(config);
+      const creds = await loginAgyCredentials({
+        clientId, clientSecret, authUrl: config.agyAuthUrl || undefined, tokenUrl: config.agyTokenUrl || undefined,
+      });
+      account = await upsertAgyAccount(config, argValue('--name'), creds, 'login');
+    } else if (isCodexMode(config) || (!config.provider && cliProvider === 'codex')) {
+      const creds = await loginCodexCredentials({ deviceAuth: args.includes('--device-auth') });
+      account = await upsertCodexAccount(argValue('--name'), creds, 'login');
+    } else {
+      const creds = await loginOAuth();
+      account = await upsertOAuthAccount(argValue('--name'), creds, 'login');
+    }
+    emit({ done: true, ok: true, account });
+  } catch (err) {
+    emit({ done: true, ok: false, error: errorCode(err), message: err.message });
+    process.exit(1);
+  }
+}
+
 // ── env ─────────────────────────────────────────────────────
 
 async function envCommand() {
@@ -3435,7 +3572,9 @@ async function removeCommand() {
 // ── enable / disable / priority ─────────────────────────────
 
 /** Ask the supervised worker to live-sync account changes without a restart. */
-async function noteRunningServerReload(config) {
+async function noteRunningServerReload(config, { quiet = false } = {}) {
+  const say = quiet ? () => {} : console.log;
+  const warn = quiet ? () => {} : console.error;
   try {
     const running = await findRunningServer(config);
     if (!running) return false;
@@ -3445,16 +3584,16 @@ async function noteRunningServerReload(config) {
       ? state.workerPid
       : null;
     if (!workerPid) {
-      console.error('The running server does not support account-only live reload.');
-      console.error(`Apply the change with: ${cliName(config)} restart`);
+      warn('The running server does not support account-only live reload.');
+      warn(`Apply the change with: ${cliName(config)} restart`);
       return false;
     }
     process.kill(workerPid, 'SIGHUP');
-    console.log('Applied to the running server without restarting active connections.');
+    say('Applied to the running server without restarting active connections.');
     return true;
   } catch (err) {
-    console.error(`Could not reload the running server automatically: ${err.message}`);
-    console.error(`Apply the change with: ${cliName(config)} restart`);
+    warn(`Could not reload the running server automatically: ${err.message}`);
+    warn(`Apply the change with: ${cliName(config)} restart`);
     return false;
   }
 }
@@ -3735,6 +3874,7 @@ async function upsertOAuthAccount(name, creds, source = 'unknown') {
   console.log(`${action} account "${name}"`);
   console.log(`Saved to ${getConfigPath()}`);
   await noteRunningServerReload(savedConfig);
+  return name;
 }
 
 /**
@@ -3976,6 +4116,7 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
   console.log(`${action} Antigravity account "${name}"${assist?.tierId ? ` (${assist.tierId})` : ''}`);
   console.log(`Saved to ${getConfigPath()}`);
   await noteRunningServerReload(savedConfig);
+  return name;
 }
 
 async function upsertCodexAccount(name, creds, source = 'unknown') {
@@ -4026,6 +4167,7 @@ async function upsertCodexAccount(name, creds, source = 'unknown') {
   console.log(`Saved to ${getConfigPath()}`);
   await noteRunningServerReload(savedConfig);
   await revokeReplacedCodexToken(replaced, creds, name);
+  return name;
 }
 
 // ── config sync helpers ─────────────────────────────────────

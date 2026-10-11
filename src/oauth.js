@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { randomBytes, createHash } from 'node:crypto';
 import { exec } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { announceAuthUrl, machine, machineCodeRace } from './app-json.js';
 import http from 'node:http';
 
 /**
@@ -248,6 +249,7 @@ export async function loginOAuth() {
  * The user can paste the full callback URL or just the authorization code.
  */
 export function raceWithStdinCode(callbackPromise, expectedState) {
+  if (machine.json) return machineCodeRace(callbackPromise, expectedState);
   if (!process.stdin.isTTY) return callbackPromise;
 
   return new Promise((resolve, reject) => {
@@ -357,6 +359,7 @@ export function startCallbackServer(expectedState, {
 }
 
 export function openBrowser(url) {
+  if (machine.json) { announceAuthUrl(url); return; } // the app opens it
   const platform = process.platform;
   const cmd = platform === 'darwin' ? 'open'
     : platform === 'win32' ? 'start'
