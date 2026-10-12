@@ -26,6 +26,34 @@ export function assertSafeProxyConfig(config) {
   }
 }
 
+// Windows: an antivirus scanner or the search indexer briefly holding the target makes rename
+// fail with EPERM/EBUSY. Retry with a growing pause (about 1.4 s in all) before giving up.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY']);
+const RENAME_ATTEMPTS = 8;
+const renameDelayMs = attempt => 50 * attempt;
+
+export async function renameWithRetry(from, to, renameFn = rename) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await renameFn(from, to);
+    } catch (err) {
+      if (attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      await new Promise(done => setTimeout(done, renameDelayMs(attempt)));
+    }
+  }
+}
+
+export function renameWithRetrySync(from, to, renameFn = renameSync) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return renameFn(from, to);
+    } catch (err) {
+      if (attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, renameDelayMs(attempt));
+    }
+  }
+}
+
 async function syncParentDirectory(path) {
   if (process.platform === 'win32') return;
   const directory = await open(dirname(path), 'r');
@@ -52,7 +80,7 @@ async function writeFileAtomic(path, data, mode = 0o600) {
     } finally {
       await fh.close();
     }
-    await rename(tmp, path);
+    await renameWithRetry(tmp, path);
     await syncParentDirectory(path);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
@@ -246,7 +274,7 @@ function writeFileAtomicSync(path, data, mode = 0o600) {
     } finally {
       closeSync(fd);
     }
-    renameSync(tmp, path);
+    renameWithRetrySync(tmp, path);
     syncParentDirectorySync(path);
   } catch (err) {
     try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }

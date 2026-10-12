@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import { CODEX_ACTOR_AUTHORIZATION_HEADER } from './codex-recovery.js';
 import { announceAuthUrl, machine } from './app-json.js';
 
@@ -182,6 +182,7 @@ export function resolveCodexCliBin({
   execPath = process.execPath,
   exists = existsSync,
   platform = process.platform,
+  arch = process.arch,
 } = {}) {
   // A bare PATH lookup of `codex` can be shadowed by a shell wrapper/symlink
   // (e.g. an agent router that ships sessions to a remote host) — that breaks
@@ -189,7 +190,13 @@ export function resolveCodexCliBin({
   // (2026-08-04 incident). Prefer the CLI co-installed with the running Node;
   // TEAMCODEX_CODEX_BIN stays as the explicit escape hatch in both directions.
   if (env.TEAMCODEX_CODEX_BIN) return env.TEAMCODEX_CODEX_BIN;
-  if (platform !== 'win32') {
+  if (platform === 'win32') {
+    // npm's codex.cmd shim can't be spawned without a shell (CVE-2024-27980); run the native
+    // binary @openai/codex ships. A global npm install on Windows puts node_modules beside node.exe.
+    const triple = arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+    const exe = win32.join(win32.dirname(execPath), 'node_modules', '@openai', 'codex', 'vendor', triple, 'codex', 'codex.exe');
+    if (exists(exe)) return exe;
+  } else {
     // win32: the extension-less `codex` next to node.exe is npm's POSIX shim,
     // which CreateProcess can't run — the bare lookup resolving codex.exe wins.
     const sibling = join(dirname(execPath), 'codex');

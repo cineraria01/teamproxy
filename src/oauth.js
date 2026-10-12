@@ -293,11 +293,11 @@ export function raceWithStdinCode(callbackPromise, expectedState) {
   });
 }
 
-// `host` binds the listener (default: all interfaces, the Claude login's
-// historical behavior); `successLocation: null` answers with a plain page
-// instead of redirecting to Claude's success URL (Antigravity login).
+// `host` binds the listener (default 127.0.0.1: only this machine's browser calls
+// back, and an all-interfaces bind opens a Windows firewall prompt); `successLocation: null`
+// answers with a plain page instead of redirecting to Claude's success URL (Antigravity login).
 export function startCallbackServer(expectedState, {
-  host,
+  host = '127.0.0.1',
   successLocation = 'https://platform.claude.com/oauth/code/success?app=claude-code',
 } = {}) {
   return new Promise((resolve, reject) => {

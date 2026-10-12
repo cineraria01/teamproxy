@@ -8,6 +8,8 @@ import {
   atomicConfigUpdate,
   createDefaultConfig,
   readQuotaCache,
+  renameWithRetry,
+  renameWithRetrySync,
   saveConfig,
   writeQuotaCacheSync,
 } from '../src/config.js';
@@ -462,4 +464,23 @@ test('atomicConfigUpdate recovers a lock whose owner process is dead', async () 
     else process.env.TEAMCLAUDE_CONFIG = prev;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('rename retries a briefly locked target (EPERM/EBUSY, as antivirus causes on Windows) and nothing else', async () => {
+  const flaky = codes => {
+    const calls = [];
+    return { calls, fn: (from, to) => { calls.push([from, to]); const code = codes.shift(); if (code) throw Object.assign(new Error(code), { code }); } };
+  };
+  const a = flaky(['EPERM', 'EBUSY']);
+  await renameWithRetry('a', 'b', a.fn);
+  assert.equal(a.calls.length, 3);
+  const s = flaky(['EBUSY']);
+  renameWithRetrySync('a', 'b', s.fn);
+  assert.equal(s.calls.length, 2);
+  const other = flaky(['ENOENT']);
+  await assert.rejects(renameWithRetry('a', 'b', other.fn), { code: 'ENOENT' });
+  assert.equal(other.calls.length, 1);
+  const stuck = flaky(Array(8).fill('EPERM'));
+  assert.throws(() => renameWithRetrySync('a', 'b', stuck.fn), { code: 'EPERM' });
+  assert.equal(stuck.calls.length, 8);
 });

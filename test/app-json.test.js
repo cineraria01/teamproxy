@@ -173,7 +173,7 @@ test('claude login --json: auth_url, waiting, callback, done', async () => {
   const [code] = await run.exit;
   assert.equal(code, 0);
   assert.deepEqual(run.events.map(e => e.event ?? 'done'), ['auth_url', 'waiting', 'done']);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
   const saved = readConfig().accounts.find(a => a.name === 'app-1');
   assert.equal(saved.accessToken, 'new-at');
 });
@@ -186,7 +186,7 @@ test('claude login --json: need_code, then a pasted callback URL on stdin finish
   run.child.stdin.write(`http://localhost:1/callback?code=pasted&state=${u.searchParams.get('state')}\n`);
   const [code] = await run.exit;
   assert.equal(code, 0);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
 });
 
 test('a wrong state is a coded failure, not a hang', async () => {
@@ -231,7 +231,7 @@ test('codex login --json relays the URL printed by the official CLI and saves th
   assert.equal(typeof auth.browser_opened, 'boolean');
   const [code] = await run.exit;
   assert.equal(code, 0);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'codex-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'codex-1', applied: 'config_only' });
   assert.equal(readConfig().accounts.find(a => a.name === 'codex-1').provider, 'codex');
 });
 
@@ -289,4 +289,72 @@ test('a name that appears between the pre-check and the save is not overwritten 
   assert.equal(code, 1);
   assert.equal(run.events.at(-1).error, 'name_taken');
   assert.equal(readConfig().accounts.find(a => a.name === 'raced').apiKey, 'other');
+});
+
+// ── Windows paths (no SIGTERM handler, no SIGHUP, no lsof) ──
+
+test('a {"cancel":true} line on stdin cancels with a done line', async () => {
+  const run = login();
+  await run.next(e => e.event === 'waiting');
+  run.child.stdin.write('{"cancel":true}\n');
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: false, error: 'cancelled' });
+});
+
+test('stdin EOF cancels a codex login and removes its temp CODEX_HOME', async () => {
+  const homeFile = join(t.dir, 'codex-home.txt');
+  const pidFile = join(t.dir, 'codex.pid');
+  const run = login(['codex', 'login', '--name', 'codex-1', '--json'], {
+    TEAMCODEX_CODEX_BIN: fakeCodex(), FAKE_CODEX_HANG: '1', FAKE_CODEX_HOME_FILE: homeFile, FAKE_CODEX_PID_FILE: pidFile,
+  });
+  await run.next(e => e.event === 'waiting');
+  for (let i = 0; i < 50 && !existsSync(pidFile); i += 1) await new Promise(r => setTimeout(r, 50));
+  const home = readFileSync(homeFile, 'utf8').trim();
+  run.child.stdin.end();
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }]);
+  assert.equal(existsSync(home), false);
+});
+
+test('a code pasted before the race starts is not lost', async () => {
+  const run = login(undefined, { TEAMPROXY_NEED_CODE_MS: '100000' });
+  run.child.stdin.write('pasted-early\n'); // may arrive before the callback server is up
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
+});
+
+const sync = (headers = { 'x-api-key': 'tc-test' }, method = 'POST') =>
+  fetch(`http://127.0.0.1:${t.port}/teamclaude/accounts/sync`, { method, headers });
+
+test('POST /teamclaude/accounts/sync: key required, POST only, applies the on-disk accounts', async () => {
+  await startServer();
+  assert.equal((await sync({ 'x-api-key': 'wrong' })).status, 401);
+  assert.equal((await sync(undefined, 'GET')).status, 405);
+  const config = readConfig();
+  config.accounts[0].enabled = false;
+  writeFileSync(t.configPath, JSON.stringify(config));
+  const res = await sync();
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, total: 2 });
+  // applied before the response: no polling needed
+  const status = await json(['status', '--json']);
+  assert.equal(status.accounts.find(a => a.name === 'api-1').usable, false);
+});
+
+test('without lsof (as on Windows) --json changes and login still apply live through accounts/sync', async () => {
+  await startServer();
+  const noLsof = { PATH: `${join(process.execPath, '..')}:/usr/bin:/bin` };
+  const disable = await cli(['disable', 'api-1', '--json'], noLsof);
+  assert.deepEqual(JSON.parse(disable.stdout), { ok: true, account: 'api-1', enabled: false, applied: 'live' });
+  const status = await json(['status', '--json']);
+  assert.equal(status.accounts.find(a => a.name === 'api-1').usable, false);
+  const run = login(undefined, noLsof);
+  const auth = await run.next(e => e.event === 'auth_url');
+  await callback(auth.url);
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'live' });
 });

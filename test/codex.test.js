@@ -173,10 +173,24 @@ test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then P
     resolveCodexCliBin({
       env: {},
       execPath: 'C:\\nodejs\\node.exe',
-      exists: () => true,
+      exists: p => p === 'C:\\nodejs\\codex',
       platform: 'win32',
     }),
     'codex',
+  );
+
+  // Given: win32 with @openai/codex installed beside node.exe — its native codex.exe, per arch
+  for (const [arch, triple] of [['x64', 'x86_64-pc-windows-msvc'], ['arm64', 'aarch64-pc-windows-msvc']]) {
+    const exe = `C:\\nodejs\\node_modules\\@openai\\codex\\vendor\\${triple}\\codex\\codex.exe`;
+    assert.equal(
+      resolveCodexCliBin({ env: {}, execPath: 'C:\\nodejs\\node.exe', exists: p => p === exe, platform: 'win32', arch }),
+      exe,
+    );
+  }
+  // and TEAMCODEX_CODEX_BIN still wins on win32
+  assert.equal(
+    resolveCodexCliBin({ env: { TEAMCODEX_CODEX_BIN: 'D:\\c\\codex.exe' }, execPath: 'C:\\nodejs\\node.exe', exists: () => true, platform: 'win32' }),
+    'D:\\c\\codex.exe',
   );
 });
 

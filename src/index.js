@@ -597,6 +597,13 @@ async function superviseServerCommand() {
       });
       return;
     }
+    if (req.url === '/teamclaude/accounts/sync' && !isLocal) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'Account sync is local-only.' },
+      });
+      return;
+    }
     // The worker only ever sees loopback (this supervisor forwards to it), so
     // the operator-only reset-credit route must be fenced HERE, like rotate.
     if (req.url.split('?', 1)[0] === '/teamclaude/codex/reset-credit' && !isLocal) {
@@ -1685,13 +1692,15 @@ async function proxyWorkerCommand() {
       console.error(`[TeamCodex] Reset credit ledger snapshot failed: ${err.message}`);
     }
   };
+  // POST /teamclaude/accounts/sync runs the same account-only reload as SIGHUP (Windows has no SIGHUP).
+  hooks.onAccountsSync = () => liveSync();
   const server = createProxyServer(accountManager, config, hooks);
   let liveSyncChain = Promise.resolve();
-  process.on('SIGHUP', () => {
-    // Account-only reload: keep the worker, sockets, affinity map, prompt caches,
-    // and every in-flight response alive. Serializing signals avoids overlapping
-    // remove/add passes when several CLI changes land together.
-    liveSyncChain = liveSyncChain.then(async () => {
+  // Account-only reload: keep the worker, sockets, affinity map, prompt caches,
+  // and every in-flight response alive. Serializing requests avoids overlapping
+  // remove/add passes when several CLI changes land together.
+  const liveSync = () => {
+    const run = liveSyncChain.then(async () => {
       const diskConfig = await accountManager.readAfterAccountFlagWrites(() => loadConfig());
       if (!diskConfig) return;
       if (poolConfigMismatch(diskConfig.provider, dedicatedMode, true)) {
@@ -1707,7 +1716,12 @@ async function proxyWorkerCommand() {
         });
       }
       console.log('[TeamClaude] Applied account config without restarting the worker');
-    }).catch(err => {
+    });
+    liveSyncChain = run.catch(() => {});
+    return run;
+  };
+  process.on('SIGHUP', () => {
+    liveSync().catch(err => {
       console.error(`[TeamClaude] Account config reload failed: ${err.message}`);
     });
   });
@@ -2557,10 +2571,10 @@ async function machineLiveStatus(config) {
   }
 }
 
-/** applied: live (SIGHUP delivered) | config_only (no server) | restart_required (server cannot live-reload). */
+/** applied: live (SIGHUP or accounts/sync applied) | config_only (no server) | restart_required (server cannot live-reload). */
 async function machineApplied(config) {
-  if (!await findRunningServer(config).catch(() => null)) return 'config_only';
-  return (await noteRunningServerReload(config, { quiet: true })) ? 'live' : 'restart_required';
+  await noteRunningServerReload(config, { quiet: true });
+  return machine.applied;
 }
 
 async function machineCommand() {
@@ -3667,30 +3681,51 @@ async function removeCommand() {
 
 // ── enable / disable / priority ─────────────────────────────
 
-/** Ask the supervised worker to live-sync account changes without a restart. */
+/** POST /teamclaude/accounts/sync; true when the server applied the on-disk accounts. */
+async function requestAccountsSync(port, config) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/teamclaude/accounts/sync`, {
+      method: 'POST',
+      headers: config.proxy?.apiKey ? { 'x-api-key': config.proxy.apiKey } : undefined,
+      signal: AbortSignal.timeout(30_000),
+    });
+    return res.ok && (await res.json().catch(() => null))?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the supervised worker to live-sync account changes without a restart. The outcome is also
+ * left in machine.applied (live | config_only | restart_required) for the --json commands.
+ */
 async function noteRunningServerReload(config, { quiet = false } = {}) {
   const say = quiet ? () => {} : console.log;
   const warn = quiet ? () => {} : console.error;
+  const outcome = applied => { machine.applied = applied; return applied === 'live'; };
   try {
     const running = await findRunningServer(config);
-    if (!running) return false;
+    if (!running) return outcome('config_only');
     const state = await readServerState();
     const workerPid = running.lifecycleVerified && running.identity
       && verifyWorkerIdentity(state, running.identity)
       ? state.workerPid
       : null;
-    if (!workerPid) {
+    if (workerPid) {
+      process.kill(workerPid, 'SIGHUP');
+    } else if (!await requestAccountsSync(running.port, config)) {
+      // No verified worker pid to signal (always so on Windows: no lsof/ps identity, no SIGHUP),
+      // and the server does not take the authenticated loopback sync either (older server).
       warn('The running server does not support account-only live reload.');
       warn(`Apply the change with: ${cliName(config)} restart`);
-      return false;
+      return outcome('restart_required');
     }
-    process.kill(workerPid, 'SIGHUP');
     say('Applied to the running server without restarting active connections.');
-    return true;
+    return outcome('live');
   } catch (err) {
     warn(`Could not reload the running server automatically: ${err.message}`);
     warn(`Apply the change with: ${cliName(config)} restart`);
-    return false;
+    return outcome('restart_required');
   }
 }
 

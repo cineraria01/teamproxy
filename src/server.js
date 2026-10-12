@@ -1546,6 +1546,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       const isRotateRequest = req.url === '/teamclaude/rotate';
       // Operator "re-measure usage now" (`teamcodex reload`, the CLI twin of TUI R).
       const isReloadRequest = req.url === '/teamclaude/reload';
+      // Account-only live reload from disk (the SIGHUP twin; Windows has no SIGHUP).
+      const isAccountsSyncRequest = req.url === '/teamclaude/accounts/sync';
 
       // BYOK lane. Claude Code never carries this prefix, so no traffic on
       // /v1/... can reach the normalization below — the isolation is structural.
@@ -1648,14 +1650,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         });
         return;
       }
-      if (isReloadRequest && !isLocal) {
+      if ((isReloadRequest || isAccountsSyncRequest) && !isLocal) {
         rejectEarlyRequest(req, res, 403, { 'Content-Type': 'application/json' }, {
           type: 'error',
-          error: { type: 'permission_error', message: 'Quota reload is local-only.' },
+          error: { type: 'permission_error', message: isReloadRequest ? 'Quota reload is local-only.' : 'Account sync is local-only.' },
         });
         return;
       }
-      if ((isRotateRequest || isResetCreditRequest || isReloadRequest) && proxyApiKey
+      if ((isRotateRequest || isResetCreditRequest || isReloadRequest || isAccountsSyncRequest) && proxyApiKey
           && clientKey !== proxyApiKey && bearerKey !== proxyApiKey) {
         rejectEarlyRequest(req, res, 401, { 'Content-Type': 'application/json' }, {
           type: 'error',
@@ -1804,6 +1806,34 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ...result, total: accountManager.accounts.length }));
+        return;
+      }
+
+      if (isAccountsSyncRequest) {
+        if (!hooks.onAccountsSync) {
+          rejectEarlyRequest(req, res, 404, { 'Content-Type': 'application/json' }, {
+            type: 'error',
+            error: { type: 'not_found_error', message: 'Account sync is not available here.' },
+          });
+          return;
+        }
+        const bodyFree = (req.headers['content-length'] == null || req.headers['content-length'] === '0')
+          && req.headers['transfer-encoding'] == null;
+        if (req.method !== 'POST' || !bodyFree) {
+          rejectEarlyRequest(req, res, req.method !== 'POST' ? 405 : 400, { 'Content-Type': 'application/json', Allow: 'POST' }, {
+            type: 'error',
+            error: { type: 'invalid_request_error', message: 'Account sync is a body-free POST.' },
+          });
+          return;
+        }
+        try {
+          await hooks.onAccountsSync();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, total: accountManager.accounts.length }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ type: 'error', error: { type: 'account_sync_failed', message: err.message } }));
+        }
         return;
       }
 
