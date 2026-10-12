@@ -97,6 +97,7 @@ npm 레지스트리의 `teamcodex`. 이름은 같지만 이 포크의 수정이 
 창을 닫으면 CLI 세션도 끝난다. `--keep-alive`를 주면 남고, `tmux -L <풀>-hud attach`로 다시 붙는다.
 `--yolo`를 주면 승인 없이 실행한다. 세 명령 모두 같은 낱말이고, 실행기가 각 CLI의 플래그로 바꿔 넘긴다
 (Claude Code·agy `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`).
+Claude Code 대화 세션(하단 줄 경로)에는 `--effort`를 주지 않으면 `--effort max`를 더한다. 인쇄 모드와 `--` 하위 명령에는 더하지 않는다.
 
 ```sh
 # Claude
