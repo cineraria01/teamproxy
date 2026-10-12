@@ -43,6 +43,11 @@ def check():
     assert oneshot(["--model", "m", "--prompt", "x"], modes["agy"][2]) and oneshot(["--version"], modes["codex"][2])
     assert not oneshot(["--prompt-interactive", "x"], modes["agy"][2]) and not oneshot(["hi -p"], modes["claude"][2])
     assert not oneshot(["-p", "work"], modes["codex"][2]) and not oneshot([], modes["claude"][2])
+    # Claude conversations default to --effort max; an explicit effort is kept.
+    assert launcher.with_effort([]) == ["--effort", "max"]
+    assert launcher.with_effort(["--effort", "high"]) == ["--effort", "high"]
+    assert launcher.with_effort(["--effort=low", "-c"]) == ["--effort=low", "-c"]
+    assert launcher.with_effort(["--dangerously-skip-permissions"]) == ["--dangerously-skip-permissions", "--effort", "max"]
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         fake = Path(directory) / "teamagy"
         fake.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
@@ -156,6 +161,8 @@ def check():
                     assert hud == ("1" if mode == "claude" else None), (mode, hud)
                     pids = [parent, child]
                     expected = ["--model", "m"] if mode in ("agy", "claude") else ["resume", "test-id"]
+                    if mode == "claude":
+                        expected += ["--effort", "max"]
                     assert forwarded == ["run", "--", *expected], forwarded
                     assert launched_in == str(root), launched_in
                     session = sessions().split()[0]

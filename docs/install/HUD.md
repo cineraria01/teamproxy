@@ -56,6 +56,10 @@ tmux 소켓은 `teamclaude-hud`입니다.
 실행기가 Claude Code·agy에는 `--dangerously-skip-permissions`, Codex에는 `--dangerously-bypass-approvals-and-sandbox`로 바꿔 넘깁니다.
 인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. `--keep-alive`도 이제 인자 어디에 두어도 됩니다.
 
+### Claude 대화 세션은 추론 max
+
+`teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort max`를 더합니다. settings.json `effortLevel`은 max를 저장하지 못하고 `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 실행기가 맡습니다. `--effort high` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다.
+
 ### 세 하단 줄 공통 tmux 설정
 
 하단 줄 tmux 서버는 [`src/hud/tmux.conf`](../../src/hud/tmux.conf)로 뜹니다(평소 tmux 설정과 무관). Esc가 바로 CLI에 가고
