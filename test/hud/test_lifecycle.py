@@ -43,6 +43,10 @@ def check():
     assert oneshot(["--model", "m", "--prompt", "x"], modes["agy"][2]) and oneshot(["--version"], modes["codex"][2])
     assert not oneshot(["--prompt-interactive", "x"], modes["agy"][2]) and not oneshot(["hi -p"], modes["claude"][2])
     assert not oneshot(["-p", "work"], modes["codex"][2]) and not oneshot([], modes["claude"][2])
+    for flags in (["-p", "hi"], ["--single", "x"], ["--prompt-file=f"], ["--prompt-json", "{}"], ["-v"], ["--version"]):
+        assert oneshot(flags, modes["grok"][2]), flags
+    assert not oneshot(["--model", "grok-4.7"], modes["grok"][2])
+    assert modes["grok"][1] == "Grok" and modes["grok"][3] == "M-Enter" and modes["grok"][4] == "--always-approve"
     # Claude conversations default to --effort max; an explicit effort is kept.
     assert launcher.with_effort([]) == ["--effort", "max"]
     assert launcher.with_effort(["--effort", "high"]) == ["--effort", "high"]
@@ -58,12 +62,14 @@ def check():
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             assert json.loads(result.stdout) == ["run", "--", *arguments], (arguments, result.stdout, result.stderr)
         # --yolo becomes each CLI's own skip-all-approvals flag; --keep-alive is ours wherever it sits.
-        for name in ("teamclaude", "teamcodex"):
+        for name in ("teamclaude", "teamcodex", "teamgrok"):
             (Path(directory) / name).write_text(fake.read_text())
             (Path(directory) / name).chmod(0o755)
         for pool, arguments, expected in (
                 ("--agy", ["--yolo", "-p", "hi"], ["--dangerously-skip-permissions", "-p", "hi"]),
                 ("--claude", ["-p", "hi", "--yolo"], ["-p", "hi", "--dangerously-skip-permissions"]),
+                ("--grok", ["--yolo", "-p", "hi"], ["--always-approve", "-p", "hi"]),
+                ("--grok", ["--", "models"], ["models"]),
                 (None, ["--yolo", "--keep-alive", "--version"], ["--dangerously-bypass-approvals-and-sandbox", "--version"])):
             result = subprocess.run([sys.executable, str(HUD / "launcher.py"), *([pool] if pool else []), *arguments],
                                     env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
@@ -76,7 +82,7 @@ def check():
         fake.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
         fake.chmod(0o755)
         runner = ("import launcher\nlauncher.read_status = lambda path: {}\n"
-                  "launcher.render = lambda data, agy=False: ['footer']\n"
+                  "launcher.render = lambda data, **kw: ['footer']\n"
                   "raise SystemExit(launcher.launch(['--model', 'm']))\n")
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 50, 0, 0))
@@ -118,7 +124,7 @@ def check():
             runner = ("import launcher, shutil\noriginal = shutil.which\n" +
                       f"launcher.shutil.which = lambda name: {str(wrapper)!r} if name == 'tmux' else " +
                       f"{str(proxy)!r} if name == {proxy.name!r} else original(name)\n" +
-                      "launcher.read_status = lambda path: {}\nlauncher.render = lambda data, agy=False: ['footer']\n" +
+                      "launcher.read_status = lambda path: {}\nlauncher.render = lambda data, **kw: ['footer']\n" +
                       "launcher.claude_rows = lambda: ['footer']\n" +
                       f"raise SystemExit(launcher.launch({arguments!r}))\n")
             masters, clients, pids = [], [], []

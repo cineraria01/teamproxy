@@ -4,12 +4,12 @@
 
 # teamproxy
 
-Claude Code, Codex CLI, Antigravity CLI(`agy`)를 각각 여러 계정 풀에 물리는 로컬 프록시 세 개다.
-세 프록시는 한 저장소의 같은 코드로 돌고, 설정·포트·설치본·래퍼·서버는 풀마다 따로 둔다.
+Claude Code, Codex CLI, Antigravity CLI(`agy`), Grok Build CLI(`grok`)를 각각 여러 계정 풀에 물리는 로컬 프록시 네 개다.
+네 프록시는 한 저장소의 같은 코드로 돌고, 설정·포트·설치본·래퍼·서버는 풀마다 따로 둔다.
 한 계정이 5시간·주간 한도에 가까워지면 다음 요청부터 다른 계정으로 넘긴다. CLI는 주소 하나에만 붙어 있으면 된다.
 
 - 런타임 의존성 0(Node.js 18+ 내장 모듈만). 빌드 단계 없음.
-- 세 명령 `teamclaude` · `teamcodex` · `teamagy`. 인자 없이 치면 CLI 아래에 계정별 사용량 하단 줄이 붙는다.
+- 네 명령 `teamclaude` · `teamcodex` · `teamagy` · `teamgrok`. 인자 없이 치면 CLI 아래에 계정별 사용량 하단 줄이 붙는다.
 - 서버는 launchd(macOS)나 systemd(Linux)가 띄우고, tmux 안의 대시보드로 계정을 본다.
 
 > 자기 구독 계정만 넣는다. 한 좌석을 여러 사람이 나눠 쓰는 용도는 지원하지 않는다.
@@ -36,12 +36,13 @@ Claude Code, Codex CLI, Antigravity CLI(`agy`)를 각각 여러 계정 풀에 �
 | teamclaude | Claude Code | Claude Max/Pro OAuth, API 키, 장기 토큰(`claude setup-token`) | Anthropic API | 5h · 7d · Fable 주간 |
 | teamcodex | Codex CLI | ChatGPT OAuth(Codex) | ChatGPT Codex 백엔드 | 5h · 7d |
 | teamagy | Antigravity CLI(`agy`) | Google AI Pro/Ultra | Cloud Code(agy용) | Gemini 그룹 5h·주간, Claude/GPT 그룹(`3p`) 5h·주간 |
+| teamgrok | Grok Build CLI(`grok`), 다른 로컬 클라이언트(Selvi 앱) | xAI SuperGrok(OIDC 기기 코드 로그인) | `cli-chat-proxy.grok.com` | `x-ratelimit` 요청·토큰 사용률(초기화 시각 없음) |
 
-진입점은 하나다. `src/index.js`가 명령을 나누고, `codex`·`agy` 접두가 붙으면 그 풀로 돈다
-(`node src/index.js codex …`, `node src/index.js agy …`). `src/teamclaude.js`는 물려받은
+진입점은 하나다. `src/index.js`가 명령을 나누고, `codex`·`agy`·`grok` 접두가 붙으면 그 풀로 돈다
+(`node src/index.js codex …`, `node src/index.js agy …`, `node src/index.js grok …`). `src/teamclaude.js`는 물려받은
 `TEAMCLAUDE_PROVIDER`를 지운 뒤 `index.js`를 불러, 셸이나 launchd에 남은 값이 Claude 명령을 다른 풀로 끌고 가지 못하게 한다.
-세 풀은 설정 파일·쿼터 상태·서버 상태 파일을 공유하지 않는다. agy 풀은 `"provider": "agy"`가 아닌 설정을 읽지 않고,
-Claude·Codex 쪽도 agy 설정을 거부한다.
+네 풀은 설정 파일·쿼터 상태·서버 상태 파일을 공유하지 않는다. agy·grok 풀은 `"provider"`가 자기 것이 아닌 설정을 읽지 않고,
+다른 풀도 agy·grok 설정을 거부한다.
 
 이 저장소에는 프록시 말고 두 가지가 더 있다.
 
@@ -84,19 +85,19 @@ npm 레지스트리의 `teamcodex`. 이름은 같지만 이 포크의 수정이 
 
 ## 명령 쓰는 법
 
-세 래퍼는 첫 인자를 보고 같은 규칙으로 나눈다.
+네 래퍼는 첫 인자를 보고 같은 규칙으로 나눈다.
 
 | 첫 인자 | 가는 곳 |
 |---|---|
-| 없음, 또는 `-`로 시작하는 옵션 | 그 CLI(Claude Code·Codex·agy)를 tmux 안에 띄우고 아래에 하단 줄을 붙인다. 옵션은 CLI에 그대로 넘긴다 |
+| 없음, 또는 `-`로 시작하는 옵션 | 그 CLI(Claude Code·Codex·agy·grok)를 tmux 안에 띄우고 아래에 하단 줄을 붙인다. 옵션은 CLI에 그대로 넘긴다 |
 | `--` | 뒤의 것은 CLI 하위 명령. 하단 줄 없이 실행한다 |
 | 그 밖의 낱말(`server`, `status`, `accounts`, `login`, `import`, `enable`, `disable`, `priority`, `reload`, `run`, `env`, `remove` …)과 `-h`/`--help` | 프록시 명령 |
 
-하단 줄 없이 바로 실행하는 경우: 인쇄 모드(`-p`/`--print`, agy는 `--prompt`도)와 `--version`, 터미널이 아닌 실행,
+하단 줄 없이 바로 실행하는 경우: 인쇄 모드(`-p`/`--print`, agy는 `--prompt`도, grok은 `--single`·`--prompt-file`·`--prompt-json`도)와 `--version`, 터미널이 아닌 실행,
 높이가 계정 수 + 12줄보다 낮은 창. 폭이 좁은 창은 하단 줄 오른쪽이 잘린다.
 창을 닫으면 CLI 세션도 끝난다. `--keep-alive`를 주면 남고, `tmux -L <풀>-hud attach`로 다시 붙는다.
 `--yolo`를 주면 승인 없이 실행한다. 세 명령 모두 같은 낱말이고, 실행기가 각 CLI의 플래그로 바꿔 넘긴다
-(Claude Code·agy `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`).
+(Claude Code·agy `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, grok `--always-approve`).
 Claude Code 대화 세션(하단 줄 경로)에는 `--effort`를 주지 않으면 `--effort max`를 더한다. 인쇄 모드와 `--` 하위 명령에는 더하지 않는다.
 
 ```sh
@@ -118,11 +119,18 @@ teamagy                             # agy + 하단 줄
 teamagy -p "Reply with exactly: OK" # 인쇄 모드
 teamagy -- models                   # agy 하위 명령
 eval "$(teamagy env)"               # 직접 띄운 agy를 프록시로(CLOUD_CODE_URL)
+
+# grok
+teamgrok                            # grok + 하단 줄
+teamgrok -p "Reply with exactly: OK" # 인쇄 모드
+teamgrok -- models                  # grok 하위 명령
+eval "$(teamgrok env)"              # 직접 띄운 grok을 프록시로(GROK_CLI_CHAT_PROXY_BASE_URL)
 ```
 
 프록시 명령 `run`은 서버가 없으면 띄운 뒤 CLI를 프록시에 물려 실행한다. `teamclaude run`은 `ANTHROPIC_BASE_URL`만 넣어
 Claude Code를 구독 모드로 둔다. `teamcodex run`은 Codex에 프록시 provider 설정을 붙인다. `teamagy run`은 agy에
-`CLOUD_CODE_URL`을 준다(agy는 한 번 로컬 로그인돼 있어야 한다).
+`CLOUD_CODE_URL`을 준다(agy는 한 번 로컬 로그인돼 있어야 한다). `teamgrok run`은 grok에
+`GROK_CLI_CHAT_PROXY_BASE_URL=http://127.0.0.1:<포트>/v1`을 준다(grok도 한 번 로컬 로그인돼 있어야 한다, 어느 계정이든).
 
 ### 에이전트·스크립트에서 Codex 쓰기
 
@@ -139,9 +147,9 @@ teamcodex run -- -c model_reasoning_effort=high \
 ## 하단 줄과 Claude 상태줄
 
 하단 줄은 CLI 화면 아래 tmux 칸에서 자기 풀의 `GET /teamclaude/status`를 2초마다 읽어 계정 행을 그린다.
-tmux 소켓은 풀마다 따로(`teamclaude-hud`·`teamcodex-hud`·`teamagy-hud`)라 평소 쓰는 tmux와 섞이지 않는다.
+tmux 소켓은 풀마다 따로(`teamclaude-hud`·`teamcodex-hud`·`teamagy-hud`·`teamgrok-hud`)라 평소 쓰는 tmux와 섞이지 않는다.
 이 tmux 서버는 [`src/hud/tmux.conf`](src/hud/tmux.conf)로 뜬다. Esc는 지연 없이 CLI에 가고(실행 중인 턴 중단), 스크롤 기록은 5만 줄이다.
-Shift+Enter는 그 CLI가 줄바꿈으로 읽는 키로 바꿔 보낸다(Claude Code·agy는 Alt+Enter, Codex는 Ctrl+J). 바깥 터미널이 Shift+Enter를
+Shift+Enter는 그 CLI가 줄바꿈으로 읽는 키로 바꿔 보낸다(Claude Code·agy·grok은 Alt+Enter, Codex는 Ctrl+J). 바깥 터미널이 Shift+Enter를
 따로 보내야 한다. 마우스로 글자를 고를 때는 option(macOS)이나 shift를 누른 채 끈다.
 계정이 둘 이상이면 맨 위에 FLEET(평균) 행이 붙는다.
 
@@ -150,6 +158,7 @@ Shift+Enter는 그 CLI가 줄바꿈으로 읽는 키로 바꿔 보낸다(Claude 
 | teamclaude | `Ses`(5h) · `Wk`(7d) · `Fbl`(Fable 주간) · `End`(다음 결제일 추정, 장기 토큰 계정은 `-`). Claude 상태줄이 그리는 표를 그대로 쓴다 |
 | teamcodex | `5h` · `7d` · `End`, 맨 아래 `Cache last`(그 창의 최근 요청 캐시 비율) |
 | teamagy | `5h` · `7d`(Gemini 그룹) · `3p`(Claude/GPT 그룹에서 더 찬 창) |
+| teamgrok | `RL`(요청·토큰 중 더 찬 `x-ratelimit` 사용률), 플랜 칸은 구독 등급 |
 
 Codex 하단 줄:
 
@@ -204,16 +213,16 @@ Fable 5
 
 ## 풀별 위치
 
-| | teamclaude | teamcodex | teamagy |
-|---|---|---|---|
-| 포트 | 3456 | 3457 | 3458 |
-| 설정 | `~/.config/teamclaude.json` | `~/.config/teamcodex.json` | `~/.config/teamagy.json` |
-| 설치본 | `~/.local/share/teamclaude-global/lib/node_modules/teamcodex` | `~/.local/share/teamcodex-global/lib/node_modules/teamcodex` | `~/.local/share/teamagy-global/lib/node_modules/teamcodex` |
-| 래퍼 | `~/.local/bin/teamclaude` | `~/.local/bin/teamcodex` | `~/.local/bin/teamagy` |
-| 실행 | `src/teamclaude.js` | `src/index.js codex …` | `src/index.js agy …` |
-| 대시보드 | `tmux -L teamclaude attach -t proxy` | `tmux -L teamcodex attach -t proxy` | `tmux -L teamagy attach -t proxy` |
-| 하단 줄 소켓 | `teamclaude-hud` | `teamcodex-hud` | `teamagy-hud` |
-| launchd(INSTALL-ALL §4) | `com.local.teamclaude` | `com.local.teamcodex` | `com.local.teamagy` |
+| | teamclaude | teamcodex | teamagy | teamgrok |
+|---|---|---|---|---|
+| 포트 | 3456 | 3457 | 3458 | 3459 |
+| 설정 | `~/.config/teamclaude.json` | `~/.config/teamcodex.json` | `~/.config/teamagy.json` | `~/.config/teamgrok.json` |
+| 설치본 | `~/.local/share/teamclaude-global/lib/node_modules/teamcodex` | `~/.local/share/teamcodex-global/lib/node_modules/teamcodex` | `~/.local/share/teamagy-global/lib/node_modules/teamcodex` | `~/.local/share/teamgrok-global/lib/node_modules/teamcodex` |
+| 래퍼 | `~/.local/bin/teamclaude` | `~/.local/bin/teamcodex` | `~/.local/bin/teamagy` | `~/.local/bin/teamgrok` |
+| 실행 | `src/teamclaude.js` | `src/index.js codex …` | `src/index.js agy …` | `src/index.js grok …` |
+| 대시보드 | `tmux -L teamclaude attach -t proxy` | `tmux -L teamcodex attach -t proxy` | `tmux -L teamagy attach -t proxy` | `tmux -L teamgrok attach -t proxy` |
+| 하단 줄 소켓 | `teamclaude-hud` | `teamcodex-hud` | `teamagy-hud` | `teamgrok-hud` |
+| launchd(INSTALL-ALL §4) | `com.local.teamclaude` | `com.local.teamcodex` | `com.local.teamagy` | `com.local.teamgrok` |
 
 - 설치본을 풀마다 따로 두므로 한 풀을 갱신해도 다른 풀 코드는 그대로다. CLI는 자기 설치본에서 뜬 서버만 알아본다.
 - 설정 파일 옆에 `<설정>.server.json`(supervisor pid·`workerPid`·포트)과 `<설정>.quota.json`(쿼터 스냅숏)이 생긴다.
@@ -221,18 +230,18 @@ Fable 5
 
 ## 계정 관리
 
-세 풀이 같은 명령을 쓴다. 서버가 떠 있지 않아도 로그인·가져오기는 된다.
+네 풀이 같은 명령을 쓴다. 서버가 떠 있지 않아도 로그인·가져오기는 된다.
 
 | 명령 | 하는 일 |
 |---|---|
-| `login [--name 이름]` | 브라우저 로그인으로 계정 추가. Claude는 OAuth, Codex는 임시 `CODEX_HOME`에서 공식 로그인, agy는 Google 로그인(agy 자체 로그인은 그대로) |
+| `login [--name 이름]` | 브라우저 로그인으로 계정 추가. Claude는 OAuth, Codex는 임시 `CODEX_HOME`에서 공식 로그인, agy는 Google 로그인(agy 자체 로그인은 그대로), grok은 xAI 기기 코드 로그인(이름 기본값 `grok-1`, `grok-2` …) |
 | `login --api` | (Claude) API 키 계정 추가 |
-| `import [--name 이름]` | 이미 로그인된 CLI에서 가져오기. Claude Code 자격 증명, `~/.codex/auth.json`, agy 키체인(`--file`로 JSON) |
+| `import [--name 이름]` | 이미 로그인된 CLI에서 가져오기. Claude Code 자격 증명, `~/.codex/auth.json`, agy 키체인(`--file`로 JSON), grok `~/.grok/auth.json`(refresh 토큰을 grok과 나눠 쓰게 되니 `login`을 권함) |
 | `accounts [-v]` | 설정된 계정 목록. `-v`는 토큰 만료 시각까지 |
 | `status` | 실행 중인 서버의 계정·쿼터·오류 |
 | `disable <이름>` / `enable <이름>` | 회전에서 빼기·되돌리기. 진행 중 요청은 마저 끝난다 |
 | `priority <이름> <n\|auto>` | 순서 고정(작을수록 먼저). `auto`는 자동 순서로 돌린다 |
-| `reload` | 모든 유휴 계정의 사용량을 지금 다시 재고 status를 보인다(대시보드 `R`). agy는 쿼터 요약을 다시 읽는다 |
+| `reload` | 모든 유휴 계정의 사용량을 지금 다시 재고 status를 보인다(대시보드 `R`). agy는 쿼터 요약을, grok은 구독 등급을 다시 읽는다 |
 | `remove <이름>` | 계정 삭제 |
 | `reauth <이름>` | (Claude·Codex) 기존 계정 재인증. 돌아온 계정 ID가 맞을 때만 토큰을 바꾼다 |
 | `subscription …` | Claude `<이름> <disabled\|ok>`, Codex `cancel\|clear`(해지 예정 기록) |
@@ -248,6 +257,8 @@ Fable 5
   계정을 지울 때는 `scripts/codex-remove-account.mjs`가 설정에서 빼고 그 refresh 토큰을 폐기한다.
 - agy: agy를 한 번 로컬 로그인해 둔다. 토큰 갱신에 쓰는 OAuth 클라이언트는 저장소에 없고, 설치된 `agy` 바이너리에서 찾아
   검증한 뒤 설정에 캐시한다. 계정을 지워도 Google 권한은 취소하지 않는다.
+- grok: grok을 한 번 로컬 로그인해 둔다(어느 계정이든). OAuth 클라이언트는 grok의 공개 클라이언트(비밀값 없음)라 코드에 있고
+  `grokOAuthClientId`로 바꿀 수 있다. 같은 xAI 사용자(`userId`)를 다시 로그인하면 그 계정을 갱신한다. 계정을 지워도 권한은 취소하지 않는다.
 - 공통: 같은 계정을 한 풀에 두 번 로그인하지 않는다. 일시 오류에 재로그인하지 말고, 재인증은 `reauth`로 한다.
 
 ## 서버 운영
@@ -257,7 +268,7 @@ INSTALL-ALL §4대로 설치하면 launchd가 `~/.local/bin/<풀>-tmux-server`�
 
 ```sh
 tmux -L teamclaude attach -t proxy          # 대시보드. Ctrl-b d로 분리
-launchctl list | grep -E 'teamclaude|teamcodex|teamagy'
+launchctl list | grep -E 'teamclaude|teamcodex|teamagy|teamgrok'
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3456/teamclaude/status
 tmux -L teamclaude kill-session -t proxy    # 재시작(launchd가 다시 띄운다)
 ```
@@ -309,7 +320,7 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 - 고른 계정은 프롬프트 캐시를 위해 붙어 있는다. 우선순위는 `reevalIntervalMs`(기본 5분)마다, 그리고 지금 계정을 못 쓰게 되면
   바로 다시 고른다. 같은 연결의 연속 요청은 같은 계정으로 간다(연결 친화).
 
-**동시성.** 계정마다 동시 요청 상한(`maxConcurrentPerAccount`, 기본 3, agy 8)이 있고, 모두 차면 대기열에서 최대 15초 기다린다.
+**동시성.** 계정마다 동시 요청 상한(`maxConcurrentPerAccount`, 기본 3, agy·grok 8)이 있고, 모두 차면 대기열에서 최대 15초 기다린다.
 상한은 순간 몰림 429를 막는 것이고 쿼터 소진 429는 아래 경로가 맡는다.
 
 **429와 오류.**
@@ -341,6 +352,15 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 - 요청 모델로 그룹을 정하고(`claude-*`·`gpt-*`는 `3p`, 나머지는 Gemini) 그 그룹이 막힌 계정만 피한다.
 - agy는 계정별로 서버 쪽 상태를 가지므로 대화는 그 계정이 모델을 못 쓸 때까지 같은 계정에 남는다.
 
+**grok 풀.** 명세 [`docs/specs/2026-10-15-grok-mode.md`](docs/specs/2026-10-15-grok-mode.md).
+- 클라이언트의 `authorization`·`x-api-key`·`cookie`를 빼고 풀 계정 bearer를 넣는다. 로컬 로그인의 신원 헤더(`x-userid`·`x-grok-user-id`·
+  `x-email`·`x-teamid`)가 있으면 고른 계정 것으로 바꾼다(없으면 더하지 않는다). 경로는 가리지 않고 그대로 넘긴다.
+- grok이 아닌 클라이언트(Selvi 앱, curl)에 `x-grok-client-version`이 없으면 grok에서 마지막으로 본 값(없으면 `1.0.46`)을 채운다.
+- 사용률은 응답의 `x-ratelimit-*` 헤더로만 잰다(조회 없음). 이 값으로 계정을 빼지는 않고, 추론 경로의 429만 그 계정을
+  `retry-after`(초·HTTP 날짜, 없으면 5분)만큼 쉬게 하고 바로 다른 계정으로 보낸다. 남은 계정이 없으면 업스트림 429 본문을 그대로 준다.
+- 세션(`x-grok-session-id`, `x-grok-conv-id`, `/v1/sessions/<id>`)은 그 계정이 못 쓸 때까지 같은 계정에 남는다.
+- 범위 밖: 로그인 없는 실행, xAI API 키 모드(`api.x.ai`), 스트림 복구, 구독 결제·종량 한도, macOS 밖 키체인.
+
 **BYOK(선택).** `byok` 설정을 넣었을 때만 `/byok/v1/…` 경로로 외부 "자기 키" 클라이언트를 받는다. Claude Code가 쓰는 `/v1/…`
 요청은 바이트 그대로다. 세부와 위험은 [원본 README 사본](docs/reference/upstream-README.md)의 BYOK 절.
 
@@ -351,7 +371,7 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 
 | 문서 | 내용 |
 |---|---|
-| [`docs/install/INSTALL-ALL.md`](docs/install/INSTALL-ALL.md) | 새 머신에 세 풀과 상태줄 전부 설치(정본) |
+| [`docs/install/INSTALL-ALL.md`](docs/install/INSTALL-ALL.md) | 새 머신에 네 풀과 상태줄 전부 설치(정본) |
 | [`docs/install/APP-INSTALL.md`](docs/install/APP-INSTALL.md) | 앱용 비대화형 설치(`install-app.mjs --app --json`, Node만 필요), 묶음, `proxy.host` |
 | [`docs/install/HUD.md`](docs/install/HUD.md) | 하단 줄 상세, 에이전트용 `teamcodex run -- exec`, OmO 연결 |
 | [`docs/install/SETUP.md`](docs/install/SETUP.md) | Codex 프록시 준비, Linux systemd, macOS 자동 시작 |

@@ -22,6 +22,10 @@ const POOLS = {
     cmd: 'teamagy', port: 3458, config: 'teamagy.json', entry: ['src/index.js', 'agy'],
     env: '-u TEAMCLAUDE_SESSION_SUPERVISED TEAMCLAUDE_PROVIDER=agy ',
   },
+  grok: {
+    cmd: 'teamgrok', port: 3459, config: 'teamgrok.json', entry: ['src/index.js', 'grok'],
+    env: '-u TEAMCLAUDE_SESSION_SUPERVISED TEAMCLAUDE_PROVIDER=grok ',
+  },
 };
 
 class Fail extends Error {
@@ -367,7 +371,7 @@ function runUninstall(L, purge) {
 }
 
 function runLoginCommand(L, pool) {
-  if (!Object.hasOwn(POOLS, pool)) throw new Fail('usage', 'Usage: --login-command claude|codex|agy --json');
+  if (!Object.hasOwn(POOLS, pool)) throw new Fail('usage', 'Usage: --login-command claude|codex|agy|grok --json');
   const taken = new Set((readJson(L.config(pool), {}).accounts ?? []).map(a => a.name));
   let n = 1;
   while (taken.has(`${pool}-${n}`)) n += 1; // first free number: a name in use would overwrite that account
@@ -394,11 +398,11 @@ async function main() {
   if (flags.has('--login-command')) return runLoginCommand(L, flags.get('--login-command'));
   if (flags.has('--app')) {
     const pools = flags.has('--pools') ? flags.get('--pools').split(',').map(p => p.trim()).filter(Boolean) : Object.keys(POOLS);
-    if (!pools.length || pools.some(p => !Object.hasOwn(POOLS, p))) throw new Fail('usage', 'Usage: --pools claude,codex,agy');
+    if (!pools.length || pools.some(p => !Object.hasOwn(POOLS, p))) throw new Fail('usage', 'Usage: --pools claude,codex,agy,grok');
     return runInstall(L, pools, flags.get('--node'), flags.get('--with-codex-cli'));
   }
   throw new Fail('usage', 'Usage: install-app.mjs --app|--status|--uninstall [--purge]|--login-command POOL --json '
-    + '[--pools claude,codex,agy] [--node ABS_PATH] [--with-codex-cli VERSION] [--prefix HOME]');
+    + '[--pools claude,codex,agy,grok] [--node ABS_PATH] [--with-codex-cli VERSION] [--prefix HOME]');
 }
 
 try {

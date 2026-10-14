@@ -17,7 +17,7 @@ language of its file.
 | [`evidence/`](evidence/) | Frozen excerpts with source SHA-256 hashes, so an independent reviewer can check a claim without pulling whole files into a review bundle |
 | [`assets/`](assets/) | Images referenced by the READMEs (hero, dashboard screenshot, footer preview) |
 | [`reference/`](reference/) | `upstream-README.md`: the upstream (sangrokjung/teamclaude) English README, kept as a detailed reference. Moved here 2026-10-10 when the root README was rewritten for teamproxy |
-| [`install/`](install/) | New-machine install guide for all three pools and both status lines (`INSTALL-ALL.md`, Korean), Codex/agy footer (`HUD.md`), proxy setup (`SETUP.md`). Moved here 2026-10-10 from the former `cineraria01/teamcodex` repo |
+| [`install/`](install/) | New-machine install guide for all four pools and both status lines (`INSTALL-ALL.md`, Korean), Codex/agy footer (`HUD.md`), proxy setup (`SETUP.md`). Moved here 2026-10-10 from the former `cineraria01/teamcodex` repo |
 
 Operational context for the upstream production deployment is summarized in the
 [upstream README copy's Operations section](reference/upstream-README.md#operations).

@@ -61,6 +61,16 @@ import {
   parseAgyQuotaSummary,
   rewriteAgyProject,
 } from './agy.js';
+import {
+  GROK_DEFAULT_CLIENT_VERSION,
+  GROK_DEFAULT_UPSTREAM,
+  GROK_EXHAUSTED_FALLBACK_MS,
+  fetchGrokUser,
+  grokAffinityKey,
+  grokExhaustedBody,
+  isGrokInferencePath,
+  rewriteGrokIdentityHeaders,
+} from './grok.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -355,12 +365,13 @@ export function resolveAnthropicUsageUrl(configured, upstream) {
 }
 
 export function createProxyServer(accountManager, config, hooks = {}) {
-  const provider = config.provider === 'codex' || config.provider === 'agy'
+  const provider = ['codex', 'agy', 'grok'].includes(config.provider)
     ? config.provider
     : 'anthropic';
   accountManager.singleActiveAccount = provider === 'codex';
   const upstream = provider === 'agy'
     ? config.agyUpstream || config.upstream || AGY_DEFAULT_UPSTREAM
+    : provider === 'grok' ? config.grokUpstream || config.upstream || GROK_DEFAULT_UPSTREAM
     : config.upstream || (provider === 'codex'
       ? 'https://chatgpt.com/backend-api/codex'
       : 'https://api.anthropic.com');
@@ -927,7 +938,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     : null;
 
   // String session key → stable object, so the socket-keyed affinity WeakMap
-  // can pin an agy trajectory/session regardless of which connection carries it.
+  // can pin an agy trajectory/session (or a grok session) regardless of which
+  // connection carries it.
   function agyAffinityObject(key) {
     let value = agyAffinityKeys.get(key);
     if (value) {
@@ -940,6 +952,35 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     // ponytail: LRU of 1024 sessions; an evicted one just follows sticky selection.
     if (agyAffinityKeys.size > 1024) agyAffinityKeys.delete(agyAffinityKeys.keys().next().value);
     return value;
+  }
+
+  // ── Grok ────────────────────────────────────────────────────────────────────
+  // Upstream answers 426 to a request without x-grok-client-version; a client
+  // that is not grok borrows the version last seen from grok itself.
+  let grokClientVersion = null;
+  const grokFallbackVersion = typeof config.grokClientVersion === 'string' && config.grokClientVersion
+    ? config.grokClientVersion
+    : GROK_DEFAULT_CLIENT_VERSION;
+
+  // `reload`: nothing to poll for quota (it rides on response headers), so it
+  // re-reads each account's tier from /v1/user?include=subscription.
+  async function refreshGrokTierAll() {
+    if (warmupClosed) return -1;
+    const targets = accountManager.accounts.filter(a => a.provider === 'grok' && a.credential
+      && a.enabled !== false && a.status !== 'error');
+    const outcomes = await Promise.all(targets.map(async account => {
+      await accountManager.ensureTokenFresh(account).catch(() => { /* surfaces via status */ });
+      try {
+        const user = await fetchGrokUser(account.credential, {
+          upstream, clientVersion: grokClientVersion || grokFallbackVersion,
+        });
+        if (user.tier) account.planType = user.tier;
+        return true;
+      } catch {
+        return false;
+      }
+    }));
+    return { targets: targets.length, measured: outcomes.filter(Boolean).length };
   }
 
   // Codex reset credits. One redemption attempt per account at a time; the
@@ -1288,6 +1329,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   async function refreshQuotaAll() {
     if (provider === 'codex') return refreshCodexQuotaAll();
     if (provider === 'agy') return refreshAgyQuotaAll();
+    if (provider === 'grok') return refreshGrokTierAll();
     if (!activeWarmup || warmupClosed || (!probeTemplate && !anthropicUsageUrl)) return -1;
     const targets = accountManager.accounts.filter(a =>
       (a.status !== 'error' || a.errorReason === 'subscription-disabled')
@@ -1993,6 +2035,16 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           if (/^antigravity\//.test(userAgent)) agyUserAgent = userAgent;
           else req.headers['user-agent'] = agyUserAgent || AGY_DEFAULT_USER_AGENT;
           if (sessionAffinity) agySessionKey = agyAffinityKey(req.url, body);
+        }
+        if (provider === 'grok') {
+          // Once on the incoming request, so every failover attempt carries it.
+          const version = req.headers['x-grok-client-version'];
+          if (typeof version === 'string' && version) {
+            if (/^grok-shell\//.test(req.headers['user-agent'] || '')) grokClientVersion = version;
+          } else {
+            req.headers['x-grok-client-version'] = grokClientVersion || grokFallbackVersion;
+          }
+          if (sessionAffinity) agySessionKey = grokAffinityKey(req.url, req.headers);
         }
 
         // Track request
@@ -2713,6 +2765,7 @@ function startContinuityDeadline(ctx) {
 
 // Proxy-made 401 in the client's own error shape: Google RPC for agy.
 function authFailureBody(ctx, message) {
+  if (ctx.provider === 'grok') return { error: message };
   return ctx.provider === 'agy'
     ? { error: { code: 401, message, status: 'UNAUTHENTICATED' } }
     : { type: 'error', error: { type: 'authentication_error', message } };
@@ -3021,6 +3074,21 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
       res.end(JSON.stringify(agyExhaustedBody(retryAfter)));
       return;
     }
+    // grok: same — this request's own upstream 429 (grok renders it), else
+    // xAI's `{"error": …}` shape with the soonest throttle as retry-after.
+    if (ctx.provider === 'grok') {
+      if (sendSaved429(res, ctx)) return;
+      ctx.status = 429;
+      const now = Date.now();
+      const throttles = accountManager.accounts
+        .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
+        .map(a => a.rateLimitedUntil - now);
+      const waitMs = hasCapped(null) ? 1000 : throttles.length ? Math.min(...throttles) : 60_000;
+      const retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
+      res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
+      res.end(JSON.stringify(grokExhaustedBody(retryAfter)));
+      return;
+    }
     const deadlineExpired = ctx.continuity.maxWaitMs > 0
       && ctx.continuityDeadlineAt != null
       && Date.now() >= ctx.continuityDeadlineAt;
@@ -3147,6 +3215,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     if (lk === CODEX_INVOCATION_HEADER) continue;
     if (lk === CODEX_ACTOR_AUTHORIZATION_HEADER) continue;
     if (ctx.provider === 'agy' && (lk === 'x-goog-api-key' || lk === 'x-goog-user-project')) continue;
+    if (ctx.provider === 'grok' && lk === 'cookie') continue;
     // Strip accept-encoding: Node fetch auto-decompresses, which would
     // mismatch the Content-Encoding header we forward to the client
     if (lk === 'accept-encoding') continue;
@@ -3156,6 +3225,10 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
   if (ctx.provider === 'codex') {
     headers['authorization'] = `Bearer ${account.credential}`;
     if (account.accountId) headers['chatgpt-account-id'] = account.accountId;
+  } else if (ctx.provider === 'grok') {
+    headers['authorization'] = `Bearer ${account.credential}`;
+    // Per attempt, so a failover carries the new account's identity.
+    rewriteGrokIdentityHeaders(headers, account);
   } else if (isOAuth) {
     headers['authorization'] = `Bearer ${account.credential}`;
   } else {
@@ -3291,7 +3364,8 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // Extract rate limit headers
     const rateLimitHeaders = {};
     for (const [key, value] of upstreamRes.headers.entries()) {
-      if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')) {
+      if (key.startsWith('anthropic-ratelimit-') || key.startsWith('x-codex-')
+          || (ctx.provider === 'grok' && key.startsWith('x-ratelimit-'))) {
         rateLimitHeaders[key] = value;
       }
     }
@@ -3575,6 +3649,61 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // group stays routable. MODEL_CAPACITY_* (or a model-less call) is Google
     // capacity: bounded failover, no account state. With no alternative the
     // upstream body passes through unchanged so agy renders its own message.
+    // grok 429. Only on an inference path does it mean this account is spent:
+    // throttle it until retry-after (seconds or HTTP date, else 5 min) and fail
+    // over at once. Elsewhere, or with no account left, the upstream body
+    // passes through unchanged (grok renders its own message).
+    if (ctx.provider === 'grok' && upstreamRes.status === 429) {
+      const responseBody = await readBodyBounded(
+        upstreamRes.body,
+        ctx.maxResponseBytes,
+        ctx.reserveResponseBytes,
+        ctx.releaseReservedResponseBytes,
+      );
+      if (responseBody === null) {
+        ctx.status = 502;
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Upstream 429 response exceeded the proxy limit.' }));
+        }
+        return;
+      }
+      const responseHeaders = {};
+      const responseConnectionHeaders = connectionHeaderNames(upstreamRes.headers.get('connection'));
+      for (const [key, value] of upstreamRes.headers.entries()) {
+        if (HOP_BY_HOP_HEADERS.has(key) || responseConnectionHeaders.has(key)) continue;
+        if (key === 'content-encoding' || key === 'content-length') continue;
+        responseHeaders[key] = value;
+      }
+      ctx.last429 = { body: responseBody, headers: responseHeaders };
+      const exhausted = isGrokInferencePath(req.url);
+      if (exhausted) {
+        const waitMs = parseRetryAfterMs(upstreamRes.headers.get('retry-after')) || GROK_EXHAUSTED_FALLBACK_MS;
+        accountManager.markRateLimited(account, Math.max(1, Math.ceil(waitMs / 1000)));
+        ctx.tried429.add(account);
+      }
+      const canFailOver = exhausted && !res.destroyed && retryCount < maxRetries
+        && (hasUsable(ctx.tried429) || hasCapped(ctx.tried429));
+      if (canFailOver) {
+        console.log(`[TeamGrok] 429 on "${account.name}" — throttled, switching account`);
+        if (logDir) {
+          appendLogSection(`=== RESPONSE 429 — throttled, switching ===\n${formatHeaders(upstreamRes.headers, metadataOnlyLog)}`);
+          flushRequestLog(logDir, reqId, logSections, hooks);
+        }
+        releaseHeld();
+        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir);
+      }
+      console.log(`[TeamGrok] 429 on "${account.name}"${exhausted ? ' — no other account can serve this' : ''}, passing it through`);
+      if (logDir) {
+        appendLogSection(`=== RESPONSE 429 — passed through ===\n${formatHeaders(upstreamRes.headers, metadataOnlyLog)}`);
+        if (!metadataOnlyLog) appendLogSection(formatLogBody('=== RESPONSE BODY', responseBody));
+        flushRequestLog(logDir, reqId, logSections, hooks);
+      }
+      if (res.destroyed) return;
+      sendSaved429(res, ctx);
+      return;
+    }
+
     if (ctx.provider === 'agy' && upstreamRes.status === 429) {
       const responseBody = await readBodyBounded(
         upstreamRes.body,

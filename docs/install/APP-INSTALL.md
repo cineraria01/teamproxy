@@ -8,12 +8,12 @@
 필요한 것은 **Node 하나**다(Python·tmux·git 불필요). 설치기도 Node 스크립트이고, 앱이 전용 Node를 내려받아 `--node`로 넘기면 시스템 Node가 없어도 된다.
 
 하는 일(사용자 권한으로만, 네트워크 없이. `--with-codex-cli`만 npm 레지스트리를 쓴다):
-- 풀(`claude`·`codex`·`agy`)마다 설치 폴더 `~/.local/share/teamproxy-app/<풀>`(npm prefix)에 설치.
+- 풀(`claude`·`codex`·`agy`·`grok`)마다 설치 폴더 `~/.local/share/teamproxy-app/<풀>`(npm prefix)에 설치.
   원천은 **이 설치기가 들어 있는 폴더**다: `<node> <npm-cli.js> install --global --prefix … --ignore-scripts --install-links <이 폴더>`.
   npm은 시스템 것이 아니라 `--node`와 같은 배포본의 `lib/node_modules/npm/bin/npm-cli.js`(node가 심볼릭 링크면 실제 경로 쪽도 찾는다)를 그 node로 실행한다.
   브랜치 tip을 받지 않는다. 런타임 의존성은 0이다.
-- `~/.local/bin/{teamclaude,teamcodex,teamagy}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄(tmux)·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
-- 설정 `~/.config/{teamclaude,teamcodex,teamagy}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`, `proxy.allowNoAccounts`를 `true`로 적는다.
+- `~/.local/bin/{teamclaude,teamcodex,teamagy,teamgrok}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄(tmux)·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
+- 설정 `~/.config/{teamclaude,teamcodex,teamagy,teamgrok}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`, `proxy.allowNoAccounts`를 `true`로 적는다.
   앱 설치 전부터 있던 설정은 **바꾸지 않는다**(끝 줄과 단계 줄에 `"config":"existing_kept"`, 매니페스트에도 기록). 앱이 만든 설정만 새 키를 채우고 `--purge`로 지운다.
 - launchd 사용자 에이전트 `kr.selvi.teamproxy.<풀>`: `<래퍼> server`, `RunAtLoad`·`KeepAlive`·`ThrottleInterval 10`,
   로그 `~/Library/Logs/teamproxy/<풀>.log`. 설치 기록은 `~/.local/share/teamproxy-app/manifest.json`.
@@ -30,7 +30,7 @@
 
 | 명령 | 뜻 |
 |---|---|
-| `--app [--pools claude,codex,agy] [--node 절대경로] [--with-codex-cli 버전] [--prefix 홈]` | 설치(기본 세 풀). `--node` 기본값은 설치기를 실행한 node. 같은 버전이면 `skip`, 다른 버전이면 갱신하고 에이전트를 다시 올린다 |
+| `--app [--pools claude,codex,agy,grok] [--node 절대경로] [--with-codex-cli 버전] [--prefix 홈]` | 설치(기본 네 풀, grok은 2026-10-15부터; 포트 3459, launchd `kr.selvi.teamproxy.grok`). `--node` 기본값은 설치기를 실행한 node. 같은 버전이면 `skip`, 다른 버전이면 갱신하고 에이전트를 다시 올린다 |
 | `--status` | 설치 여부·버전·풀별 로드·응답·계정 수 |
 | `--uninstall [--purge]` | 에이전트·래퍼·설치 폴더 제거. 설정(토큰)은 `--purge`일 때만 지운다 |
 | `--login-command <풀>` | 로그인에 쓸 argv와 비어 있는 첫 `<풀>-N` 이름 |
@@ -75,7 +75,7 @@
 {"done": true, "ok": true, "pool": "codex", "account": "codex-2", "argv": ["/Users/me/.local/bin/teamcodex", "login", "--name", "codex-2"]}
 ```
 
-앱은 이 argv를 셸 문자열로 합치지 않고 터미널에 그대로 넘긴다. claude·codex·agy 모두 `login --name`을 받는다.
+앱은 이 argv를 셸 문자열로 합치지 않고 터미널에 그대로 넘긴다. claude·codex·agy·grok 모두 `login --name`을 받는다(grok은 `teamgrok login --name grok-N`).
 
 ### 제거
 
@@ -113,7 +113,8 @@
 {"done":true,"ok":false,"error":"login_timeout","message":"Login timed out after 10 minutes"}
 ```
 
-- `auth_url`: 앱이 이 주소를 브라우저로 연다(claude·agy는 CLI가 직접 열지 않는다). 콜백은 CLI가 띄운 루프백 서버가 받는다.
+- `auth_url`: 앱이 이 주소를 브라우저로 연다(claude·agy·grok은 CLI가 직접 열지 않는다). 콜백은 CLI가 띄운 루프백 서버가 받는다.
+  - grok은 기기 코드 로그인이라 콜백이 없다: `{"event":"auth_url","url":"https://accounts.x.ai/oauth2/device?user_code=…","user_code":"F2PW-4F88","browser_opened":false}` 다음 `waiting`, 사용자가 브라우저에서 코드를 승인하면 `done`. `need_code`는 오지 않는다. 기기 코드가 만료되면 `login_timeout`, 거절하면 `oauth_denied`.
   - **teamcodex**는 공식 `codex login`을 감싸 그 출력의 URL을 옮긴다. macOS에서 Codex CLI는 브라우저를 스스로 연다(막을 수 없음). 그래서 이벤트에 `"browser_opened":true`가 붙고 앱은 다시 열지 않는다.
   - `--device-auth`를 주면 `{"event":"auth_url","url":"…","user_code":"ABCD-12345","browser_opened":false}`로 코드를 함께 준다(앱이 코드를 보여 주고 URL을 연다).
 - `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.

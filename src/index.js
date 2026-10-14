@@ -82,6 +82,19 @@ import {
   resolveAgyBin,
   resolveAgyOAuthClient,
 } from './agy.js';
+import {
+  GROK_CLIENT_ID,
+  GROK_DEFAULT_CLIENT_VERSION,
+  GROK_DEFAULT_UPSTREAM,
+  buildGrokRunEnv,
+  fetchGrokUser,
+  grokAuthFilePath,
+  grokCliNotFoundMessage,
+  loginGrokDevice,
+  readGrokAuthFile,
+  refreshGrokAccessToken,
+  resolveGrokBin,
+} from './grok.js';
 
 const SUPERVISED_WORKER_ENV = 'TEAMCLAUDE_SUPERVISED_WORKER';
 const SUPERVISOR_PID_ENV = 'TEAMCLAUDE_SUPERVISOR_PID';
@@ -181,7 +194,7 @@ function publicRequestCapacity(config, accounts = config.accounts || []) {
 }
 
 const args = process.argv.slice(2);
-const cliProvider = args[0] === 'codex' || args[0] === 'agy' ? args[0] : 'anthropic';
+const cliProvider = ['codex', 'agy', 'grok'].includes(args[0]) ? args[0] : 'anthropic';
 if (cliProvider !== 'anthropic') {
   args.shift();
   process.env.TEAMCLAUDE_PROVIDER = cliProvider;
@@ -192,12 +205,20 @@ const MACHINE_COMMANDS = new Set(['accounts', 'status', 'enable', 'disable', 'pr
 // agy mode = the `agy` prefix (which sets the env above) or an inherited
 // TEAMCLAUDE_PROVIDER=agy (the supervised worker, a wrapper).
 const AGY_MODE = process.env.TEAMCLAUDE_PROVIDER === 'agy';
-// Claude/Codex-only commands are not offered for the Antigravity pool.
+// grok mode, same two legs (`grok` prefix or TEAMCLAUDE_PROVIDER=grok).
+const GROK_MODE = process.env.TEAMCLAUDE_PROVIDER === 'grok';
+// Pools that own their config file outright (see poolConfigMismatch).
+const DEDICATED_MODE = AGY_MODE ? 'agy' : GROK_MODE ? 'grok' : null;
+const POOL_LABELS = {
+  agy: { tag: 'TeamAgy', name: 'Antigravity (agy)', a: 'an', file: 'teamagy.json', cli: 'teamagy' },
+  grok: { tag: 'TeamGrok', name: 'Grok', a: 'a', file: 'teamgrok.json', cli: 'teamgrok' },
+};
+// Claude/Codex-only commands are not offered for the Antigravity or Grok pool.
 const AGY_UNSUPPORTED_COMMANDS = new Set([
   'reauth', 'subscription', 'api', 'install-claude-wrapper', 'uninstall-claude-wrapper',
 ]);
-if (AGY_MODE && AGY_UNSUPPORTED_COMMANDS.has(command)) {
-  console.error(`${command} is not available for the Antigravity (agy) pool.\n`);
+if (DEDICATED_MODE && AGY_UNSUPPORTED_COMMANDS.has(command)) {
+  console.error(`${command} is not available for the ${POOL_LABELS[DEDICATED_MODE].name} pool.\n`);
   showHelp();
   process.exit(1);
 }
@@ -216,12 +237,14 @@ if (command !== 'help' && command !== '--help' && command !== '-h') {
   } catch {
     configExists = true; // present but unreadable: never an agy config we can vouch for
   }
-  if (agyConfigMismatch(onDisk?.provider, AGY_MODE, configExists)) {
-    console.error(AGY_MODE
-      ? `[TeamAgy] ${getConfigPath()} is not an Antigravity (agy) config (provider: ${onDisk?.provider ? `"${onDisk.provider}"` : 'unset'}) — refusing to use it.\n`
-        + 'Point TEAMCLAUDE_CONFIG at the agy config (e.g. ~/.config/teamagy.json), or use the teamagy wrapper.'
-      : `[TeamClaude] ${getConfigPath()} is an Antigravity (agy) config — refusing to use it outside agy mode.\n`
-        + 'Run it with the agy prefix: teamagy …, or node src/index.js agy ….');
+  if (poolConfigMismatch(onDisk?.provider, DEDICATED_MODE, configExists)) {
+    const own = POOL_LABELS[DEDICATED_MODE];
+    const theirs = POOL_LABELS[onDisk?.provider];
+    console.error(own
+      ? `[${own.tag}] ${getConfigPath()} is not ${own.a} ${own.name} config (provider: ${onDisk?.provider ? `"${onDisk.provider}"` : 'unset'}) — refusing to use it.\n`
+        + `Point TEAMCLAUDE_CONFIG at the ${DEDICATED_MODE} config (e.g. ~/.config/${own.file}), or use the ${own.cli} wrapper.`
+      : `[TeamClaude] ${getConfigPath()} is ${theirs.a} ${theirs.name} config — refusing to use it outside ${onDisk.provider} mode.\n`
+        + `Run it with the ${onDisk.provider} prefix: ${theirs.cli} …, or node src/index.js ${onDisk.provider} ….`);
     process.exit(1);
   }
 }
@@ -373,7 +396,7 @@ async function superviseServerCommand() {
   // a clean, client-retryable `overloaded_error` SSE event instead of a
   // destroyed client socket ("Connection closed mid-response" in Claude Code,
   // which does NOT auto-retry a raw connection loss).
-  const streamRecovery = !isCodexMode(config) && !isAgyMode(config)
+  const streamRecovery = !isCodexMode(config) && !isAgyMode(config) && !isGrokMode(config)
     && config.streamRecovery !== false;
   const streamIdleTimeoutMs = Number.isFinite(config.streamIdleTimeoutMs)
       && config.streamIdleTimeoutMs > 0
@@ -1089,9 +1112,10 @@ async function superviseServerCommand() {
       [SUPERVISOR_PID_ENV]: String(process.pid),
       [LIFECYCLE_ID_ENV]: lifecycleId,
     };
-    // The `agy` prefix keeps the worker in agy mode even under an entry point
-    // that clears TEAMCLAUDE_PROVIDER (src/teamclaude.js).
-    const child = fork(process.argv[1], isAgyMode(config) ? ['agy', 'server'] : ['server'], {
+    // The `agy`/`grok` prefix keeps the worker in that mode even under an entry
+    // point that clears TEAMCLAUDE_PROVIDER (src/teamclaude.js).
+    const child = fork(process.argv[1], isAgyMode(config) ? ['agy', 'server']
+      : isGrokMode(config) ? ['grok', 'server'] : ['server'], {
       env: childEnv,
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     });
@@ -1398,8 +1422,11 @@ async function proxyWorkerCommand() {
   // worker only carries the env var.
   if (!config.provider && isCodexMode(config)) config.provider = 'codex';
   if (!config.provider && isAgyMode(config)) config.provider = 'agy';
+  if (!config.provider && isGrokMode(config)) config.provider = 'grok';
   const codexMode = isCodexMode(config);
   const agyMode = config.provider === 'agy';
+  const grokMode = config.provider === 'grok';
+  const dedicatedMode = agyMode ? 'agy' : grokMode ? 'grok' : null;
 
   // --log-to <dir>
   const logTo = argValue('--log-to');
@@ -1416,6 +1443,9 @@ async function proxyWorkerCommand() {
     } else if (agyMode) {
       console.error('  teamagy import             Import the local agy login (macOS keychain)');
       console.error('  teamagy login              Google sign-in for another account');
+    } else if (grokMode) {
+      console.error('  teamgrok login             xAI sign-in (device code) for an account');
+      console.error('  teamgrok import            Import the local grok login (~/.grok/auth.json)');
     } else {
       console.error('  teamcodex import           Import from Claude Code');
       console.error('  teamcodex login            OAuth login via browser');
@@ -1440,7 +1470,7 @@ async function proxyWorkerCommand() {
   // when it cannot serve the request's quota group.
   const reevalIntervalMs = Number.isFinite(config.reevalIntervalMs)
     ? config.reevalIntervalMs
-    : agyMode ? 0 : 5 * 60 * 1000;
+    : agyMode || grokMode ? 0 : 5 * 60 * 1000;
   // Default per-account concurrency cap (max simultaneous in-flight requests an
   // account handles before load spreads to the next account). A per-account
   // `maxConcurrent` overrides this. Must be a positive number, else default 3.
@@ -1465,6 +1495,12 @@ async function proxyWorkerCommand() {
       }
       const { clientId, clientSecret } = await ensureAgyOAuthClient(config, null, { rejectedSecret });
       return { clientId, clientSecret, tokenUrl: config.agyTokenUrl || undefined };
+    };
+  }
+  if (grokMode) {
+    accountManager.grokOAuth = {
+      clientId: config.grokOAuthClientId || GROK_CLIENT_ID,
+      tokenUrl: config.grokTokenUrl || undefined,
     };
   }
 
@@ -1586,7 +1622,7 @@ async function proxyWorkerCommand() {
       syncAccounts: async () => {
         const diskConfig = await accountManager.readAfterAccountFlagWrites(() => loadConfig());
         if (!diskConfig) return 0;
-        if (agyConfigMismatch(diskConfig.provider, agyMode, true)) {
+        if (poolConfigMismatch(diskConfig.provider, dedicatedMode, true)) {
           throw new Error(`${getConfigPath()} now holds a "${diskConfig.provider ?? 'unset'}" provider config; not reloading it`);
         }
         return syncAccountsFromDisk(diskConfig, config, accountManager);
@@ -1654,7 +1690,7 @@ async function proxyWorkerCommand() {
     liveSyncChain = liveSyncChain.then(async () => {
       const diskConfig = await accountManager.readAfterAccountFlagWrites(() => loadConfig());
       if (!diskConfig) return;
-      if (agyConfigMismatch(diskConfig.provider, agyMode, true)) {
+      if (poolConfigMismatch(diskConfig.provider, dedicatedMode, true)) {
         throw new Error(`${getConfigPath()} now holds a "${diskConfig.provider ?? 'unset'}" provider config; not reloading it`);
       }
       await syncAccountsFromDisk(diskConfig, config, accountManager);
@@ -1715,7 +1751,7 @@ async function proxyWorkerCommand() {
       const sep = '='.repeat(60);
       console.log('');
       console.log(sep);
-      console.log(codexMode ? '  TeamCodex Proxy' : agyMode ? '  TeamAgy Proxy' : '  TeamClaude Proxy');
+      console.log(codexMode ? '  TeamCodex Proxy' : agyMode ? '  TeamAgy Proxy' : grokMode ? '  TeamGrok Proxy' : '  TeamClaude Proxy');
       console.log(sep);
       console.log(`  Port:       ${port}`);
       console.log(`  Accounts:   ${accounts.length}`);
@@ -1723,6 +1759,7 @@ async function proxyWorkerCommand() {
       console.log(`  Continuity: ${config.continuityMode ? 'on' : 'OFF — fleet-wide exhaustion surfaces 429s to clients'}`);
       console.log(`  Upstream:   ${agyMode
         ? config.agyUpstream || config.upstream || AGY_DEFAULT_UPSTREAM
+        : grokMode ? grokUpstreamOf(config)
         : config.upstream || (codexMode ? 'https://chatgpt.com/backend-api/codex' : 'https://api.anthropic.com')}`);
       console.log('');
       accounts.forEach((a, i) => {
@@ -1733,12 +1770,16 @@ async function proxyWorkerCommand() {
         ? '  Run Codex through proxy:   teamcodex codex run'
         : agyMode
           ? '  Run agy through proxy:     teamagy run   (or: node src/index.js agy run)'
-          : '  Run Claude through proxy:  teamcodex run');
+          : grokMode
+            ? '  Run grok through proxy:    teamgrok run  (or: node src/index.js grok run)'
+            : '  Run Claude through proxy:  teamcodex run');
       console.log(codexMode
         ? '  Show env vars:             teamcodex codex env'
         : agyMode
           ? '  Show env vars:             teamagy env   (or: node src/index.js agy env)'
-          : '  Show env vars:             teamcodex env');
+          : grokMode
+            ? '  Show env vars:             teamgrok env  (or: node src/index.js grok env)'
+            : '  Show env vars:             teamcodex env');
       console.log(sep);
       console.log('');
     }
@@ -2208,6 +2249,10 @@ async function importCommand() {
     await agyImportCommand(config);
     return;
   }
+  if (isGrokMode(config)) {
+    await grokImportCommand(config);
+    return;
+  }
   if (!config.provider && cliProvider === 'codex') config.provider = 'codex';
   const codexMode = isCodexMode(config);
 
@@ -2272,6 +2317,14 @@ async function loginCommand() {
       process.exit(1);
     }
     await agyLoginCommand(config);
+    return;
+  }
+  if (isGrokMode(config)) {
+    if (args.includes('--api')) {
+      console.error('The Grok pool supports xAI (SuperGrok) OAuth accounts only.');
+      process.exit(1);
+    }
+    await grokLoginCommand(config);
     return;
   }
   if (!config.provider && cliProvider === 'codex') config.provider = 'codex';
@@ -2596,6 +2649,8 @@ async function loginMachineCommand(config) {
         clientId, clientSecret, authUrl: config.agyAuthUrl || undefined, tokenUrl: config.agyTokenUrl || undefined,
       });
       account = await upsertAgyAccount(config, argValue('--name'), creds, 'login');
+    } else if (isGrokMode(config)) {
+      account = await upsertGrokAccount(config, argValue('--name'), await grokDeviceLogin(config), 'login');
     } else if (isCodexMode(config) || (!config.provider && cliProvider === 'codex')) {
       const creds = await loginCodexCredentials({ deviceAuth: args.includes('--device-auth') });
       account = await upsertCodexAccount(argValue('--name'), creds, 'login');
@@ -2618,6 +2673,11 @@ async function envCommand() {
   if (isAgyMode(config)) {
     const running = await findRunningServer(config);
     console.log(`export CLOUD_CODE_URL=http://127.0.0.1:${running?.port || config.proxy.port}`);
+    return;
+  }
+  if (isGrokMode(config)) {
+    const running = await findRunningServer(config);
+    console.log(`export GROK_CLI_CHAT_PROXY_BASE_URL=http://127.0.0.1:${running?.port || config.proxy.port}/v1`);
     return;
   }
   if (isCodexMode(config)) {
@@ -2911,6 +2971,7 @@ async function codexResumeCommand() {
 
 async function runCommand(clientArgsOverride = null) {
   if (isAgyMode(null)) return agyRunCommand();
+  if (isGrokMode(null)) return grokRunCommand();
   if (cliProvider !== 'codex' && process.env.TEAMCLAUDE_SESSION_SUPERVISED === '1') {
     console.error(
       '[TeamClaude] Refusing nested supervised Claude launch: TEAMCLAUDE_CLAUDE_BIN must point to the native Claude vendor binary.',
@@ -3207,6 +3268,12 @@ async function statusCommand() {
             if (until > Date.now()) console.log(`    ${label} blocked until ${new Date(until).toISOString()}`);
           }
         }
+        // grok: the line above is the x-ratelimit meter (no window, no reset).
+        const rl = acct.provider === 'grok' ? q.grokRateLimit : null;
+        if (rl) {
+          console.log(`    Rate limit: requests ${rl.requestsRemaining ?? '-'}/${rl.requestsLimit ?? '-'} left    `
+            + `tokens ${rl.tokensRemaining ?? '-'}/${rl.tokensLimit ?? '-'} left`);
+        }
         // Codex reset credits ("Full reset" grants). Guarded with != null so a
         // status from an older server (no field) prints nothing extra.
         if (q.codexResetCredits != null) {
@@ -3298,7 +3365,12 @@ async function accountsCommand() {
         try {
           const newTokens = account.provider === 'codex'
             ? await refreshCodexAccessToken(account.refreshToken)
-            : await refreshAccessToken(account.refreshToken);
+            : account.provider === 'grok'
+              ? await refreshGrokAccessToken(account.refreshToken, {
+                clientId: cfg.grokOAuthClientId || GROK_CLIENT_ID,
+                tokenUrl: cfg.grokTokenUrl || undefined,
+              })
+              : await refreshAccessToken(account.refreshToken);
           applyOAuthTokens(account, newTokens);
         } catch {}
       }));
@@ -3317,8 +3389,8 @@ async function accountsCommand() {
           provider: 'codex',
         };
       }
-      if (a.provider === 'agy') {
-        return { accountUuid: a.accountUuid || null, email: a.email || null, provider: 'agy' };
+      if (a.provider === 'agy' || a.provider === 'grok') {
+        return { accountUuid: a.accountUuid || null, email: a.email || null, provider: a.provider };
       }
       // The running worker owns token rotation. Sending an already-expired token
       // directly here is both useless and misleading; status remains visible via
@@ -3338,7 +3410,7 @@ async function accountsCommand() {
       accessToken: account.accessToken,
       refreshToken: account.refreshToken,
       accountUuid: profile.accountUuid,
-      name: account.provider !== 'codex' && account.provider !== 'agy' && profile.email
+      name: !['codex', 'agy', 'grok'].includes(account.provider) && profile.email
         ? profile.email
         : account.name,
     }];
@@ -3360,7 +3432,7 @@ async function accountsCommand() {
         // Update stored UUID and name from profile
         if (profiles[i] && !profiles[i].error) {
           a.accountUuid = profiles[i].accountUuid;
-          if (a.provider !== 'codex' && a.provider !== 'agy' && profiles[i].email) a.name = profiles[i].email;
+          if (!['codex', 'agy', 'grok'].includes(a.provider) && profiles[i].email) a.name = profiles[i].email;
         }
       }
     }
@@ -3404,6 +3476,13 @@ async function accountsCommand() {
 
     // OAuth account
     const hasProfile = p && !p.error;
+    if (a.provider === 'grok') {
+      const src = a.source ? `, ${a.source}` : '';
+      console.log(`  [${i + 1}] ${a.name} (Grok ${a.planType || 'tier unknown'}${src})`);
+      if (a.email && a.email !== a.name) console.log(`       Email: ${a.email}`);
+      if (verbose && a.expiresAt) printTokenExpiry(a.expiresAt);
+      continue;
+    }
     if (a.provider === 'agy') {
       const src = a.source ? `, ${a.source}` : '';
       console.log(`  [${i + 1}] ${a.name} (Antigravity ${a.tierId || 'tier unknown'}${src})`);
@@ -3742,6 +3821,42 @@ its credentials with the pool account's on every call.
 Options:
   --name NAME         Set account name (import/login)
   --file PATH         Login JSON to import instead of the keychain (import)
+  --log-to DIR        Log full requests/responses to DIR
+
+Config: ${getConfigPath()}
+`);
+    return;
+  }
+  if (GROK_MODE) {
+    console.log(`TeamGrok - Multi-account Grok (xAI SuperGrok) proxy
+
+Usage: teamgrok [command] [options]
+       node src/index.js grok [command] [options]
+
+Commands:
+  server              Start the Grok proxy server (default port 3459)
+  stop                Stop the running proxy
+  restart             Restart the proxy
+  login               Add an account: xAI sign-in with a device code in the browser
+  import              Import grok's own login (~/.grok/auth.json; shares its refresh token)
+  import --file PATH  Import the same JSON from another file
+  run [-- args...]    Run grok through the proxy (starts the proxy if needed)
+  env                 Print the GROK_CLI_CHAT_PROXY_BASE_URL to use with grok
+  status              Show proxy & account status
+  reload              Re-read every account's subscription tier now, then show status
+  accounts            List configured accounts
+  remove <name>       Remove an account (its xAI grant is not revoked)
+  disable <name>      Disable an account
+  enable <name>       Re-enable an account
+  priority <name> <n> Set selection priority ("auto" clears it)
+  help                Show this help
+
+grok itself must be signed in once (run \`grok\` and log in, any account); the
+proxy replaces its credentials with the pool account's on every call.
+
+Options:
+  --name NAME         Set account name (login/import; default grok-1, grok-2, …)
+  --file PATH         grok auth.json to import (import)
   --log-to DIR        Log full requests/responses to DIR
 
 Config: ${getConfigPath()}
@@ -4141,6 +4256,164 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
   return name;
 }
 
+// ── Grok (xAI) ──────────────────────────────────────────────
+
+function assertGrokConfig(cfg) {
+  if (cfg.provider !== 'grok') {
+    throw new Error(`${getConfigPath()} is not a Grok config (provider: ${cfg.provider ? `"${cfg.provider}"` : 'unset'}) — not writing to it.`);
+  }
+}
+
+function grokUpstreamOf(config) {
+  return config?.grokUpstream || config?.upstream || GROK_DEFAULT_UPSTREAM;
+}
+
+function grokClientOf(config) {
+  return {
+    clientId: config.grokOAuthClientId || GROK_CLIENT_ID,
+    tokenUrl: config.grokTokenUrl || undefined,
+    deviceUrl: config.grokDeviceUrl || undefined,
+  };
+}
+
+function grokDeviceLogin(config) {
+  const { clientId, tokenUrl, deviceUrl } = grokClientOf(config);
+  return loginGrokDevice({ clientId, tokenUrl, deviceUrl });
+}
+
+async function grokLoginCommand(config) {
+  try {
+    await upsertGrokAccount(config, argValue('--name'), await grokDeviceLogin(config), 'login');
+  } catch (err) {
+    console.error(`[TeamGrok] ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function grokImportCommand(config) {
+  const file = argValue('--file') || grokAuthFilePath();
+  let creds;
+  try {
+    creds = readGrokAuthFile(file, grokClientOf(config).clientId);
+  } catch (err) {
+    console.error(`[TeamGrok] Import failed: ${err.message}`);
+    process.exit(1);
+  }
+  console.error('Warning: the pool and the local grok login now share one refresh token. If xAI rotates '
+    + 'refresh tokens, one side gets signed out. Prefer `teamgrok login` (its own sign-in).');
+  try {
+    await upsertGrokAccount(config, argValue('--name'), creds, 'import');
+  } catch (err) {
+    console.error(`[TeamGrok] Import failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function grokRunCommand(config = null) {
+  config ??= await loadOrCreateConfig();
+  if (!Array.isArray(config.accounts) || config.accounts.length === 0) {
+    console.error('[TeamGrok] No accounts configured. Add one first: teamgrok login (generic: node src/index.js grok login).');
+    process.exit(1);
+  }
+  let running;
+  try {
+    // The `grok` prefix survives an entry point that clears TEAMCLAUDE_PROVIDER.
+    running = await ensureProxyRunning(config, 15_000, ['grok', 'server']);
+  } catch (err) {
+    console.error(`[TeamGrok] ${err.message}`);
+    process.exit(1);
+  }
+  const clientArgs = args.slice(1);
+  if (clientArgs[0] === '--') clientArgs.shift();
+  const grokBin = resolveGrokBin();
+  const result = spawnSync(grokBin, clientArgs, {
+    stdio: 'inherit',
+    env: buildGrokRunEnv(process.env, running.port),
+  });
+  if (result.error) {
+    console.error(result.error.code === 'ENOENT'
+      ? grokCliNotFoundMessage(grokBin)
+      : `Failed to start grok: ${result.error.message}`);
+    process.exit(1);
+  }
+  return propagateChildExit(result);
+}
+
+/**
+ * Add or update a grok account. Identity is the xAI `userId` (`/v1/user`, else the login's own): a re-login of
+ * the same user updates it in place (routing settings kept). Refresh tokens are never revoked.
+ */
+async function upsertGrokAccount(config, explicitName, creds, source) {
+  const { clientId, tokenUrl } = grokClientOf(config);
+  // A copied grok login may hold an expired access token; /v1/user needs a live one.
+  if (isTokenExpiringSoon(creds.expiresAt)) {
+    try {
+      const fresh = await refreshGrokAccessToken(creds.refreshToken, { clientId, tokenUrl });
+      creds = { ...creds, ...fresh };
+    } catch (err) {
+      console.error(`Warning: token refresh failed: ${err.message}`);
+    }
+  }
+  let user = null;
+  try {
+    user = await fetchGrokUser(creds.accessToken, {
+      upstream: grokUpstreamOf(config),
+      clientVersion: config.grokClientVersion || GROK_DEFAULT_CLIENT_VERSION,
+    });
+  } catch (err) {
+    console.error(`Warning: ${err.message} — tier unknown`);
+  }
+  if (user?.hasGrokCodeAccess === false) {
+    console.error('Warning: this xAI account has no Grok Build (grok CLI) access; requests may be refused.');
+  }
+  const userId = user?.userId || creds.accountUuid;
+  if (!userId) throw new Error('Could not tell which xAI user this login belongs to (no userId).');
+  let name = explicitName || null;
+  let action = 'Added';
+  const savedConfig = await atomicConfigUpdate(cfg => {
+    assertGrokConfig(cfg);
+    assertNameFree(cfg, explicitName);
+    let idx = cfg.accounts.findIndex(a => a.accountUuid === userId);
+    if (idx < 0 && name) idx = cfg.accounts.findIndex(a => a.name === name);
+    const previous = idx >= 0 ? cfg.accounts[idx] : null;
+    const sameIdentity = previous?.accountUuid === userId;
+    if (!name) name = sameIdentity ? previous.name : null;
+    if (!name) {
+      let n = 1;
+      do { name = `grok-${n++}`; } while (cfg.accounts.some(a => a.name === name));
+    }
+    const account = {
+      name,
+      provider: 'grok',
+      type: 'oauth',
+      source,
+      accountUuid: userId,
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      expiresAt: creds.expiresAt,
+      email: user?.email || creds.email || null,
+      teamId: user?.teamId || creds.teamId || null,
+    };
+    // A name match may be another xAI user: inherit its tier only for the same identity.
+    const planType = user?.tier || (sameIdentity ? previous.planType : null);
+    if (planType) account.planType = planType;
+    if (previous) {
+      action = 'Updated';
+      if (previous.enabled !== undefined) account.enabled = previous.enabled;
+      if (previous.priority !== undefined) account.priority = previous.priority;
+      if (previous.maxConcurrent !== undefined) account.maxConcurrent = previous.maxConcurrent;
+      cfg.accounts[idx] = account;
+    } else {
+      cfg.accounts.push(account);
+    }
+    cfg.provider = 'grok';
+  });
+  console.log(`${action} Grok account "${name}"${user?.tier ? ` (${user.tier})` : ''}`);
+  console.log(`Saved to ${getConfigPath()}`);
+  await noteRunningServerReload(savedConfig);
+  return name;
+}
+
 async function upsertCodexAccount(name, creds, source = 'unknown') {
   const requested = name;
   if (!name) name = creds.email;
@@ -4284,6 +4557,10 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
         mgr.planType = diskAcct.planType;
       }
       if (mgr.provider === 'agy') mgr.projectId = diskAcct.projectId || null;
+      if (mgr.provider === 'grok') {
+        mgr.email = diskAcct.email || null;
+        mgr.teamId = diskAcct.teamId || null;
+      }
       // Mirror the applied state into the in-memory config copy too. Otherwise a
       // later TUI saveConfig (for any unrelated op) would spread the pre-sync
       // enabled/priority over the disk value and silently revert a CLI change.
@@ -4375,14 +4652,14 @@ function isCodexMode(config) {
 }
 
 /**
- * Config/mode disagreement (combinations involving agy only): agy mode accepts
- * an existing file only when it says `provider: "agy"`; any other mode refuses
- * an agy config.
+ * Config/mode disagreement (combinations involving agy or grok only): agy/grok
+ * mode accepts an existing file only when it names that same provider; any
+ * other mode refuses an agy or grok config.
  */
-function agyConfigMismatch(configuredProvider, agyMode, configExists) {
-  return agyMode
-    ? configExists && configuredProvider !== 'agy'
-    : configuredProvider === 'agy';
+function poolConfigMismatch(configuredProvider, dedicatedMode, configExists) {
+  return dedicatedMode
+    ? configExists && configuredProvider !== dedicatedMode
+    : configuredProvider === 'agy' || configuredProvider === 'grok';
 }
 
 function isAgyMode(config) {
@@ -4392,9 +4669,15 @@ function isAgyMode(config) {
     || process.env.TEAMCLAUDE_PROVIDER === 'agy';
 }
 
+function isGrokMode(config) {
+  return config?.provider === 'grok' || cliProvider === 'grok'
+    || process.env.TEAMCLAUDE_PROVIDER === 'grok';
+}
+
 /** The wrapper command of this pool, for "run this next" hints. */
 function cliName(config) {
   if (isAgyMode(config)) return 'teamagy';
+  if (isGrokMode(config)) return 'teamgrok';
   return isCodexMode(config) ? 'teamcodex' : 'teamclaude';
 }
 
