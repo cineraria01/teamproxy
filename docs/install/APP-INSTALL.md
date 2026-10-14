@@ -41,7 +41,7 @@
 
 ```json
 {"step": "preflight", "status": "ok", "detail": "node, npm, launchctl을 찾았습니다"}
-{"step": "npm:codex", "status": "start", "detail": "teamcodex 1.3.0 설치 중"}
+{"step": "npm:codex", "status": "start", "detail": "teamcodex 1.4.0 설치 중"}
 {"step": "launchd:codex", "status": "skip", "detail": "kr.selvi.teamproxy.codex가 이미 실행 중입니다"}
 ```
 
@@ -51,8 +51,8 @@
 ### 끝 줄
 
 ```json
-{"done": true, "ok": true, "version": "1.3.0", "pools": {"codex": {"port": 3457, "label": "kr.selvi.teamproxy.codex", "installed": true, "running": false}}}
-{"done": true, "ok": false, "version": "1.3.0", "pools": {...}, "error": "conflict_existing_install", "detail": "codex: 포트 3457를 다른 프로세스가 쓰고 있습니다. 덮어쓰지 않고 멈춥니다."}
+{"done": true, "ok": true, "version": "1.4.0", "pools": {"codex": {"port": 3457, "label": "kr.selvi.teamproxy.codex", "installed": true, "running": false}}}
+{"done": true, "ok": false, "version": "1.4.0", "pools": {...}, "error": "conflict_existing_install", "detail": "codex: 포트 3457를 다른 프로세스가 쓰고 있습니다. 덮어쓰지 않고 멈춥니다."}
 ```
 
 오류 코드: `missing_node`(`--node`가 없거나 그 옆에 npm이 없음)·`conflict_existing_install`·`npm_failed`·`config_failed`·`launchd_failed`·`install_failed`·`usage`(잘못된 인자, 종료 코드 2).
@@ -64,7 +64,7 @@
 ### `--status`
 
 ```json
-{"done": true, "ok": true, "installed": true, "version": "1.3.0", "pools": {"codex": {"port": 3457, "label": "kr.selvi.teamproxy.codex", "installed": true, "loaded": true, "running": true, "accounts": 2, "usable": 1}, "claude": {...}, "agy": {...}}}
+{"done": true, "ok": true, "installed": true, "version": "1.4.0", "pools": {"codex": {"port": 3457, "label": "kr.selvi.teamproxy.codex", "installed": true, "loaded": true, "running": true, "accounts": 2, "usable": 1}, "claude": {...}, "agy": {...}}}
 ```
 
 `running`은 포트가 응답, `accounts`는 설정 파일의 계정 수, `usable`은 서버가 말하는 지금 쓸 수 있는 계정 수(응답이 없으면 0).

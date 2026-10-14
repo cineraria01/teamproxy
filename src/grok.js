@@ -67,13 +67,25 @@ export function parseGrokTokenResponse(data, previousRefreshToken = null) {
  * email, team_id, oidc_client_id, …}}`. Takes the entry of `clientId`, else the only OIDC entry.
  */
 export function parseGrokAuthFile(raw, clientId = GROK_CLIENT_ID) {
-  const data = typeof raw === 'string' || Buffer.isBuffer(raw) ? JSON.parse(String(raw)) : raw;
+  let data = raw;
+  if (typeof raw === 'string' || Buffer.isBuffer(raw)) {
+    // Fixed wording: a parse error message would quote the start of the file (a token).
+    try { data = JSON.parse(String(raw)); } catch { throw new Error('grok auth.json is not valid JSON'); }
+  }
   if (!data || typeof data !== 'object') throw new Error('grok auth.json is not a JSON object');
   const entries = Object.entries(data).filter(([, v]) => v && typeof v === 'object' && nonEmpty(v.key));
   const entry = entries.find(([k, v]) => k.endsWith(`::${clientId}`) || v.oidc_client_id === clientId)
     ?? (entries.length === 1 ? entries[0] : null);
   if (!entry) throw new Error(`grok auth.json has no login for client ${clientId}`);
   const login = entry[1];
+  // The lone-entry fallback must not pick a login issued to another client: its refresh token would not
+  // refresh with ours.
+  const keyClient = entry[0].includes('::') ? entry[0].split('::').at(-1) : null;
+  const otherClient = [login.oidc_client_id, keyClient].map(nonEmpty).find(id => id && id !== clientId);
+  if (otherClient) {
+    throw new Error(`grok auth.json holds a login for OAuth client ${otherClient}, not ${clientId}; `
+      + 'its refresh token cannot be used here (set grokOAuthClientId, or use teamgrok login)');
+  }
   if (!nonEmpty(login.refresh_token)) throw new Error('grok auth.json login has no refresh_token');
   const claims = decodeJwtPayload(login.key);
   return {
@@ -151,17 +163,24 @@ export async function loginGrokDevice({
     console.log(`If the browser doesn't open, visit:\n  ${url}\n`);
     open(url);
   }
-  let intervalMs = Math.max(0, Number(device.interval ?? 5)) * 1000;
+  const interval = Number(device.interval);
+  let intervalMs = (Number.isFinite(interval) ? Math.max(0, interval) : 5) * 1000;
   const deadline = now() + (Number(device.expires_in) || 1800) * 1000;
   for (;;) {
     if (now() >= deadline) throw new Error('xAI device login timed out (expired_token)');
     await sleep(intervalMs);
-    const poll = await postForm(tokenUrl || GROK_TOKEN_URL, {
-      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-      device_code: device.device_code,
-      client_id: clientId,
-    });
+    let poll;
+    try {
+      poll = await postForm(tokenUrl || GROK_TOKEN_URL, {
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: device.device_code,
+        client_id: clientId,
+      });
+    } catch {
+      continue; // network blip: try again at the next interval until the deadline
+    }
     if (poll.ok) return parseGrokTokenResponse(poll.data);
+    if (poll.status >= 500) continue;
     const code = poll.data?.error;
     if (code === 'authorization_pending') continue;
     if (code === 'slow_down') { intervalMs += 5000; continue; }
@@ -210,7 +229,12 @@ export function grokAffinityKey(url, headers = {}) {
   const conv = nonEmpty(headers['x-grok-conv-id']);
   if (conv) return `conv:${conv}`;
   const path = /^\/v1\/sessions\/([^/?]+)/.exec(String(url || ''))?.[1];
-  return path ? `session:${decodeURIComponent(path)}` : null;
+  if (!path) return null;
+  try {
+    return `session:${decodeURIComponent(path)}`;
+  } catch {
+    return `session:${path}`; // malformed %-escape: the raw id still keys the session
+  }
 }
 
 /**

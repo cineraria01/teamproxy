@@ -3247,7 +3247,10 @@ async function statusCommand() {
       if (q.unified5h != null || q.unified7d != null || Object.keys(q.modelWeekly ?? {}).length > 0) {
         const ses = q.unified5h != null ? (q.unified5h * 100).toFixed(1) + '%' : '-';
         const wk = q.unified7d != null ? (q.unified7d * 100).toFixed(1) + '%' : '-';
-        let line = `    Session:  ${ses} used    Weekly: ${wk} used`;
+        // grok: one meter (the fuller of x-ratelimit requests/tokens), no windows.
+        let line = acct.provider === 'grok'
+          ? `    Rate limit used: ${ses}`
+          : `    Session:  ${ses} used    Weekly: ${wk} used`;
         // Model-scoped weekly windows (7d_oi = the Fable weekly limit). Guarded
         // with ?. so a status from an older running server (no modelWeekly
         // field) still prints. Unknown labels print as-is.

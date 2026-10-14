@@ -1041,7 +1041,14 @@ export class TUI {
     let r1 = null, r2 = null, l1 = 'Ses', l2 = 'Wk ', t1 = null, t2 = null;
     let r3 = null, l3 = null, t3 = null;
 
-    if (a.type === 'oauth') {
+    if (a.provider === 'grok') {
+      // grok: x-ratelimit request/token usage, no reset time and no third bar.
+      const rl = q.grokRateLimit || {};
+      l1 = 'Req';
+      l2 = 'Tok';
+      r1 = rl.requestsLimit > 0 && rl.requestsRemaining != null ? 1 - rl.requestsRemaining / rl.requestsLimit : null;
+      r2 = rl.tokensLimit > 0 && rl.tokensRemaining != null ? 1 - rl.tokensRemaining / rl.tokensLimit : null;
+    } else if (a.type === 'oauth') {
       r1 = q.unified5h;
       r2 = q.unified7d;
       t1 = q.unified5hReset;

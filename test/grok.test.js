@@ -41,6 +41,7 @@ async function fakeAuth(answers, device = {}) {
       return;
     }
     const [status, body] = answers.shift();
+    if (status === 'drop') { req.socket.destroy(); return; } // network failure mid-poll
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(body));
   });
@@ -94,6 +95,34 @@ test('device login fails on expired_token and access_denied', async () => {
   }
 });
 
+test('device login uses 5 s for a non-numeric interval and retries a network error or 5xx until the deadline', async () => {
+  const auth = await fakeAuth([
+    ['drop'],
+    [503, { error: 'unavailable' }],
+    [200, { access_token: ACCESS, refresh_token: 'rt-2' }],
+  ], { interval: 'soon' });
+  const sleeps = [];
+  try {
+    const creds = await loginGrokDevice({
+      deviceUrl: auth.deviceUrl, tokenUrl: auth.tokenUrl, open: () => {}, sleep: async ms => { sleeps.push(ms); },
+    });
+    assert.equal(creds.refreshToken, 'rt-2');
+    assert.deepEqual(sleeps, [5000, 5000, 5000]);
+  } finally {
+    auth.server.close();
+  }
+  const dead = await fakeAuth([[503, {}], [503, {}], [503, {}]], { expires_in: 2 });
+  let clock = 0;
+  try {
+    await assert.rejects(loginGrokDevice({
+      deviceUrl: dead.deviceUrl, tokenUrl: dead.tokenUrl, open: () => {},
+      now: () => clock, sleep: async ms => { clock += ms; },
+    }), /timed out/);
+  } finally {
+    dead.server.close();
+  }
+});
+
 test('refresh stores a rotated refresh token, keeps the old one when none comes back, and flags invalid_grant', async () => {
   const auth = await fakeAuth([
     [200, { access_token: ACCESS, refresh_token: 'rt-new', expires_in: 21600 }],
@@ -129,6 +158,15 @@ test('grok auth.json: the entry of our client id, identity from the login, expir
   assert.equal(creds.teamId, 'team-file');
   assert.equal(creds.expiresAt, 2_000_000_000_000);
   assert.throws(() => parseGrokAuthFile('{}'), /no login/);
+  // the lone-entry fallback never takes another client's login
+  assert.throws(() => parseGrokAuthFile({
+    'https://auth.x.ai::other-client': { key: ACCESS, refresh_token: 'x', oidc_client_id: 'other-client' },
+  }), /OAuth client other-client, not b1a00492/);
+  // a parse error never quotes the file (it holds tokens)
+  assert.throws(() => parseGrokAuthFile('{"secret-token-start'), err => {
+    assert.equal(err.message, 'grok auth.json is not valid JSON');
+    return true;
+  });
   assert.equal(grokAuthFilePath({ GROK_HOME: '/g' }), '/g/auth.json');
   assert.equal(grokAuthFilePath({ HOME: '/h' }), '/h/.grok/auth.json');
 });
@@ -143,6 +181,8 @@ test('paths, affinity keys, rate-limit meter, identity rewrite', () => {
   assert.equal(grokAffinityKey('/v1/responses', { 'x-grok-session-id': 's', 'x-grok-conv-id': 'c' }), 'session:s');
   assert.equal(grokAffinityKey('/v1/responses', { 'x-grok-session-id': '', 'x-grok-conv-id': 'c' }), 'conv:c');
   assert.equal(grokAffinityKey('/v1/sessions/abc/signals', {}), 'session:abc');
+  assert.equal(grokAffinityKey('/v1/sessions/a%20b/signals', {}), 'session:a b');
+  assert.equal(grokAffinityKey('/v1/sessions/%E0%A4%A/signals', {}), 'session:%E0%A4%A');
   assert.equal(grokAffinityKey('/v1/models', {}), null);
 
   assert.equal(parseGrokRateLimit({}), null);

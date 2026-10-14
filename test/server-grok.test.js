@@ -345,6 +345,20 @@ test('a grok session stays on its account across connections: x-grok-session-id,
   }
 });
 
+test('a session path with a malformed %-escape is still answered (raw id as the affinity key)', async () => {
+  const upstream = await grokUpstream((call, res) => ok(res, '{"ok":true}'));
+  const { proxy, url } = await grokProxy([grokAccount('a')], upstream.url);
+  try {
+    const response = await send(url, '/v1/sessions/%E0%A4%A/signals', { method: 'POST', body: '{}' });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.toString(), '{"ok":true}');
+    assert.equal(upstream.calls[0].url, '/v1/sessions/%E0%A4%A/signals');
+  } finally {
+    await closeServer(proxy);
+    await closeServer(upstream.server);
+  }
+});
+
 test('a zstd request body and an SSE response pass through byte-identical', async () => {
   const sse = [
     'event: response.created\ndata: {"type":"response.created"}\n\n',
