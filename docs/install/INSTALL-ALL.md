@@ -1,4 +1,4 @@
-# teamclaude · teamcodex · teamagy · 상태라인 2종 — 새 머신 설치 프롬프트
+# teamclaude · teamcodex · teamagy · teamgrok · 상태라인 2종 — 새 머신 설치 프롬프트
 
 새 머신의 Claude Code(또는 Codex)에 이 문서 전체를 붙여 넣거나, 한 줄로 이렇게 시킨다:
 
@@ -6,7 +6,7 @@
 
 ---
 
-당신은 이 머신에 Claude·Codex·Antigravity(agy) 다계정 프록시와 상태라인 두 개를 설치한다(teamagy는 선택). **모든 소스는
+당신은 이 머신에 Claude·Codex·Antigravity(agy) 다계정 프록시와 상태라인 두 개를 설치한다(teamagy·teamgrok은 선택). **모든 소스는
 GitHub `cineraria01` 계정의 포크에서만 가져온다.** `sangrokjung/teamclaude`,
 `jung-wan-kim/teamclaude`, npm의 `@karpeleslab/teamclaude`는 **절대 설치하지 말 것**
 (같은 이름의 원본이지만 우리 수정이 없다). 다른 머신의 `~/.config/teamclaude.json`·
@@ -30,6 +30,7 @@ brew install tmux node git python3   # 없는 것만
 node -v; npm -v; git --version; tmux -V; python3 --version   # node 20+, python 3.9+
 command -v claude; command -v codex   # Claude Code·Codex CLI가 먼저 설치돼 있어야 한다
 command -v agy                        # teamagy를 쓸 때만: Antigravity CLI, agy에서 한 번 로그인해 둔다
+ls ~/.grok/bin/grok                   # teamgrok을 쓸 때만: Grok Build CLI, grok에서 한 번 로그인해 둔다
 echo "$PATH" | tr ':' '\n' | grep -x "$HOME/.local/bin" || echo 'PATH에 ~/.local/bin 추가 필요'
 ```
 
@@ -116,6 +117,31 @@ chmod 755 ~/.local/bin/teamagy
 teamagy --help | head -3
 ```
 
+### 1-4. grok 풀 래퍼 `~/.local/bin/teamgrok` 만들기 (선택)
+
+xAI Grok Build CLI(`grok`)의 SuperGrok 계정 풀이다(:3459). grok에서 한 번 로그인해 두어야 한다(어느 계정이든;
+프록시가 요청의 인증과 신원 헤더를 풀 계정 것으로 바꾼다). Selvi 앱 같은 다른 클라이언트도 이 풀을 쓸 수 있다.
+
+```sh
+rsync -a ~/.local/share/teamcodex-global/ ~/.local/share/teamgrok-global/
+cat > ~/.local/bin/teamgrok <<EOF
+#!/bin/sh
+# Grok pool (:3459). Own install (~/.local/share/teamgrok-global), cineraria01/teamproxy fork.
+if [ "\${1-}" = grok ]; then shift; fi
+PKG=\$HOME/.local/share/teamgrok-global/lib/node_modules/teamcodex
+# No args or grok flags open grok with the account footer (src/hud/launcher.py --grok runs teamgrok run -- …;
+# print mode and non-terminal runs skip the footer). A grok subcommand goes after -- and runs without it.
+case "\${1-}" in
+  -h|--help) ;;
+  --) shift; set -- run -- "\$@" ;;
+  ''|-*) exec python3 "\$PKG/src/hud/launcher.py" --grok "\$@" ;;
+esac
+exec env -u TEAMCLAUDE_SESSION_SUPERVISED TEAMCLAUDE_PROVIDER=grok TEAMCLAUDE_CONFIG=\$HOME/.config/teamgrok.json TEAMGROK_GROK_BIN=\$HOME/.grok/bin/grok GROK_DISABLE_AUTOUPDATER=1 $(command -v node) "\$PKG/src/index.js" grok "\$@"
+EOF
+chmod 755 ~/.local/bin/teamgrok
+teamgrok --help | head -3
+```
+
 ## 2. 계정 로그인
 
 각 계정을 **도구당 한 번만** 로그인한다(재로그인은 세션을 하나씩 누적시키므로 일시 오류에
@@ -127,6 +153,8 @@ teamcodex accounts
 teamagy import --name pro-1         # (teamagy) agy에 로그인된 계정을 가져온다
 teamagy login --name pro-2          # (teamagy) 다른 계정은 브라우저 로그인, agy 로그인은 그대로
 teamagy accounts
+teamgrok login --name grok-1        # (teamgrok) 브라우저에서 기기 코드를 확인해 xAI 로그인, grok 로그인은 그대로
+teamgrok accounts
 ```
 
 teamagy의 OAuth 클라이언트 비밀값은 저장소에 없다. 처음 가져올 때 agy 바이너리에서 찾아
@@ -200,7 +228,7 @@ patch('~/.config/teamcodex.json', {
 PY
 ```
 
-포트는 기본값(Claude 3456 · Codex 3457 · agy 3458)을 그대로 쓴다. `teamagy.json`에는 `"provider": "agy"`가 들어가며,
+포트는 기본값(Claude 3456 · Codex 3457 · agy 3458 · grok 3459)을 그대로 쓴다. `teamgrok.json`도 `"provider": "grok"`로 같은 규칙이다. `teamagy.json`에는 `"provider": "agy"`가 들어가며,
 다른 풀의 설정 파일로는 teamagy가 실행되지 않는다. Claude 쪽 `proxy.apiKey`는 로그인이
 만든 값을 유지한다(상태라인이 이 키로 status를 읽는다).
 
@@ -210,8 +238,8 @@ PY
 
 ```sh
 TMUX_BIN=$(command -v tmux)
-for pool in teamclaude teamcodex teamagy; do
-[ -x ~/.local/bin/$pool ] || continue   # teamagy는 §1-3을 했을 때만
+for pool in teamclaude teamcodex teamagy teamgrok; do
+[ -x ~/.local/bin/$pool ] || continue   # teamagy·teamgrok은 §1-3·§1-4를 했을 때만
 cat > ~/.local/bin/$pool-tmux-server <<EOF
 #!/bin/sh
 # Run the $pool proxy inside a detached tmux session so its TUI can be viewed:
@@ -232,7 +260,7 @@ EOF
 chmod 755 ~/.local/bin/$pool-tmux-server
 done
 
-mkdir -p ~/.local/state/teamcodex ~/.local/state/teamagy ~/Library/Logs
+mkdir -p ~/.local/state/teamcodex ~/.local/state/teamagy ~/.local/state/teamgrok ~/Library/Logs
 python3 - <<'PY'
 import os, plistlib
 from pathlib import Path
@@ -243,6 +271,7 @@ for label, wrapper, out in [
     ('com.local.teamclaude', 'teamclaude-tmux-server', home/'Library/Logs/teamclaude.log'),
     ('com.local.teamcodex',  'teamcodex-tmux-server',  home/'.local/state/teamcodex/server.log'),
     ('com.local.teamagy',    'teamagy-tmux-server',    home/'.local/state/teamagy/server.log'),
+    ('com.local.teamgrok',   'teamgrok-tmux-server',   home/'.local/state/teamgrok/server.log'),
 ]:
     if not (home/'.local/bin'/wrapper).exists():
         continue
@@ -261,10 +290,12 @@ PY
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamclaude.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamcodex.plist
 [ -f ~/Library/LaunchAgents/com.local.teamagy.plist ] && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamagy.plist
+[ -f ~/Library/LaunchAgents/com.local.teamgrok.plist ] && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamgrok.plist
 sleep 3
 curl -s -o /dev/null -w 'claude %{http_code}\n' http://127.0.0.1:3456/teamclaude/status
 curl -s -o /dev/null -w 'codex  %{http_code}\n' http://127.0.0.1:3457/teamclaude/status
 curl -s -o /dev/null -w 'agy    %{http_code}\n' http://127.0.0.1:3458/teamclaude/status   # teamagy를 했을 때
+curl -s -o /dev/null -w 'grok   %{http_code}\n' http://127.0.0.1:3459/teamclaude/status   # teamgrok을 했을 때
 teamclaude status; teamcodex status; teamagy status
 ```
 
@@ -323,16 +354,24 @@ teamagy -p "Reply with exactly: OK" --model gemini-3.8-flash-medium   # 프록�
 cd ~/some-project && teamagy                                         # agy 화면 + 하단 계정 줄(Gemini 5h·7d, 3p)
 ```
 
+teamgrok을 설치했다면:
+
+```sh
+teamgrok -p "Reply with exactly: OK"                                 # 프록시를 거친 grok 응답
+cd ~/some-project && teamgrok                                        # grok 화면 + 하단 계정 줄(RL 사용률, 등급)
+```
+
 ## 7. 최종 점검표
 
-- [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.3.0`
+- [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.4.0`
 - [ ] `buildCodexProxyArgs`가 `chatgpt_base_url` 옵션을 추가하지 않음 — 포크의 `test/codex.test.js`, `test/codex-run.test.js`로 검증
 - [ ] `launchctl list | grep -E 'teamclaude|teamcodex|teamagy'` 두 줄(teamagy를 했으면 세 줄), 상태 0
 - [ ] `teamclaude status`·`teamcodex status`에 계정이 보이고 `curl` status 200
 - [ ] `claude -p "OK" --model claude-fable-5-1` 응답, 하단 상태라인 표시
 - [ ] `teamcodex` 실행 시 하단 상태줄 표시
 - [ ] `teamagy status`에 계정이 보이고 `teamagy -p …`가 응답(teamagy를 했을 때)
-- [ ] `~/.config/teamclaude.json`·`teamcodex.json`·`teamagy.json`이 0600이고 어떤 git 저장소에도 없음
+- [ ] `teamgrok status`에 계정이 보이고 `teamgrok -p …`가 응답(teamgrok을 했을 때)
+- [ ] `~/.config/teamclaude.json`·`teamcodex.json`·`teamagy.json`·`teamgrok.json`이 0600이고 어떤 git 저장소에도 없음
 
 ## 하지 말 것
 

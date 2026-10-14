@@ -204,6 +204,15 @@ def check():
     assert "[      -      ]" in lines[3].split(" 3p ")[1], lines[3]
     assert render({"accounts": []}, agy=True)[1] == "No accounts. Run: teamagy import --name pro-1"
     assert "3p" not in "\n".join(render(data, now=now))
+    # grok: one RL bar (x-ratelimit meter, no reset), tier as the plan, no 7d or End column.
+    grok = {"switchThreshold": 0.98, "currentAccountUuid": "u1", "accounts": [
+        {"name": "grok-1", "accountUuid": "u1", "provider": "grok", "planType": "SuperGrokPro", "usable": True,
+         "quota": {"unified5h": 0.25}}]}
+    lines = render(grok, now=now, grok=True)
+    assert lines[0].startswith("TeamGrok | 1 accounts") and "RL rate limit" in lines[0], lines[0]
+    assert "> 1.grok-1" in lines[1] and " RL [" in lines[1] and "25%" in lines[1], lines[1]
+    assert all(" 7d " not in line and "End" not in line for line in lines), lines
+    assert render({"accounts": []}, grok=True)[1] == "No accounts. Run: teamgrok login --name grok-1"
     # TeamClaude rows come from the installed Claude Code status line, told it is not under the footer.
     with tempfile.TemporaryDirectory() as home:
         renderer = Path(home) / ".claude/statusline-teamclaude.py"

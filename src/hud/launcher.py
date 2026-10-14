@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Launch Claude Code (teamclaude --claude), Codex (teamcodex) or agy (teamagy --agy) with a read-only
-account footer in an isolated tmux session."""
+"""Launch Claude Code (teamclaude --claude), Codex (teamcodex), agy (teamagy --agy) or grok (teamgrok --grok)
+with a read-only account footer in an isolated tmux session."""
 
 import os
 import shlex
@@ -17,12 +17,16 @@ from codex_login import login
 # exit, so a footer would vanish with them; those runs, and runs without a terminal, skip the footer.
 # `newline` is the key the CLI reads as a newline in its prompt: tmux cannot pass the CLI's own Shift+Enter
 # protocol through, so the footer's tmux server maps Shift+Enter to it. `yolo` is the CLI's own flag that skips
-# every approval; `--yolo` stands for it in all three pools.
+# every approval; `--yolo` stands for it in every pool.
 MODES = {
     "claude": ("teamclaude", "Claude", ("p", "print", "v", "version"), "M-Enter", "--dangerously-skip-permissions"),
     "agy": ("teamagy", "agy", ("p", "print", "prompt", "version"), "M-Enter", "--dangerously-skip-permissions"),
     "codex": ("teamcodex", "Codex", ("V", "version"), "C-j", "--dangerously-bypass-approvals-and-sandbox"),
+    "grok": ("teamgrok", "Grok", ("p", "single", "prompt-file", "prompt-json", "v", "version"), "M-Enter",
+             "--always-approve"),
 }
+# grok subcommands that print and exit, so they skip the footer like the oneshot flags.
+GROK_ONESHOT_SUBCOMMANDS = ("agent", "models", "version")
 # The caller's choices that must reach the CLI even when the HUD tmux server was started by an earlier launch
 # (its panes get that server's environment): Codex home, and `claude N`'s pinned account.
 FORWARD = ("CODEX_HOME", "TC_ACCT", "TEAMCLAUDE_STATUSLINE_INDEX")
@@ -41,7 +45,7 @@ def with_effort(arguments):
 
 
 def launch(arguments):
-    mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy") else "codex"
+    mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy", "--grok") else "codex"
     if mode != "codex":
         arguments = arguments[1:]
     command, cli, flags, newline, yolo = MODES[mode]
@@ -70,7 +74,8 @@ def launch(arguments):
     tmux, proxy = shutil.which("tmux"), shutil.which(command)
     if not proxy:
         sys.exit(f"Requires {command} on PATH")
-    if oneshot(arguments, flags) or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if (oneshot(arguments, flags) or (mode == "grok" and arguments[:1] and arguments[0] in GROK_ONESHOT_SUBCOMMANDS)
+            or not (sys.stdin.isatty() and sys.stdout.isatty())):
         os.execv(proxy, [proxy, "run", "--", *arguments])
     if mode == "claude" and not subcommand:
         arguments = with_effort(arguments)
@@ -82,7 +87,8 @@ def launch(arguments):
         sys.exit(f"{command} proxy unavailable. Start it with: {command} server")
     size = shutil.get_terminal_size()
     # Claude rows come from the Claude Code status line; Codex adds a cache-usage row under the accounts.
-    rows = len(claude_rows()) if mode == "claude" else len(render(data, agy=mode == "agy")) + (mode == "codex")
+    rows = (len(claude_rows()) if mode == "claude"
+            else len(render(data, agy=mode == "agy", grok=mode == "grok")) + (mode == "codex"))
     # Width is free: the footer clips long rows. Too short for a footer, run the CLI alone instead of refusing.
     if size.lines < rows + 10:
         print(f"{command}: under {rows + 10} rows, starting without the account footer", file=sys.stderr)
@@ -130,7 +136,7 @@ def launch(arguments):
         run("bind-key", "-n", "S-Enter", "send-keys", newline)
         run("set-window-option", "-t", session, "pane-border-style", "fg=colour238")
         # The terminal tab shows the CLI's own title instead of the launcher process (Python). A pane without a
-        # title of its own (the footer, or the CLI before it sets one) shows the window name: Claude, Codex, agy.
+        # title of its own (the footer, or the CLI before it sets one) shows the window name: Claude, Codex, agy, Grok.
         run("set-option", "-t", session, "set-titles", "on")
         run("set-option", "-t", session, "set-titles-string",
             "#{?#{==:#{pane_title},#{host}},#{window_name},#{pane_title}}")

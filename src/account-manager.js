@@ -1,6 +1,7 @@
 import { refreshAccessToken, isTokenExpiringSoon, normalizeExpiresAt } from './oauth.js';
 import { refreshCodexAccessToken } from './codex.js';
 import { agyModelGroup, refreshAgyAccessToken } from './agy.js';
+import { parseGrokRateLimit, refreshGrokAccessToken } from './grok.js';
 import { parseCodexResetCreditsAvailable, withinCodexResetCreditGrace } from './codex-reset-credits.js';
 import {
   cancellationIsDue,
@@ -157,6 +158,7 @@ export class AccountManager {
       planType: acct.planType || null,
       expiresAt: acct.expiresAt || null,
       ...(provider === 'agy' ? { projectId: acct.projectId || null } : {}),
+      ...(provider === 'grok' ? { email: acct.email || null, teamId: acct.teamId || null } : {}),
       status: organizationDisabled || subscriptionEnded ? 'error' : 'active',
       subscriptionDisabled: organizationDisabled ? true : undefined,
       subscriptionCancellation: subscriptionCancellation || undefined,
@@ -830,8 +832,9 @@ export class AccountManager {
   _isMeasured(account) {
     // agy: quota comes from the summary poll, never from response headers, and
     // the account carries server-side session state — so no warm-up hopping,
-    // no unmeasured rebalance; affinity applies from the first request.
-    if (account.provider === 'agy') return true;
+    // no unmeasured rebalance; affinity applies from the first request. grok
+    // keeps server-side session state too.
+    if (account.provider === 'agy' || account.provider === 'grok') return true;
     const q = account.quota;
     return q.unified5h != null || q.unified7d != null
       || q.tokensLimit != null || q.requestsLimit != null;
@@ -1099,6 +1102,9 @@ export class AccountManager {
     }
 
     if (account.provider === 'agy') return this._isAgyGroupNear(account, agyModelGroup(model), now);
+    // grok: the x-ratelimit meter has no reset time, so a gate on it could never
+    // lift; only an inference 429 (markRateLimited) takes the account out.
+    if (account.provider === 'grok') return false;
 
     if (this._isModelNearQuota(account, model, now)) return true;
 
@@ -1217,6 +1223,19 @@ export class AccountManager {
   updateQuota(accountIndex, headers) {
     const account = this._resolve(accountIndex);
     if (!account) return;
+
+    // grok: x-ratelimit-{limit,remaining}-{requests,tokens}. The headline meter
+    // (status, TUI, footer, app) is the fuller of the two; no reset is known.
+    if (account.provider === 'grok') {
+      const meter = parseGrokRateLimit(headers);
+      if (meter) {
+        account.quota.grokRateLimit = { ...account.quota.grokRateLimit, ...meter, at: Date.now() };
+        if (meter.utilization != null) account.quota.unified5h = meter.utilization;
+      }
+      account.usage.totalRequests++;
+      account.usage.lastUsed = new Date().toISOString();
+      return;
+    }
 
     // Unified rate limits (Claude Max)
     const u5h = parseFloat(headers['anthropic-ratelimit-unified-5h-utilization']);
@@ -1559,7 +1578,9 @@ export class AccountManager {
           ? await refreshCodexAccessToken(account.refreshToken)
           : account.provider === 'agy'
             ? await this._refreshAgy(account.refreshToken)
-            : await refreshAccessToken(account.refreshToken);
+            : account.provider === 'grok'
+              ? await refreshGrokAccessToken(account.refreshToken, this.grokOAuth || {})
+              : await refreshAccessToken(account.refreshToken);
         // Another live sync may have installed a newer rotated token while this
         // network request was in flight. Never let the late result from the old
         // refresh token replace that newer credential.
@@ -1608,7 +1629,7 @@ export class AccountManager {
         // client (invalid_client even after re-resolving it) parks the account
         // only once its token has lapsed, and as `refresh-failed` — the
         // refresh-caused error a later successful refresh heals.
-        const terminalAuthentication = account.provider === 'codex' || account.provider === 'agy'
+        const terminalAuthentication = ['codex', 'agy', 'grok'].includes(account.provider)
           ? err?.terminalAuthentication === true
             || (account.provider === 'agy' && err?.clientRejected === true && accessTokenExpired)
           : accessTokenExpired;
@@ -1984,6 +2005,7 @@ export class AccountManager {
       planType: acctData.planType || null,
       expiresAt: acctData.expiresAt || null,
       ...(provider === 'agy' ? { projectId: acctData.projectId || null } : {}),
+      ...(provider === 'grok' ? { email: acctData.email || null, teamId: acctData.teamId || null } : {}),
       status: organizationDisabled || subscriptionEnded ? 'error' : 'active',
       subscriptionDisabled: organizationDisabled ? true : undefined,
       subscriptionCancellation: subscriptionCancellation || undefined,
@@ -2232,6 +2254,7 @@ export class AccountManager {
         modelWeekly: Object.fromEntries(
           Object.entries(a.quota.modelWeekly).map(([k, w]) => [k, { ...w }])),
         ...(a.quota.agyGroups ? { agyGroups: structuredClone(a.quota.agyGroups) } : {}),
+        ...(a.quota.grokRateLimit ? { grokRateLimit: { ...a.quota.grokRateLimit } } : {}),
       },
       usage: { ...a.usage },
       inflight: a.inflight,

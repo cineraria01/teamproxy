@@ -1,7 +1,7 @@
 {
   "name": "teamcodex",
-  "version": "1.3.0",
-  "description": "Three multi-account proxies (Claude Code, Codex, Antigravity agy) from one codebase. Quota-aware account rotation, zero dependencies.",
+  "version": "1.4.0",
+  "description": "Four multi-account proxies (Claude Code, Codex, Antigravity agy, Grok) from one codebase. Quota-aware account rotation, zero dependencies.",
   "type": "module",
   "main": "src/index.js",
   "bin": {

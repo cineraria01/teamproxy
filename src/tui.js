@@ -470,7 +470,7 @@ export class TUI {
 
   _keyAdd(k) {
     if (k === 'i') { this._doImport(); this.mode = 'normal'; }
-    else if (k === 'k' && this.config.provider !== 'codex' && this.config.provider !== 'agy') {
+    else if (k === 'k' && !['codex', 'agy', 'grok'].includes(this.config.provider)) {
       this.mode = 'input';
       this.inputPrompt = 'API key';
       this.inputBuf = '';
@@ -544,6 +544,10 @@ export class TUI {
     }
     if (this.config.provider === 'agy') {
       this._addLog('Add Antigravity accounts from a terminal: teamagy import / teamagy login (or node src/index.js agy import), then R');
+      return;
+    }
+    if (this.config.provider === 'grok') {
+      this._addLog('Add Grok accounts from a terminal: teamgrok login (or node src/index.js grok login), then R');
       return;
     }
     try {
@@ -886,9 +890,10 @@ export class TUI {
 
     // ── Header
     const left = bold(this.config.provider === 'codex' ? ' TeamCodex'
-      : this.config.provider === 'agy' ? ' TeamAgy' : ' TeamClaude');
+      : this.config.provider === 'agy' ? ' TeamAgy'
+        : this.config.provider === 'grok' ? ' TeamGrok' : ' TeamClaude');
     const port = this.config.proxy?.port
-      || (this.config.provider === 'codex' ? 3457 : this.config.provider === 'agy' ? 3458 : 3456);
+      || ({ codex: 3457, agy: 3458, grok: 3459 }[this.config.provider] ?? 3456);
     // Host CPU/RAM at a glance (render loop ticks often enough for live CPU%).
     // Thresholds mirror the quota bars: calm → green-ish default, 70%+ warns,
     // 90%+ screams — this box dying from overload is a real failure mode.
@@ -1036,7 +1041,14 @@ export class TUI {
     let r1 = null, r2 = null, l1 = 'Ses', l2 = 'Wk ', t1 = null, t2 = null;
     let r3 = null, l3 = null, t3 = null;
 
-    if (a.type === 'oauth') {
+    if (a.provider === 'grok') {
+      // grok: x-ratelimit request/token usage, no reset time and no third bar.
+      const rl = q.grokRateLimit || {};
+      l1 = 'Req';
+      l2 = 'Tok';
+      r1 = rl.requestsLimit > 0 && rl.requestsRemaining != null ? 1 - rl.requestsRemaining / rl.requestsLimit : null;
+      r2 = rl.tokensLimit > 0 && rl.tokensRemaining != null ? 1 - rl.tokensRemaining / rl.tokensLimit : null;
+    } else if (a.type === 'oauth') {
       r1 = q.unified5h;
       r2 = q.unified7d;
       t1 = q.unified5hReset;
@@ -1114,7 +1126,9 @@ export class TUI {
           ? ` ${bold('i')}mport Codex login  ${bold('Esc')} cancel`
           : this.config.provider === 'agy'
             ? ` ${bold('i')} how to add (teamagy import / login)  ${bold('Esc')} cancel`
-            : ` ${bold('i')}mport Claude Code  ${bold('k')} API key  ${bold('Esc')} cancel`;
+            : this.config.provider === 'grok'
+              ? ` ${bold('i')} how to add (teamgrok login)  ${bold('Esc')} cancel`
+              : ` ${bold('i')}mport Claude Code  ${bold('k')} API key  ${bold('Esc')} cancel`;
       case 'input':
         return ` ${this.inputPrompt}: ${this.inputBuf}█`;
       default:
