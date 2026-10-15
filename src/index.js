@@ -7,7 +7,7 @@ import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCache, writeQuotaCacheSync, normalizeTokenRefreshIntervalMs } from './config.js';
+import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCache, writeQuotaCacheSync, removeQuotaTempFilesSync, normalizeTokenRefreshIntervalMs } from './config.js';
 import { AccountManager } from './account-manager.js';
 import { createProxyServer, keyMatches } from './server.js';
 import { applyLocalByokKey, normalizeByokConfig } from './byok.js';
@@ -1540,7 +1540,8 @@ async function proxyWorkerCommand() {
     // inside the listen callback.)
     probeTemplate: server.exportProbeTemplate?.() ?? null,
   });
-  // The minute timer writes async (a Windows rename retry must not stall requests); the exit write stays sync.
+  // The minute timer writes async (a Windows rename retry must not stall requests); the ledger and exit
+  // writes stay sync and supersede any async write still in flight (config.js keeps the order).
   const saveQuotaSnapshot = () => writeQuotaCacheSync(quotaSnapshot());
   const saveQuotaSnapshotAsync = () => { writeQuotaCache(quotaSnapshot()); };
 
@@ -1761,7 +1762,7 @@ async function proxyWorkerCommand() {
     // Persist the quota snapshot on every exit path (TUI quit, SIGINT/SIGTERM
     // → server.close → process.exit) and every minute as a crash backstop
     // (a SIGKILL loses at most the last interval). The 'exit' write is sync.
-    process.on('exit', saveQuotaSnapshot);
+    process.on('exit', () => { saveQuotaSnapshot(); removeQuotaTempFilesSync(); });
     setInterval(saveQuotaSnapshotAsync, 60_000).unref();
     // Keep idle OAuth refresh chains rotating and retry refresh-caused errors.
     // A numeric 0 disables the sweep; malformed values use the 5-minute default.

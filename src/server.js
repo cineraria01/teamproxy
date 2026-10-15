@@ -895,11 +895,19 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (agyRefreshPromise) return agyRefreshPromise;
     agyRefreshPromise = (async () => {
       // Disabled and parked accounts are not polled: proxy-originated traffic
-      // stays on accounts that can actually serve.
-      const targets = accountManager.accounts.filter(a => a.provider === 'agy' && a.credential
-        && a.enabled !== false && a.status !== 'error');
-      const outcomes = await Promise.all(targets.map(a => refreshAgyAccount(a)));
-      return { targets: targets.length, measured: outcomes.filter(Boolean).length };
+      // stays on accounts that can actually serve. An account a live sync adds while this runs
+      // (a caller then gets this same promise) is measured in another pass, as the codex refresh does.
+      const seen = new Set();
+      let measured = 0;
+      for (;;) {
+        const targets = accountManager.accounts.filter(a => a.provider === 'agy' && a.credential
+          && a.enabled !== false && a.status !== 'error' && !seen.has(a));
+        if (!targets.length || warmupClosed) break;
+        for (const a of targets) seen.add(a);
+        const outcomes = await Promise.all(targets.map(a => refreshAgyAccount(a)));
+        measured += outcomes.filter(Boolean).length;
+      }
+      return { targets: seen.size, measured };
     })();
     try {
       return await agyRefreshPromise;
@@ -1863,7 +1871,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         res.end(JSON.stringify({
           ...accountManager.getStatus({ includeIdentity }),
           host: hostTracker.sample(),
-          accountsSync: true, // POST /teamclaude/accounts/sync exists (an older server would forward that path upstream)
+          // POST /teamclaude/accounts/sync is served (an older server would forward that path upstream)
+          accountsSync: Boolean(hooks.onAccountsSync),
           ...(provider === 'codex'
             ? {
                 resetCredits: {

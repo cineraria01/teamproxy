@@ -8,9 +8,11 @@ import {
   atomicConfigUpdate,
   createDefaultConfig,
   readQuotaCache,
+  removeQuotaTempFilesSync,
   renameWithRetry,
   renameWithRetrySync,
   saveConfig,
+  writeQuotaCache,
   writeQuotaCacheSync,
 } from '../src/config.js';
 import { applyTuiAccountMutation } from '../src/tui.js';
@@ -490,4 +492,32 @@ test('rename retries a briefly locked target (EPERM/EBUSY/EACCES, as antivirus c
   const posix = flaky(['EPERM']);
   await assert.rejects(renameWithRetry('a', 'b', posix.fn, false), { code: 'EPERM' });
   assert.equal(posix.calls.length, 1);
+});
+
+test('quota snapshots land in order: a sync write wins over an async one in flight; exit removes our temp files', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tc-quota-order-'));
+  const prev = process.env.TEAMCLAUDE_CONFIG;
+  process.env.TEAMCLAUDE_CONFIG = join(dir, 'teamclaude.json');
+  try {
+    // async writes run one at a time, in call order
+    await Promise.all([writeQuotaCache({ n: 1 }), writeQuotaCache({ n: 2 })]);
+    assert.deepEqual(await readQuotaCache(), { n: 2 });
+    // the minute timer's write is in flight when the reset-credit ledger writes synchronously
+    const periodic = writeQuotaCache({ n: 3 });
+    const followUp = writeQuotaCacheSync({ n: 4 });
+    await Promise.all([periodic, followUp]);
+    assert.deepEqual(await readQuotaCache(), { n: 4 }, 'the older async snapshot must not land over the newer one');
+
+    const ours = `teamclaude.quota.json.tmp-${process.pid}-dead`;
+    const other = `teamclaude.quota.json.tmp-${process.pid + 1}-live`;
+    for (const name of [ours, other]) await writeFile(join(dir, name), '{}');
+    removeQuotaTempFilesSync();
+    const names = await readdir(dir);
+    assert.equal(names.includes(ours), false);
+    assert.equal(names.includes(other), true, 'another process\'s write is left alone');
+  } finally {
+    if (prev === undefined) delete process.env.TEAMCLAUDE_CONFIG;
+    else process.env.TEAMCLAUDE_CONFIG = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

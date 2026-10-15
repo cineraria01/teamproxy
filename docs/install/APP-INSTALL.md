@@ -120,7 +120,7 @@
 - `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.
 - 끝 줄 `done`. 오류 코드: `name_taken`(이미 있는 `--name`, 덮어쓰기·토큰 폐기를 막으려 거절)·`cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
 - 취소: SIGTERM/SIGINT, 표준 입력 한 줄 `{"cancel":true}`, 또는 파이프로 받은 표준 입력의 EOF(앱이 파이프를 닫음). 셋 다 같은 정리를 한다: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`. 그래서 앱은 로그인 동안 표준 입력 파이프를 열어 둔다. 파이프가 아닌 표준 입력(`/dev/null`·`NUL`·파일)의 EOF는 취소로 보지 않는다(코드 붙여넣기만 못 한다). `{`로 시작하는 줄은 코드로 읽지 않는다.
-- 로그인이 끝나면 실행 중인 서버에 반영해(SIGHUP 또는 accounts/sync) 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다). 성공 끝 줄에 `applied`(`live`·`config_only`·`restart_required`)가 붙는다: `{"done":true,"ok":true,"account":"claude-2","applied":"live"}`.
+- 로그인이 끝나면 실행 중인 서버에 반영해(SIGHUP 또는 accounts/sync) 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다). 성공 끝 줄에 `applied`(`live`·`config_only`·`restart_required`)가 붙는다: `{"done":true,"ok":true,"account":"claude-2","applied":"live"}`. 성공 끝 줄에 `applied`가 없으면(반영 중에 취소가 와 저장만 끝난 경우) 반영 여부를 모르는 것이니, 앱이 서버에 `POST /teamclaude/accounts/sync`를 한 번 다시 보낸다(서버가 없으면 필요 없다).
 
 ## 묶음 만들기
 
@@ -141,7 +141,7 @@ node scripts/build-app-bundle.mjs [출력 폴더]   # 기본 dist/
 ## 동시성·취소 계약
 
 - 앱은 `login --json`을 **한 번에 하나만** 돌린다(풀이 달라도 동시에 돌리지 않는다). 그래도 저장 단계에서 같은 `--name`이 그사이 생겼으면 덮어쓰지 않고 `name_taken`으로 멈춘다.
-- 취소(SIGTERM·취소 줄·EOF)가 계정 저장이 끝난 뒤에 도착하면 로그인은 성공한 것이므로 `{"done":true,"ok":true,"account":"…"}`로 끝난다. 저장 직전·직후의 아주 좁은 틈에서는 `cancelled`가 나와도 계정이 이미 들어갔을 수 있으니, 취소 뒤에는 `accounts --json`으로 다시 확인한다.
+- 취소(SIGTERM·취소 줄·EOF)가 계정 저장이 끝난 뒤에 도착하면 로그인은 성공한 것이므로 `{"done":true,"ok":true,"account":"…"}`로 끝난다. 이때는 `applied`가 빠질 수 있으니 위처럼 앱이 sync를 다시 요청한다. 저장 직전·직후의 아주 좁은 틈에서는 `cancelled`가 나와도 계정이 이미 들어갔을 수 있으니, 취소 뒤에는 `accounts --json`으로 다시 확인한다.
 
 ## Windows
 
@@ -185,6 +185,7 @@ SIGHUP 대신 실행 중 서버에 "디스크의 계정을 다시 읽어 반영"
 
 - 루프백(127.0.0.1·::1)에서만, 설정에 `proxy.apiKey`가 있으면 `x-api-key`(또는 `Authorization: Bearer`)가 그 값이어야 한다. 본문 없는 `POST`.
 - 응답: `200 {"ok":true,"total":<계정 수>}`(계정 반영이 끝난 뒤 응답. 그 뒤 쿼터 다시 재기(codex·agy)는 기다리지 않는다) · `401` 키 불일치 · `403` 원격 · `405`/`400` 메서드·본문 · `500 {"error":{"type":"account_sync_failed",…}}`.
+- 지원 여부: 이 경로를 받는 서버는 `GET /teamclaude/status` 응답에 `"accountsSync": true`를 싣는다. 이 표시가 없는 옛 서버에는 보내지 않는다(옛 서버는 이 경로를 위(upstream)로 흘려보낸다). CLI도 표시가 있을 때만 보내고, 없으면 `restart_required`.
 - CLI `--json` 관리 명령(`login`·`enable`·`disable`·`priority`·`remove`)은 서버의 워커 pid를 확인할 수 없을 때(Windows는 늘 그렇다: lsof·ps가 없다) 이 경로를 써서 `applied:"live"`를 준다. 서버가 없으면 `config_only`, 이 경로가 없는 옛 서버면 `restart_required`. macOS는 확인된 워커가 있으면 지금처럼 SIGHUP을 쓴다(검증된 경로를 그대로 두고, 확인 못 할 때만 HTTP로 넘어간다).
 
 ### 로그인 취소
