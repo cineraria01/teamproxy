@@ -8,7 +8,9 @@ import math
 import os
 import re
 from pathlib import Path
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -377,6 +379,15 @@ def main():
                           else NAMES["agy" if args.agy else "grok" if args.grok else "codex"])
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and not args.plain
     watching = args.watch and sys.stdout.isatty()
+    # In the tmux footer the pane height follows the row count, so adding or removing an account resizes it.
+    # A resized pane (window resize, client attach) sends SIGWINCH, which wakes the loop at once.
+    pane = watching and os.environ.get("TMUX_PANE")
+    if watching:
+        wake, notify = os.pipe()
+        os.set_blocking(wake, False)
+        os.set_blocking(notify, False)
+        signal.set_wakeup_fd(notify)
+        signal.signal(signal.SIGWINCH, lambda *_: None)
     try:
         while True:
             failed = False
@@ -399,14 +410,24 @@ def main():
                     cache = "Cache last: unavailable"
                 rows.append(cache[:shutil.get_terminal_size().columns])
             if watching:
+                height = os.get_terminal_size(sys.stdout.fileno()).lines
+                if pane and not failed and height != len(rows):
+                    subprocess.run([shutil.which("tmux") or "tmux", "resize-pane", "-t", pane, "-y", str(len(rows))],
+                                   capture_output=True)
                 # Autowrap off: in a narrow pane a long row is clipped instead of pushing rows out of view.
-                sys.stdout.write("\033[?7l\033[H\033[J" + "\n".join(rows))
+                # Bottom-aligned until the resize lands, or when tmux cannot give the footer that many rows.
+                pad = "\n" * max(0, height - len(rows))
+                sys.stdout.write("\033[?7l\033[H\033[J" + pad + "\n".join(rows))
                 sys.stdout.flush()
             else:
                 print("\n".join(rows), flush=True)
             if not watching:
                 return 1 if failed else 0
-            time.sleep(2)
+            select.select([wake], [], [], 2)
+            try:
+                os.read(wake, 512)
+            except BlockingIOError:
+                pass
     except KeyboardInterrupt:
         return 0
 
