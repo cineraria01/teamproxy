@@ -43,6 +43,7 @@ import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
 import { runClaudeWithRecovery } from './claude-recovery.js';
 import { reauthenticateAccount } from './reauth.js';
+import { updateCommand } from './update.js';
 import {
   applySubscriptionCancellation,
   cancellationEndsAt,
@@ -335,6 +336,9 @@ switch (command) {
   case 'uninstall-claude-wrapper':
     await uninstallClaudeWrapperCommand();
     process.exit(0);
+    break;
+  case 'update':
+    process.exit(await updateCommand({ pool: cliName(), configPath: getConfigPath(), argv: args.slice(1) }));
     break;
   case 'help':
   case '--help':
@@ -3816,6 +3820,7 @@ Commands:
   disable <name>      Disable an account
   enable <name>       Re-enable an account
   priority <name> <n> Set selection priority ("auto" clears it)
+  update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
   help                Show this help
 
 agy itself must be signed in once (run \`agy\` and log in); the proxy replaces
@@ -3852,6 +3857,7 @@ Commands:
   disable <name>      Disable an account
   enable <name>       Re-enable an account
   priority <name> <n> Set selection priority ("auto" clears it)
+  update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
   help                Show this help
 
 grok itself must be signed in once (run \`grok\` and log in, any account); the
@@ -3893,6 +3899,7 @@ Commands:
   api <path>          Call a ChatGPT backend endpoint with one account
   install-claude-wrapper   Install the transparent Claude launcher
   uninstall-claude-wrapper Remove it and restore the prior launchers
+  update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
   help                Show this help
 
 Options:
@@ -3936,6 +3943,7 @@ Commands:
   api <path>          Call an API endpoint with account credentials
   install-claude-wrapper   Install the transparent Claude launcher
   uninstall-claude-wrapper Remove it and restore the prior launchers
+  update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
   help                Show this help
 
 Options:

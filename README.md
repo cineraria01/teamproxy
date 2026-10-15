@@ -298,6 +298,20 @@ tmux -L teamclaude kill-session -t proxy    # 재시작(launchd가 다시 띄운
 - `<풀> restart`는 포그라운드로 서버를 띄우므로 launchd 운영에서는 쓰지 않는다. 프록시를 거치는 Claude Code 세션 안에서는
   자기 프록시의 `stop`·`restart`가 거부된다.
 
+### 업데이트
+
+포크 main의 최신판으로 올릴 때는 풀 명령 하나면 된다. 받기 → 로컬 수정 검사 → 요청 0 대기 → 백업 → 덮기 → 다시 띄우기 → 확인
+순서로 하고, 확인이 실패하면 백업으로 되돌려 다시 띄운다. 맥(launchd + tmux)·Linux(systemd 사용자 서비스) 같은 명령이다.
+
+```sh
+teamclaude update --dry-run     # 할 일만 보기
+teamclaude update               # 이 풀의 설치본
+teamcodex update --all          # 이 기계의 설치본 모두
+```
+
+옵션(`--ref`·`--no-restart`·`--wait`·`--json`), 단계별 동작, 비상용 손 절차는
+[INSTALL-ALL §8](docs/install/INSTALL-ALL.md#8-최신판으로-갱신--풀-update). 셀비 앱 모드 설치본(`~/.local/share/teamproxy-app`)은 앱이 갱신하므로 건드리지 않는다.
+
 Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 사용자 systemd 서비스(`teamcodex.service`)를 만든다.
 나머지는 [`docs/install/HUD.md`](docs/install/HUD.md)와 [`docs/install/SETUP.md`](docs/install/SETUP.md)의 Linux 안내를 따른다.
 

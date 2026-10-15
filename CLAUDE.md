@@ -55,6 +55,7 @@ Single CLI binary (`src/index.js`) dispatches subcommands; `server` boots the pr
 - **`src/subscription.js`** — pure Codex cancellation metadata validation, exact account targeting, local-date conversion, and credential-free status snapshots.
 - **`src/codex-session.js`** — exact Codex resume boundary: validates UUID session IDs and reads only the current surface's public `cmux surface resume get --json` binding. It fails closed instead of guessing from recent sessions or private state.
 - **`src/system-metrics.js`** — host CPU/RAM/loadavg sampler; `GET /teamclaude/status` rides a `host` object along so `teamclaude status` and the TUI header can show the proxy machine's load.
+- **`src/update.js`** — `<pool> update [--all]`: replaces a pool install's `src/`+`package.json` with a fork commit (git archive), refusing installs whose files are not in the fork's history, then waits for zero in-flight requests, restarts via systemd user unit or the `<pool>` tmux session, verifies (`status --json`, accounts, model list) and restores the backup on failure. Skips `teamproxy-app` (app-mode) installs and git checkouts. Spawns other processes only; no proxy state.
 - **`src/tui.js`** — full-screen terminal dashboard (alternate screen buffer). Only used when both stdin and stdout are TTYs; otherwise the server logs plainly.
 
 ### Codex mode (qjc fork)

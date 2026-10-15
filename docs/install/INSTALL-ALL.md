@@ -373,6 +373,73 @@ cd ~/some-project && teamgrok                                        # grok 화�
 - [ ] `teamgrok status`에 계정이 보이고 `teamgrok -p …`가 응답(teamgrok을 했을 때)
 - [ ] `~/.config/teamclaude.json`·`teamcodex.json`·`teamagy.json`·`teamgrok.json`이 0600이고 어떤 git 저장소에도 없음
 
+## 8. 최신판으로 갱신 — `<풀> update`
+
+설치한 뒤 포크 main이 바뀌면 풀 명령 하나로 갱신한다. 맥(launchd + tmux)과 Linux(systemd 사용자 서비스) 모두 같은 명령이다.
+
+```sh
+teamclaude update --dry-run      # 무엇을 바꾸고 무엇을 다시 띄울지만 본다
+teamclaude update                # 이 풀의 설치본 하나
+teamcodex update --all           # 이 기계에서 찾은 설치본 모두
+teamagy update --ref <브랜치|태그|커밋> --wait 900 --json
+```
+
+| 옵션 | 뜻 |
+|---|---|
+| (없음) | 그 풀의 서버가 실제로 돌고 있는 설치본(`ps -ww`로 본 서버 명령의 경로)을 갱신한다. 서버가 없으면 명령을 실행한 설치본 |
+| `--all` | 네 풀 서버의 설치본, `~/.local/share/*/lib/node_modules/teamcodex`, 명령을 실행한 설치본을 모두 |
+| `--dry-run` | 바꿀 파일 수와 재시작 방법만 출력한다(포크 `fetch`는 한다) |
+| `--no-restart` | 파일만 바꾼다. 다음 재시작 때 반영된다(나중에 `update`를 다시 돌리면 옛 코드로 도는 서버만 다시 띄운다) |
+| `--ref` | 기본 `main`. `origin/<브랜치>`가 있으면 그것, 없으면 태그·커밋 |
+| `--wait` | 진행 중 요청이 0이 되기를 기다리는 최대 초(기본 600) |
+| `--json` | 사람용 줄은 stderr, stdout 끝 줄에 `{"ok":…,"installs":[…]}` |
+
+설치본마다 하는 일:
+
+1. 받기: `~/src/teamproxy`가 있으면 그 클론(깨끗하고 그 브랜치에 있을 때만 fast-forward), 없으면
+   `~/.cache/teamproxy-update`에 clone. 설치할 내용은 대상 커밋의 `git archive`라 클론의 수정 중 파일은 섞이지 않는다.
+2. 로컬 수정 검사: 설치본 `src/`의 파일(`__pycache__`·`.pyc` 제외)마다 git blob id가 포크 이력(대상 커밋 + `origin/main`)에
+   있는지 본다. 없는 파일이 하나라도 있으면 그 목록을 보이고 멈춘다(아무것도 바꾸지 않는다). 이미 같으면 "이미 최신"이다.
+   파일은 같아도 서버의 `x-teamcodex-source-hash`가 다르면(옛 코드로 도는 중) 재시작만 한다.
+3. 재시작 방법 확인: systemd 사용자 단위 `<풀>`이 active면 `systemctl --user restart <풀>`, 아니면 tmux 소켓 `<풀>`의
+   세션 `proxy`를 끊는다(launchd가 다시 띄움). 둘 다 없으면 바꾸기 전에 멈춘다(`--no-restart`로 파일만 바꾸고 손으로 다시 띄운다).
+4. 요청 0 대기: 다시 띄울 풀들의 모든 계정 `inflight` 합이 2초 간격 두 번 연속 0일 때까지. `--wait`를 넘기면 아무것도 바꾸지 않고 멈춘다.
+5. 백업과 덮기: `src` → `src.pre-<YYYYMMDD-HHMMSS>`(이름 바꾸기), `package.json.pre-…` 복사 뒤 새 `src/`·`package.json`.
+   대상 `package.json`에 런타임 의존성이 있으면 덮지 않는다(파일 복사로는 갱신할 수 없다).
+6. 다시 띄우기와 확인: 새 서버 pid가 뜰 때까지(최대 120초) 기다린 뒤 `<풀> status --json`이 `ok`·`running`,
+   계정 이름·활성 상태가 설정 파일과 같은지, 모델 목록이 200인지 본다. 모델 목록은 갱신 **전에도** 200이던 풀만 요구한다.
+   - Claude `GET /v1/models` + `anthropic-version: 2023-06-01`, Codex `GET /codex/models?client_version=<codex --version>`,
+     agy `POST /v1internal:fetchAvailableModels`, grok `GET /v1/models`
+7. 확인이 실패하면 새 판을 `src.failed-…`·`package.json.failed-…`로 옮기고 백업을 제자리로 돌린 뒤 다시 띄운다. 종료 코드 1.
+
+한 설치본을 여러 풀이 같이 쓰면(예: `teamcodex-global` 하나로 teamclaude·teamcodex) 그 풀들을 모두 다시 띄운다.
+셀비 앱 모드 설치본(`~/.local/share/teamproxy-app`, launchd `kr.selvi.teamproxy.*`)은 건드리지 않고 안내만 한다. 그건 앱이 고정 묶음으로 갱신한다.
+git 클론(`.git`이 있는 폴더)도 설치본이 아니라 건너뛴다.
+
+다시 띄우는 동안 그 프록시를 거치던 스트림은 끊긴다. 그 프록시로 도는 Claude Code 세션 안에서 돌려도 되지만,
+그 세션의 다른 에이전트가 계속 요청 중이면 `--wait` 동안 기다린다.
+
+### 8-1. 손 절차 (비상용)
+
+`update`를 쓸 수 없을 때(이 명령이 없는 옛 설치본을 처음 올릴 때 등)만 쓴다. `<설치본>`은 서버의 실제 경로로 확인한다
+(`ps -ww -o command= -p <pid>`, pid는 `<설정>.server.json`. `-ww` 없이 보면 경로가 잘린다).
+
+```sh
+git -C ~/src/teamproxy pull --ff-only
+cd <설치본>/src && for f in $(find . -type f ! -path '*__pycache__*'); do
+  [ -n "$(git -C ~/src/teamproxy log origin/main --find-object=$(git hash-object "$f") -1 --format=%h)" ] || echo "로컬 전용: $f"
+done                                    # 하나라도 나오면 멈춘다
+d=$(date +%Y%m%d)
+cp -a <설치본>/src <설치본>/src.pre-$d && cp <설치본>/package.json <설치본>/package.json.pre-$d
+rsync -a --delete ~/src/teamproxy/src/ <설치본>/src/ && cp ~/src/teamproxy/package.json <설치본>/package.json
+curl -s http://127.0.0.1:<포트>/teamclaude/status | grep -o '"inflight": *[0-9]*'   # 모두 0일 때
+tmux -L <풀> kill-session -t proxy      # 맥. Linux는 systemctl --user restart <풀>
+<풀> status --json                      # ok:true, 계정 수·이름·활성 상태가 전과 같은지
+curl -s -o /dev/null -w '%{http_code}\n' -H 'anthropic-version: 2023-06-01' http://127.0.0.1:3456/v1/models   # 200
+```
+
+확인이 실패하면 `src`·`package.json`을 `.pre-$d`로 되돌리고 같은 방법으로 다시 띄운다.
+
 ## 하지 말 것
 
 - 업스트림(sangrokjung·jung-wan-kim·karpeleslab)에서 설치하거나 그쪽에 PR·이슈를 보내지 않는다.
