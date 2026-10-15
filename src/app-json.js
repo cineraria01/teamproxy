@@ -100,9 +100,10 @@ export function enableMachineLogin() {
   if (stdinIsPipe()) lines.on('close', () => { if (!machine.finished) cancel(); });
 }
 
-// Node builds process.stdin by handle type: a pipe or socket (a Windows named pipe too) is a net.Socket,
-// a file or /dev/null or NUL an fs.ReadStream, a terminal a tty.ReadStream. fstat cannot tell on Windows:
-// a named pipe is not reported as a FIFO there (CI: a piped EOF never cancelled).
+// Node builds process.stdin by handle type (guessHandleType): PIPE/TCP -> net.Socket, FILE (a file,
+// /dev/null, NUL) -> fs.ReadStream, TTY -> tty.ReadStream. Checked on macOS for /dev/null, a file, a shell
+// pipe and a spawn pipe; the Windows named-pipe case rests on that rule and the windows-latest CI job.
+// fstat is no use there: the CI job showed a piped stdin is not reported as a FIFO (its EOF never cancelled).
 const stdinIsPipe = () => process.stdin instanceof net.Socket && !process.stdin.isTTY;
 
 /** The app opens the browser itself: hand it the URL and say we are waiting. */
