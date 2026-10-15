@@ -57,9 +57,9 @@ tmux 소켓은 `teamclaude-hud`입니다.
 `teamgrok --yolo`는 grok의 `--always-approve`가 됩니다(2026-10-15).
 인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. `--keep-alive`도 이제 인자 어디에 두어도 됩니다.
 
-### Claude 대화 세션은 추론 max
+### Claude 대화 세션의 추론 단계
 
-`teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort max`를 더합니다. settings.json `effortLevel`은 max를 저장하지 못하고 `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 실행기가 맡습니다. `--effort high` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다.
+실행기는 `--effort`를 더하지 않습니다. `teamclaude`로 띄운 Claude Code 대화 세션은 Claude Code 설정을 따릅니다(`/effort xhigh`가 `~/.claude/settings.json`의 `modelSettings.<모델>.effortLevel`에 저장). 설정은 max를 저장하지 못하므로 max가 필요한 세션만 `teamclaude --effort max`로 띄우거나 세션 안에서 `/effort max`를 칩니다. 2026-10-12(068bf62)부터 실행기가 max를 기본으로 붙였으나 2026-10-15 사용자 결정 "기본 effort를 xhigh로"에 따라 없앴습니다.
 
 ### 세 하단 줄 공통 tmux 설정
 
