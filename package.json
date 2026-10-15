@@ -16,7 +16,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test",
-    "test:hud": "for t in test/hud/test_*.py statusline/test_statusline.py; do python3 \"$t\" || exit 1; done && bash statusline/test_install.sh",
+    "test:hud": "for t in test/hud/test_*.py statusline/test_statusline.py statusline/test_install_fable_routing.py; do python3 \"$t\" || exit 1; done && bash statusline/test_install.sh",
     "lint": "eslint ."
   },
   "keywords": [

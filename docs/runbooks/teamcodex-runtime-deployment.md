@@ -335,7 +335,7 @@ after confirming account `inflight` is 0 (nothing is being served upstream).
 
 ## Deployment record (2026-09-27, local tmux services)
 
-- This machine uses `com.hyeongsu.teamclaude` and `com.hyeongsu.teamcodex`,
+- This machine uses `com.example.teamclaude` and `com.example.teamcodex`,
   whose tmux wrappers load `~/.local/share/teamcodex-global/lib/node_modules/teamcodex`.
   The older `com.qjc.teamcodex` artifact workflow above does not describe this host.
 - Deployed source commit `6b9b7a0`; source hash

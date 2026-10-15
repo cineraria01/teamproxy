@@ -1,6 +1,6 @@
 # Claude 계정을 장기 토큰(`claude setup-token`)으로 운영하기
 
-2026-10-07부터 오너가 관리하는 모든 머신(로컬 맥, lucy, hanulchoi, njobclub, server-150·151)과
+2026-10-07부터 오너가 관리하는 모든 머신(로컬 맥과 서버 5대)과
 UUP 상담 초안 워커의 Claude 풀은 같은 장기 토큰 5개(`lt-1`~`lt-5`)를 쓴다. 넣는 절차·스크립트는
 이 포크의 `docs/install/INSTALL-ALL.md` §2-1이 정본이고(2026-10-10 옛 `cineraria01/teamcodex`에서 옮김), 이 문서는 프록시가 그 계정을 어떻게
 다루는지를 적는다.
@@ -9,7 +9,7 @@ UUP 상담 초안 워커의 Claude 풀은 같은 장기 토큰 5개(`lt-1`~`lt-5
 
 `teamclaude login`(refresh 방식) 계정은 8시간마다 갱신이 성공하다가 **로그인 후 약 한 달**에
 `invalid_grant: Refresh token expired`로 끊긴다. 2026-10-03~05에 서버 쪽 5계정이 차례로 끊겼고,
-같은 시기 server-150·151의 계정은 9월 중순부터 이미 전부 만료된 채 돌고 있었다. 장기 토큰은
+같은 시기 서버 2대의 계정은 9월 중순부터 이미 전부 만료된 채 돌고 있었다. 장기 토큰은
 refresh 토큰이 없어 이 만료가 없다(약 1년).
 
 ## 프록시가 refresh 없는 계정을 다루는 방식

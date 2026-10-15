@@ -58,7 +58,7 @@
 오류 코드: `missing_node`(`--node`가 없거나 그 옆에 npm이 없음)·`conflict_existing_install`·`npm_failed`·`config_failed`·`launchd_failed`·`install_failed`·`usage`(잘못된 인자, 종료 코드 2).
 충돌 검사는 파일을 쓰기 전에 모든 풀을 먼저 본다. 아래면 아무것도 쓰지 않고 멈춘다.
 - 래퍼 이름(`~/.local/bin/teamcodex` 등)에 표식 없는 파일이 있다.
-- 다른 라벨의 launchd 에이전트(`com.local.*`, `com.hyeongsu.*` 등)가 그 풀의 명령(`teamcodex` 등)을 실행한다.
+- 다른 라벨의 launchd 에이전트(`com.local.*`, `com.example.*` 등)가 그 풀의 명령(`teamcodex` 등)을 실행한다.
 - 이 설치가 아닌 프로세스가 풀의 포트(설정이 있으면 그 포트, 없으면 3456/3457/3458)를 쓰고 있다.
 
 ### `--status`
