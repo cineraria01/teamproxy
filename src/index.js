@@ -7,9 +7,9 @@ import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCacheSync, normalizeTokenRefreshIntervalMs } from './config.js';
+import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCache, writeQuotaCacheSync, removeQuotaTempFilesSync, normalizeTokenRefreshIntervalMs } from './config.js';
 import { AccountManager } from './account-manager.js';
-import { createProxyServer } from './server.js';
+import { createProxyServer, keyMatches } from './server.js';
 import { applyLocalByokKey, normalizeByokConfig } from './byok.js';
 import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon } from './oauth.js';
 import {
@@ -521,7 +521,7 @@ async function superviseServerCommand() {
     if (req.url !== DEPLOYMENT_DRAIN_PATH) return false;
     if (!isLocal
         || !proxyApiKey
-        || req.headers['x-api-key'] !== proxyApiKey
+        || !keyMatches(req.headers['x-api-key'], proxyApiKey)
         || req.headers[LIFECYCLE_ID_HEADER] !== lifecycleId) {
       rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
         error: { type: 'permission_error', message: 'Deployment control requires the live local lifecycle identity.' },
@@ -597,6 +597,13 @@ async function superviseServerCommand() {
       });
       return;
     }
+    if (req.url === '/teamclaude/accounts/sync' && !isLocal) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'Account sync is local-only.' },
+      });
+      return;
+    }
     // The worker only ever sees loopback (this supervisor forwards to it), so
     // the operator-only reset-credit route must be fenced HERE, like rotate.
     if (req.url.split('?', 1)[0] === '/teamclaude/codex/reset-credit' && !isLocal) {
@@ -606,8 +613,8 @@ async function superviseServerCommand() {
       });
       return;
     }
-    if (config.proxy?.apiKey && clientKey !== config.proxy.apiKey
-      && bearerKey !== config.proxy.apiKey && !isLocal) {
+    if (config.proxy?.apiKey && !keyMatches(clientKey, config.proxy.apiKey)
+      && !keyMatches(bearerKey, config.proxy.apiKey) && !isLocal) {
       rejectPublicRequest(req, res, 401, { 'content-type': 'application/json' }, {
         type: 'error',
         error: { type: 'authentication_error', message: 'Invalid proxy API key' },
@@ -1522,7 +1529,7 @@ async function proxyWorkerCommand() {
     if (cur) accountManager.currentIndex = cur.index;
     console.log(`[TeamClaude] Restored quota snapshot for ${quotaCache.accounts.length} account(s)`);
   }
-  const saveQuotaSnapshot = () => writeQuotaCacheSync({
+  const quotaSnapshot = () => ({
     savedAt: new Date().toISOString(),
     currentAccount: accountManager.accounts[accountManager.currentIndex]?.name || null,
     accounts: accountManager.exportQuotaState(),
@@ -1533,6 +1540,10 @@ async function proxyWorkerCommand() {
     // inside the listen callback.)
     probeTemplate: server.exportProbeTemplate?.() ?? null,
   });
+  // The minute timer writes async (a Windows rename retry must not stall requests); the ledger and exit
+  // writes stay sync and supersede any async write still in flight (config.js keeps the order).
+  const saveQuotaSnapshot = () => writeQuotaCacheSync(quotaSnapshot());
+  const saveQuotaSnapshotAsync = () => { writeQuotaCache(quotaSnapshot()); };
 
   // Persist refreshed tokens back to config (re-read from disk to avoid clobbering
   // accounts added externally, e.g. by `teamcodex import` while server is running)
@@ -1685,13 +1696,18 @@ async function proxyWorkerCommand() {
       console.error(`[TeamCodex] Reset credit ledger snapshot failed: ${err.message}`);
     }
   };
+  // POST /teamclaude/accounts/sync runs the same account-only reload as SIGHUP (Windows has no SIGHUP).
+  hooks.onAccountsSync = () => liveSync();
   const server = createProxyServer(accountManager, config, hooks);
   let liveSyncChain = Promise.resolve();
-  process.on('SIGHUP', () => {
-    // Account-only reload: keep the worker, sockets, affinity map, prompt caches,
-    // and every in-flight response alive. Serializing signals avoids overlapping
-    // remove/add passes when several CLI changes land together.
-    liveSyncChain = liveSyncChain.then(async () => {
+  let queuedSync = null; // a sync that has not started yet already covers any later request
+  // Account-only reload: keep the worker, sockets, affinity map, prompt caches,
+  // and every in-flight response alive. Serializing requests avoids overlapping
+  // remove/add passes when several CLI changes land together.
+  const liveSync = () => {
+    if (queuedSync) return queuedSync;
+    const run = liveSyncChain.then(async () => {
+      queuedSync = null; // from here on the disk is read: a later change needs a new run
       const diskConfig = await accountManager.readAfterAccountFlagWrites(() => loadConfig());
       if (!diskConfig) return;
       if (poolConfigMismatch(diskConfig.provider, dedicatedMode, true)) {
@@ -1699,7 +1715,9 @@ async function proxyWorkerCommand() {
       }
       await syncAccountsFromDisk(diskConfig, config, accountManager);
       if (agyMode) adoptAgyClientFromConfig(accountManager, diskConfig); // first login after a client-less start
-      if (codexMode || agyMode) await server.refreshQuotaAll();
+      // Not awaited: the accounts are applied now, and a slow quota probe must not hold the sync reply
+      // (the CLI's wait would run out and report restart_required for a change that did land).
+      if (codexMode || agyMode) server.refreshQuotaAll().catch(err => console.error(`[TeamClaude] Quota refresh after account sync failed: ${err.message}`));
       if (process.connected) {
         process.send({
           type: 'teamcodex:capacity',
@@ -1707,7 +1725,13 @@ async function proxyWorkerCommand() {
         });
       }
       console.log('[TeamClaude] Applied account config without restarting the worker');
-    }).catch(err => {
+    });
+    queuedSync = run;
+    liveSyncChain = run.catch(() => {});
+    return run;
+  };
+  process.on('SIGHUP', () => {
+    liveSync().catch(err => {
       console.error(`[TeamClaude] Account config reload failed: ${err.message}`);
     });
   });
@@ -1738,8 +1762,8 @@ async function proxyWorkerCommand() {
     // Persist the quota snapshot on every exit path (TUI quit, SIGINT/SIGTERM
     // → server.close → process.exit) and every minute as a crash backstop
     // (a SIGKILL loses at most the last interval). The 'exit' write is sync.
-    process.on('exit', saveQuotaSnapshot);
-    setInterval(saveQuotaSnapshot, 60_000).unref();
+    process.on('exit', () => { saveQuotaSnapshot(); removeQuotaTempFilesSync(); });
+    setInterval(saveQuotaSnapshotAsync, 60_000).unref();
     // Keep idle OAuth refresh chains rotating and retry refresh-caused errors.
     // A numeric 0 disables the sweep; malformed values use the 5-minute default.
     const tokenRefreshIntervalMs = normalizeTokenRefreshIntervalMs(config.tokenRefreshIntervalMs);
@@ -2557,10 +2581,10 @@ async function machineLiveStatus(config) {
   }
 }
 
-/** applied: live (SIGHUP delivered) | config_only (no server) | restart_required (server cannot live-reload). */
+/** applied: live (SIGHUP or accounts/sync applied) | config_only (no server) | restart_required (server cannot live-reload). */
 async function machineApplied(config) {
-  if (!await findRunningServer(config).catch(() => null)) return 'config_only';
-  return (await noteRunningServerReload(config, { quiet: true })) ? 'live' : 'restart_required';
+  await noteRunningServerReload(config, { quiet: true });
+  return machine.applied;
 }
 
 async function machineCommand() {
@@ -3667,30 +3691,55 @@ async function removeCommand() {
 
 // ── enable / disable / priority ─────────────────────────────
 
-/** Ask the supervised worker to live-sync account changes without a restart. */
+/** POST /teamclaude/accounts/sync; true when the server applied the on-disk accounts. */
+async function requestAccountsSync(port, config) {
+  try {
+    // An older server has no such route and would forward the POST upstream: ask only one that says so.
+    const status = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, { signal: AbortSignal.timeout(5_000) })
+      .then(r => r.json()).catch(() => null);
+    if (status?.accountsSync !== true) return false;
+    const res = await fetch(`http://127.0.0.1:${port}/teamclaude/accounts/sync`, {
+      method: 'POST',
+      headers: config.proxy?.apiKey ? { 'x-api-key': config.proxy.apiKey } : undefined,
+      signal: AbortSignal.timeout(30_000),
+    });
+    return res.ok && (await res.json().catch(() => null))?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the supervised worker to live-sync account changes without a restart. The outcome is also
+ * left in machine.applied (live | config_only | restart_required) for the --json commands.
+ */
 async function noteRunningServerReload(config, { quiet = false } = {}) {
   const say = quiet ? () => {} : console.log;
   const warn = quiet ? () => {} : console.error;
+  const outcome = applied => { machine.applied = applied; return applied === 'live'; };
   try {
     const running = await findRunningServer(config);
-    if (!running) return false;
+    if (!running) return outcome('config_only');
     const state = await readServerState();
     const workerPid = running.lifecycleVerified && running.identity
       && verifyWorkerIdentity(state, running.identity)
       ? state.workerPid
       : null;
-    if (!workerPid) {
+    if (workerPid) {
+      process.kill(workerPid, 'SIGHUP');
+    } else if (!await requestAccountsSync(running.port, config)) {
+      // No verified worker pid to signal (always so on Windows: no lsof/ps identity, no SIGHUP),
+      // and the server does not take the authenticated loopback sync either (older server).
       warn('The running server does not support account-only live reload.');
       warn(`Apply the change with: ${cliName(config)} restart`);
-      return false;
+      return outcome('restart_required');
     }
-    process.kill(workerPid, 'SIGHUP');
     say('Applied to the running server without restarting active connections.');
-    return true;
+    return outcome('live');
   } catch (err) {
     warn(`Could not reload the running server automatically: ${err.message}`);
     warn(`Apply the change with: ${cliName(config)} restart`);
-    return false;
+    return outcome('restart_required');
   }
 }
 
@@ -4020,6 +4069,7 @@ async function upsertOAuthAccount(name, creds, source = 'unknown') {
   });
   console.log(`${action} account "${name}"`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4263,6 +4313,7 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
   });
   console.log(`${action} Antigravity account "${name}"${assist?.tierId ? ` (${assist.tierId})` : ''}`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4421,6 +4472,7 @@ async function upsertGrokAccount(config, explicitName, creds, source) {
   });
   console.log(`${action} Grok account "${name}"${user?.tier ? ` (${user.tier})` : ''}`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4473,6 +4525,7 @@ async function upsertCodexAccount(name, creds, source = 'unknown') {
   });
   console.log(`${action} Codex account "${name}"`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   await revokeReplacedCodexToken(replaced, creds, name);
   return name;

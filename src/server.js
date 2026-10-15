@@ -3,7 +3,7 @@ import https from 'node:https';
 import { mkdir, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
   brotliDecompressSync,
@@ -362,6 +362,14 @@ export function resolveAnthropicUsageUrl(configured, upstream) {
     }
   } catch { /* not a URL — no usage endpoint */ }
   return null;
+}
+
+/** Constant-time proxy-key check (a missing or differently sized key is simply a mismatch). */
+export function keyMatches(given, expected) {
+  if (typeof given !== 'string' || typeof expected !== 'string') return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function createProxyServer(accountManager, config, hooks = {}) {
@@ -887,11 +895,19 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (agyRefreshPromise) return agyRefreshPromise;
     agyRefreshPromise = (async () => {
       // Disabled and parked accounts are not polled: proxy-originated traffic
-      // stays on accounts that can actually serve.
-      const targets = accountManager.accounts.filter(a => a.provider === 'agy' && a.credential
-        && a.enabled !== false && a.status !== 'error');
-      const outcomes = await Promise.all(targets.map(a => refreshAgyAccount(a)));
-      return { targets: targets.length, measured: outcomes.filter(Boolean).length };
+      // stays on accounts that can actually serve. An account a live sync adds while this runs
+      // (a caller then gets this same promise) is measured in another pass, as the codex refresh does.
+      const seen = new Set();
+      let measured = 0;
+      for (;;) {
+        const targets = accountManager.accounts.filter(a => a.provider === 'agy' && a.credential
+          && a.enabled !== false && a.status !== 'error' && !seen.has(a));
+        if (!targets.length || warmupClosed) break;
+        for (const a of targets) seen.add(a);
+        const outcomes = await Promise.all(targets.map(a => refreshAgyAccount(a)));
+        measured += outcomes.filter(Boolean).length;
+      }
+      return { targets: seen.size, measured };
     })();
     try {
       return await agyRefreshPromise;
@@ -1546,6 +1562,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       const isRotateRequest = req.url === '/teamclaude/rotate';
       // Operator "re-measure usage now" (`teamcodex reload`, the CLI twin of TUI R).
       const isReloadRequest = req.url === '/teamclaude/reload';
+      // Account-only live reload from disk (the SIGHUP twin; Windows has no SIGHUP).
+      const isAccountsSyncRequest = req.url === '/teamclaude/accounts/sync';
 
       // BYOK lane. Claude Code never carries this prefix, so no traffic on
       // /v1/... can reach the normalization below — the isolation is structural.
@@ -1648,22 +1666,22 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         });
         return;
       }
-      if (isReloadRequest && !isLocal) {
+      if ((isReloadRequest || isAccountsSyncRequest) && !isLocal) {
         rejectEarlyRequest(req, res, 403, { 'Content-Type': 'application/json' }, {
           type: 'error',
-          error: { type: 'permission_error', message: 'Quota reload is local-only.' },
+          error: { type: 'permission_error', message: isReloadRequest ? 'Quota reload is local-only.' : 'Account sync is local-only.' },
         });
         return;
       }
-      if ((isRotateRequest || isResetCreditRequest || isReloadRequest) && proxyApiKey
-          && clientKey !== proxyApiKey && bearerKey !== proxyApiKey) {
+      if ((isRotateRequest || isResetCreditRequest || isReloadRequest || isAccountsSyncRequest) && proxyApiKey
+          && !keyMatches(clientKey, proxyApiKey) && !keyMatches(bearerKey, proxyApiKey)) {
         rejectEarlyRequest(req, res, 401, { 'Content-Type': 'application/json' }, {
           type: 'error',
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },
         });
         return;
       }
-      if (proxyApiKey && clientKey !== proxyApiKey && bearerKey !== proxyApiKey && !isLocal) {
+      if (proxyApiKey && !keyMatches(clientKey, proxyApiKey) && !keyMatches(bearerKey, proxyApiKey) && !isLocal) {
         rejectEarlyRequest(req, res, 401, { 'Content-Type': 'application/json' }, {
           type: 'error',
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },
@@ -1807,6 +1825,34 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         return;
       }
 
+      if (isAccountsSyncRequest) {
+        if (!hooks.onAccountsSync) {
+          rejectEarlyRequest(req, res, 404, { 'Content-Type': 'application/json' }, {
+            type: 'error',
+            error: { type: 'not_found_error', message: 'Account sync is not available here.' },
+          });
+          return;
+        }
+        const bodyFree = (req.headers['content-length'] == null || req.headers['content-length'] === '0')
+          && req.headers['transfer-encoding'] == null;
+        if (req.method !== 'POST' || !bodyFree) {
+          rejectEarlyRequest(req, res, req.method !== 'POST' ? 405 : 400, { 'Content-Type': 'application/json', Allow: 'POST' }, {
+            type: 'error',
+            error: { type: 'invalid_request_error', message: 'Account sync is a body-free POST.' },
+          });
+          return;
+        }
+        try {
+          await hooks.onAccountsSync();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, total: accountManager.accounts.length }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ type: 'error', error: { type: 'account_sync_failed', message: err.message } }));
+        }
+        return;
+      }
+
       const isStatusRequest = req.method === 'GET' && req.url === '/teamclaude/status';
       const contentLength = req.headers['content-length'];
       const bodyFreeStatus = isStatusRequest
@@ -1820,11 +1866,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // by the tracker, RAM/loadavg are instantaneous.
         const includeIdentity = isLocal
           && Boolean(proxyApiKey)
-          && clientKey === proxyApiKey
+          && keyMatches(clientKey, proxyApiKey)
           && req.headers['x-teamcodex-status-identity'] === '1';
         res.end(JSON.stringify({
           ...accountManager.getStatus({ includeIdentity }),
           host: hostTracker.sample(),
+          // POST /teamclaude/accounts/sync is served (an older server would forward that path upstream)
+          accountsSync: Boolean(hooks.onAccountsSync),
           ...(provider === 'codex'
             ? {
                 resetCredits: {

@@ -1,5 +1,5 @@
 import { readFile, readdir, mkdir, rmdir, rm, open, rename, link } from 'node:fs/promises';
-import { mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, rmSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -26,6 +26,36 @@ export function assertSafeProxyConfig(config) {
   }
 }
 
+// Windows: an antivirus scanner or the search indexer briefly holding the target makes rename
+// fail with EPERM/EBUSY/EACCES. Retry with a growing pause (about 1.4 s in all) before giving up.
+// Elsewhere those codes are real permission errors and fail at once (`retry` is on for win32 only).
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_ATTEMPTS = 8;
+const renameDelayMs = attempt => 50 * attempt;
+const RETRY_RENAME = process.platform === 'win32';
+
+export async function renameWithRetry(from, to, renameFn = rename, retry = RETRY_RENAME) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await renameFn(from, to);
+    } catch (err) {
+      if (!retry || attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      await new Promise(done => setTimeout(done, renameDelayMs(attempt)));
+    }
+  }
+}
+
+export function renameWithRetrySync(from, to, renameFn = renameSync, retry = RETRY_RENAME) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return renameFn(from, to);
+    } catch (err) {
+      if (!retry || attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, renameDelayMs(attempt));
+    }
+  }
+}
+
 async function syncParentDirectory(path) {
   if (process.platform === 'win32') return;
   const directory = await open(dirname(path), 'r');
@@ -42,7 +72,8 @@ async function syncParentDirectory(path) {
 // whole account fleet's credentials were lost on 2026-07-27 under memory
 // pressure. rename() on the same filesystem is atomic: readers (and the next
 // boot) see either the old file or the new one, never a partial.
-async function writeFileAtomic(path, data, mode = 0o600) {
+// `shouldCommit` (optional) is asked right before each rename attempt: false drops the write.
+async function writeFileAtomic(path, data, mode = 0o600, shouldCommit = null) {
   const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
     const fh = await open(tmp, 'w', mode);
@@ -52,7 +83,10 @@ async function writeFileAtomic(path, data, mode = 0o600) {
     } finally {
       await fh.close();
     }
-    await rename(tmp, path);
+    await renameWithRetry(tmp, path, shouldCommit ? (from, to) => {
+      if (!shouldCommit()) throw Object.assign(new Error('superseded by a newer write'), { code: 'ESUPERSEDED' });
+      return rename(from, to);
+    } : rename);
     await syncParentDirectory(path);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
@@ -246,7 +280,7 @@ function writeFileAtomicSync(path, data, mode = 0o600) {
     } finally {
       closeSync(fd);
     }
-    renameSync(tmp, path);
+    renameWithRetrySync(tmp, path);
     syncParentDirectorySync(path);
   } catch (err) {
     try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }
@@ -306,16 +340,58 @@ export async function readQuotaCache() {
   }
 }
 
+// Snapshot order. Async writes (the minute timer) run one at a time. A sync write (reset-credit ledger,
+// exit) is newer than any async write still pending or in flight: those drop their write before the
+// rename instead of landing an older snapshot over it, and the sync data is written once more behind
+// them in case a rename was already under way.
+let quotaWriteChain = Promise.resolve();
+let quotaSyncWrites = 0;
+let quotaAsyncPending = 0;
+
+/** The periodic snapshot: async, so a slow rename (Windows retries) never blocks the event loop. */
+export function writeQuotaCache(data) {
+  const generation = quotaSyncWrites;
+  const current = () => generation === quotaSyncWrites;
+  quotaAsyncPending += 1;
+  const run = quotaWriteChain.then(async () => {
+    try {
+      if (!current()) return;
+      const path = getQuotaCachePath();
+      await mkdir(dirname(path), { recursive: true });
+      await writeFileAtomic(path, JSON.stringify(data, null, 2) + '\n', 0o600, current);
+    } catch { /* best-effort — a failed or superseded snapshot must never break the proxy */ } finally {
+      quotaAsyncPending -= 1;
+    }
+  });
+  quotaWriteChain = run;
+  return run;
+}
+
 /**
  * Synchronous on purpose: the last write happens inside a process 'exit'
  * handler, where async I/O never completes. The snapshot is small (a few KB).
  */
 export function writeQuotaCacheSync(data) {
+  const behindAsync = quotaAsyncPending > 0;
+  quotaSyncWrites += 1;
   try {
     const path = getQuotaCachePath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileAtomicSync(path, JSON.stringify(data, null, 2) + '\n');
   } catch { /* best-effort — a failed snapshot must never break the proxy */ }
+  // Lands after the in-flight one, whatever its rename did (returned for tests; callers need not wait).
+  return behindAsync ? writeQuotaCache(data) : undefined;
+}
+
+/** Exit: an async snapshot cut short leaves this process's temp file behind; remove it. */
+export function removeQuotaTempFilesSync() {
+  try {
+    const path = getQuotaCachePath();
+    const prefix = `${path.slice(dirname(path).length + 1)}.tmp-${process.pid}-`;
+    for (const name of readdirSync(dirname(path))) {
+      if (name.startsWith(prefix)) rmSync(join(dirname(path), name), { force: true });
+    }
+  } catch { /* best-effort */ }
 }
 
 export function createDefaultConfig() {

@@ -2,6 +2,8 @@
 // App-mode installer: non-interactive, user-level, JSON-lines output (docs/install/APP-INSTALL.md).
 // Needs only Node (the one that runs it, or --node). No Python, tmux, git, sudo or network
 // (except `--with-codex-cli`, which asks npm for the pinned Codex CLI). Never touches shell rc files or ~/.claude.
+// macOS: npm copy + sh wrappers + launchd. Windows: no service, no wrapper, no npm — it writes configs and a
+// manifest and hands back each pool's run spec ({argv, env, log}); the app starts and stops the servers itself.
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync,
@@ -12,6 +14,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// Test only: under `node --test` (NODE_TEST_CONTEXT is set and inherited by the installer it spawns),
+// TEAMPROXY_APP_PLATFORM=win32 runs the Windows path on any OS. Outside tests it is ignored.
+const platformOverride = process.env.NODE_TEST_CONTEXT ? process.env.TEAMPROXY_APP_PLATFORM : null;
+const WIN = (platformOverride || process.platform) === 'win32';
 const LABEL_PREFIX = 'kr.selvi.teamproxy.';
 const MARKER = '# teamproxy-app';
 // pool -> command name, default port, config file, node entry (script + leading args), extra env
@@ -41,7 +47,20 @@ const shq = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const xml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
-function layoutFor(home) {
+function layoutFor(home, prefixed) {
+  if (WIN) {
+    // %LOCALAPPDATA%\Selvi\teamproxy; with --prefix HOME, <HOME>\AppData\Local\Selvi\teamproxy.
+    const local = (!prefixed && process.env.LOCALAPPDATA) || join(home, 'AppData', 'Local');
+    const root = join(local, 'Selvi', 'teamproxy');
+    return {
+      home,
+      root,
+      manifest: join(root, 'manifest.json'),
+      codexCli: join(root, 'codex-cli'),
+      logs: join(root, 'logs'),
+      config: pool => join(home, '.config', POOLS[pool].config),
+    };
+  }
   const root = join(home, '.local/share/teamproxy-app');
   return {
     home,
@@ -202,31 +221,9 @@ async function installCodexCli(L, version, node, npmCli, manifest) {
   step('codex-cli', 'ok', `Codex CLI ${version} 설치 완료`);
 }
 
-async function installPool(L, pool, version, node, npmCli, manifest) {
-  const { cmd, config: configName } = POOLS[pool];
-  let changed = false;
-  const entry = join(L.pkg(pool), 'src/index.js');
-  if (manifest.pools[pool]?.version === version && existsSync(entry)) {
-    step(`npm:${pool}`, 'skip', `${cmd} ${version}은 이미 설치돼 있습니다`);
-  } else {
-    step(`npm:${pool}`, 'start', `${cmd} ${version} 설치 중`);
-    rmSync(L.prefix(pool), { recursive: true, force: true });
-    const result = npmInstall(node, npmCli, L.prefix(pool), SOURCE, ['--install-links']);
-    if (!result.ok || !existsSync(entry)) throw new Fail('npm_failed', `${pool}: npm 설치에 실패했습니다 (${result.tail})`);
-    step(`npm:${pool}`, 'ok', `${cmd} ${version} 설치 완료`);
-    changed = true;
-  }
-
-  const codexBin = join(L.codexCli, 'bin/codex');
-  const wrapper = L.wrapper(pool);
-  const text = wrapperText(L, pool, node, existsSync(codexBin) ? codexBin : null);
-  if (readText(wrapper) === text) {
-    step(`wrapper:${pool}`, 'skip', `${cmd} 명령이 최신입니다`);
-  } else {
-    writeFile(wrapper, text, 0o755);
-    step(`wrapper:${pool}`, 'ok', `${cmd} 명령을 만들었습니다`);
-  }
-
+// Writes or completes the pool's config; returns its origin for the manifest.
+async function ensureConfig(L, pool, manifest) {
+  const { config: configName } = POOLS[pool];
   const configPath = L.config(pool);
   const existing = readJson(configPath, null);
   const previous = manifest.pools[pool];
@@ -258,6 +255,35 @@ async function installPool(L, pool, version, node, npmCli, manifest) {
     writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 0o600);
     step(`config:${pool}`, 'ok', `${configName}을 만들었습니다`);
   }
+  return origin;
+}
+
+async function installPool(L, pool, version, node, npmCli, manifest) {
+  const { cmd } = POOLS[pool];
+  let changed = false;
+  const entry = join(L.pkg(pool), 'src/index.js');
+  if (manifest.pools[pool]?.version === version && existsSync(entry)) {
+    step(`npm:${pool}`, 'skip', `${cmd} ${version}은 이미 설치돼 있습니다`);
+  } else {
+    step(`npm:${pool}`, 'start', `${cmd} ${version} 설치 중`);
+    rmSync(L.prefix(pool), { recursive: true, force: true });
+    const result = npmInstall(node, npmCli, L.prefix(pool), SOURCE, ['--install-links']);
+    if (!result.ok || !existsSync(entry)) throw new Fail('npm_failed', `${pool}: npm 설치에 실패했습니다 (${result.tail})`);
+    step(`npm:${pool}`, 'ok', `${cmd} ${version} 설치 완료`);
+    changed = true;
+  }
+
+  const codexBin = join(L.codexCli, 'bin/codex');
+  const wrapper = L.wrapper(pool);
+  const text = wrapperText(L, pool, node, existsSync(codexBin) ? codexBin : null);
+  if (readText(wrapper) === text) {
+    step(`wrapper:${pool}`, 'skip', `${cmd} 명령이 최신입니다`);
+  } else {
+    writeFile(wrapper, text, 0o755);
+    step(`wrapper:${pool}`, 'ok', `${cmd} 명령을 만들었습니다`);
+  }
+
+  const origin = await ensureConfig(L, pool, manifest);
 
   const plist = L.plist(pool);
   const want = plistText(L, pool, node);
@@ -330,6 +356,107 @@ async function runInstall(L, pools, nodeArg, codexCliVersion) {
   return done.ok ? 0 : 1;
 }
 
+// ── Windows ──
+
+// The node argv the app runs: `cli` + a command (login --json, accounts --json, …), `run` = the server.
+// env holds only what to add to the app's own clean environment; log is where the app sends stdout and stderr.
+function runSpec(L, pool, node, source) {
+  const [script, ...rest] = POOLS[pool].entry;
+  const env = { TEAMCLAUDE_CONFIG: L.config(pool), ...(pool !== 'claude' && { TEAMCLAUDE_PROVIDER: pool }) };
+  const cli = [node, join(source, script), ...rest];
+  return { run: { argv: [...cli, 'server'], env, log: join(L.logs, `${pool}.log`) }, cli: { argv: cli, env } };
+}
+const manifestSpec = (L, pool, manifest) => runSpec(L, pool, manifest.node ?? process.execPath, manifest.source ?? SOURCE);
+
+async function runInstallWindows(L, pools, nodeArg, codexCliVersion) {
+  const version = sourceVersion();
+  const done = { done: true, ok: false, version, pools: Object.fromEntries(pools.map(p => [p, { port: poolPort(L, p), installed: false }])) };
+  try {
+    step('preflight', 'start', '필수 프로그램을 확인합니다');
+    const node = nodeArg ?? process.execPath;
+    if (!isAbsolute(node) || !existsSync(node)) throw new Fail('missing_node', `node를 찾을 수 없습니다: ${node}`);
+    if (codexCliVersion) throw new Fail('unsupported_platform', 'Windows에서는 아직 Codex CLI를 설치하지 않습니다');
+    step('preflight', 'ok', 'node를 찾았습니다');
+    step('conflicts', 'start', '포트를 확인합니다');
+    const manifest = readManifest(L);
+    for (const pool of pools) {
+      if (pool in manifest.pools) continue; // ours: the port may well be our own server
+      if (await portOpen(poolPort(L, pool))) {
+        throw new Fail('conflict_existing_install', `${pool}: 포트 ${poolPort(L, pool)}를 다른 프로세스가 쓰고 있습니다. 덮어쓰지 않고 멈춥니다.`);
+      }
+    }
+    step('conflicts', 'ok', '충돌이 없습니다');
+    mkdirSync(L.logs, { recursive: true });
+    Object.assign(manifest, { node, source: SOURCE });
+    for (const pool of pools) {
+      const config = await ensureConfig(L, pool, manifest);
+      manifest.pools[pool] = { version, config };
+      writeFile(L.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o644);
+    }
+    manifest.version = version;
+    writeFile(L.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o644);
+    for (const pool of pools) {
+      const running = Boolean(await fetchStatus(poolPort(L, pool)));
+      done.pools[pool] = { port: poolPort(L, pool), installed: true, running, config: manifest.pools[pool].config, ...manifestSpec(L, pool, manifest) };
+      if (done.pools[pool].config === 'existing_kept' && !readJson(L.config(pool), {})?.proxy?.host) done.pools[pool].warning = 'host_unset';
+      step(`run:${pool}`, 'ok', running ? '서버가 이미 응답합니다' : '앱이 run 명세로 서버를 띄웁니다');
+    }
+    done.ok = true;
+  } catch (error) {
+    const code = error instanceof Fail ? error.code : 'install_failed';
+    step('error', 'fail', error.message);
+    Object.assign(done, { error: code, detail: error.message });
+  }
+  emit(done);
+  return done.ok ? 0 : 1;
+}
+
+async function runStatusWindows(L) {
+  const manifest = readManifest(L);
+  const pools = {};
+  for (const pool of Object.keys(POOLS)) {
+    const installed = pool in manifest.pools;
+    const info = { port: poolPort(L, pool), installed, running: false, accounts: (readJson(L.config(pool), {}).accounts ?? []).length, usable: 0 };
+    const reply = installed ? await fetchStatus(info.port) : null;
+    if (reply) Object.assign(info, { running: true, usable: Number(reply.usableCount ?? 0) });
+    pools[pool] = installed ? { ...info, ...manifestSpec(L, pool, manifest) } : info;
+  }
+  emit({ done: true, ok: true, installed: Object.values(pools).some(p => p.installed), version: manifest.version, pools });
+  return 0;
+}
+
+// The app stops the servers first; nothing here is registered with Windows, so files are all there is.
+async function runUninstallWindows(L, purge) {
+  const manifest = readManifest(L);
+  // A server still answering would keep its files open and rewrite its config: the app stops it first.
+  const running = [];
+  for (const pool of Object.keys(manifest.pools)) if (await fetchStatus(poolPort(L, pool))) running.push(pool);
+  if (running.length) {
+    const detail = `${running.join(', ')}: 서버가 아직 실행 중입니다. 먼저 끄고 다시 지웁니다.`;
+    step('error', 'fail', detail);
+    emit({ done: true, ok: false, error: 'server_running', running, detail });
+    return 1;
+  }
+  const removed = [];
+  for (const pool of Object.keys(manifest.pools)) {
+    if (purge) purgeConfig(L, pool, manifest);
+    removed.push(pool);
+    step(`uninstall:${pool}`, 'ok', `${POOLS[pool].cmd}을 지웠습니다${purge ? ' (설정 포함)' : ''}`);
+  }
+  rmSync(L.codexCli, { recursive: true, force: true });
+  rmSync(L.manifest, { force: true });
+  if (purge) rmSync(L.logs, { recursive: true, force: true });
+  try { rmdirSync(L.root); } catch { /* not empty or already gone */ }
+  emit({ done: true, ok: true, removed, purged: purge });
+  return 0;
+}
+
+function purgeConfig(L, pool, manifest) {
+  if ((manifest.pools[pool].config ?? 'created') !== 'created') return; // never a config the app did not write
+  const config = L.config(pool).replace(/\.json$/, '');
+  for (const suffix of ['.json', '.server.json', '.quota.json']) rmSync(config + suffix, { force: true });
+}
+
 async function runStatus(L) {
   const manifest = readManifest(L);
   const pools = {};
@@ -355,10 +482,7 @@ function runUninstall(L, purge) {
     rmSync(L.plist(pool), { force: true });
     if ((readText(L.wrapper(pool)) ?? '').includes(MARKER)) rmSync(L.wrapper(pool), { force: true });
     rmSync(L.prefix(pool), { recursive: true, force: true });
-    if (purge && (manifest.pools[pool].config ?? 'created') === 'created') { // never a config the app did not write
-      const config = L.config(pool).replace(/\.json$/, '');
-      for (const suffix of ['.json', '.server.json', '.quota.json']) rmSync(config + suffix, { force: true });
-    }
+    if (purge) purgeConfig(L, pool, manifest);
     removed.push(pool);
     step(`uninstall:${pool}`, 'ok', `${POOLS[pool].cmd}을 지웠습니다${purge ? ' (설정 포함)' : ''}`);
   }
@@ -376,7 +500,12 @@ function runLoginCommand(L, pool) {
   let n = 1;
   while (taken.has(`${pool}-${n}`)) n += 1; // first free number: a name in use would overwrite that account
   const account = `${pool}-${n}`;
-  emit({ done: true, ok: true, pool, account, argv: [L.wrapper(pool), 'login', '--name', account] });
+  if (WIN) {
+    const { cli } = manifestSpec(L, pool, readManifest(L));
+    emit({ done: true, ok: true, pool, account, argv: [...cli.argv, 'login', '--name', account], env: cli.env });
+  } else {
+    emit({ done: true, ok: true, pool, account, argv: [L.wrapper(pool), 'login', '--name', account] });
+  }
   return 0;
 }
 
@@ -392,14 +521,14 @@ function parseArgs(argv) {
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
   if (!flags.has('--json')) throw new Fail('usage', 'App mode needs --json.');
-  const L = layoutFor(flags.has('--prefix') ? resolve(flags.get('--prefix')) : homedir());
-  if (flags.has('--status')) return runStatus(L);
-  if (flags.has('--uninstall')) return runUninstall(L, flags.has('--purge'));
+  const L = layoutFor(flags.has('--prefix') ? resolve(flags.get('--prefix')) : homedir(), flags.has('--prefix'));
+  if (flags.has('--status')) return WIN ? runStatusWindows(L) : runStatus(L);
+  if (flags.has('--uninstall')) return (WIN ? runUninstallWindows : runUninstall)(L, flags.has('--purge'));
   if (flags.has('--login-command')) return runLoginCommand(L, flags.get('--login-command'));
   if (flags.has('--app')) {
     const pools = flags.has('--pools') ? flags.get('--pools').split(',').map(p => p.trim()).filter(Boolean) : Object.keys(POOLS);
     if (!pools.length || pools.some(p => !Object.hasOwn(POOLS, p))) throw new Fail('usage', 'Usage: --pools claude,codex,agy,grok');
-    return runInstall(L, pools, flags.get('--node'), flags.get('--with-codex-cli'));
+    return (WIN ? runInstallWindows : runInstall)(L, pools, flags.get('--node'), flags.get('--with-codex-cli'));
   }
   throw new Fail('usage', 'Usage: install-app.mjs --app|--status|--uninstall [--purge]|--login-command POOL --json '
     + '[--pools claude,codex,agy,grok] [--node ABS_PATH] [--with-codex-cli VERSION] [--prefix HOME]');

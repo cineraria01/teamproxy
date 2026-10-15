@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const CLI = fileURLToPath(new URL('../src/index.js', import.meta.url));
 let t;
@@ -48,12 +48,12 @@ globalThis.fetch = async (url, init) => {
   return real(url, init);
 };
 `);
-  t = { dir, port, configPath, config, env: { ...process.env, LC_ALL: 'C', TEAMCLAUDE_PROVIDER: 'anthropic', TEAMCLAUDE_CONFIG: configPath, NODE_OPTIONS: `--import=${join(dir, 'mock-fetch.mjs')}` }, servers: [] };
+  t = { dir, port, configPath, config, env: { ...process.env, LC_ALL: 'C', TEAMCLAUDE_PROVIDER: 'anthropic', TEAMCLAUDE_CONFIG: configPath, NODE_OPTIONS: `--import=${pathToFileURL(join(dir, 'mock-fetch.mjs')).href}` }, servers: [] };
 });
 
 afterEach(async () => {
   for (const child of t.servers) { child.kill('SIGTERM'); await once(child, 'exit').catch(() => {}); }
-  rmSync(t.dir, { recursive: true, force: true });
+  rmSync(t.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 const cli = (args, env = {}) => new Promise(done => {
@@ -130,8 +130,8 @@ test('changes without a server are config_only; errors are JSON with exit 1', as
 
 // ── login events ──
 
-function login(args = ['login', '--name', 'app-1', '--json'], env = {}) {
-  const child = spawn(process.execPath, [CLI, ...args], { env: { ...t.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+function login(args = ['login', '--name', 'app-1', '--json'], env = {}, stdin = 'pipe') {
+  const child = spawn(process.execPath, [CLI, ...args], { env: { ...t.env, ...env }, stdio: [stdin, 'pipe', 'pipe'] });
   const events = [];
   const waiters = [];
   let buffer = '';
@@ -161,7 +161,7 @@ const callback = (authUrl, code = 'the-code') => {
   redirect.pathname = '/callback';
   redirect.searchParams.set('code', code);
   redirect.searchParams.set('state', u.searchParams.get('state'));
-  return fetch(redirect).then(r => r.text());
+  return fetch(redirect, { redirect: 'manual' }).then(r => r.text()); // never follow the 302 out to the internet
 };
 
 test('claude login --json: auth_url, waiting, callback, done', async () => {
@@ -173,7 +173,7 @@ test('claude login --json: auth_url, waiting, callback, done', async () => {
   const [code] = await run.exit;
   assert.equal(code, 0);
   assert.deepEqual(run.events.map(e => e.event ?? 'done'), ['auth_url', 'waiting', 'done']);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
   const saved = readConfig().accounts.find(a => a.name === 'app-1');
   assert.equal(saved.accessToken, 'new-at');
 });
@@ -186,7 +186,7 @@ test('claude login --json: need_code, then a pasted callback URL on stdin finish
   run.child.stdin.write(`http://localhost:1/callback?code=pasted&state=${u.searchParams.get('state')}\n`);
   const [code] = await run.exit;
   assert.equal(code, 0);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
 });
 
 test('a wrong state is a coded failure, not a hang', async () => {
@@ -231,7 +231,7 @@ test('codex login --json relays the URL printed by the official CLI and saves th
   assert.equal(typeof auth.browser_opened, 'boolean');
   const [code] = await run.exit;
   assert.equal(code, 0);
-  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'codex-1' });
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'codex-1', applied: 'config_only' });
   assert.equal(readConfig().accounts.find(a => a.name === 'codex-1').provider, 'codex');
 });
 
@@ -289,4 +289,156 @@ test('a name that appears between the pre-check and the save is not overwritten 
   assert.equal(code, 1);
   assert.equal(run.events.at(-1).error, 'name_taken');
   assert.equal(readConfig().accounts.find(a => a.name === 'raced').apiKey, 'other');
+});
+
+// ── Windows paths (no SIGTERM handler, no SIGHUP, no lsof) ──
+
+test('a {"cancel":true} line on stdin cancels with a done line', { timeout: 30_000 }, async () => {
+  const run = login();
+  await run.next(e => e.event === 'waiting');
+  run.child.stdin.write('{"cancel":true}\n');
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: false, error: 'cancelled' });
+});
+
+test('a login --json whose stdin is not a pipe (/dev/null, NUL) is not cancelled by its EOF', { timeout: 30_000 }, async () => {
+  const run = login(undefined, {}, 'ignore');
+  const auth = await run.next(e => e.event === 'waiting').then(() => run.events.find(e => e.event === 'auth_url'));
+  await new Promise(r => setTimeout(r, 1_500));
+  assert.equal(run.events.some(e => e.done), false, JSON.stringify(run.events));
+  await callback(auth.url);
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
+});
+
+test('stdin EOF cancels a claude login with a done line', { timeout: 30_000 }, async () => {
+  const run = login();
+  await run.next(e => e.event === 'waiting');
+  run.child.stdin.end();
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }]);
+});
+
+test('stdin EOF cancels a codex login and removes its temp CODEX_HOME', { timeout: 30_000 }, async () => {
+  const homeFile = join(t.dir, 'codex-home.txt');
+  const pidFile = join(t.dir, 'codex.pid');
+  const run = login(['codex', 'login', '--name', 'codex-1', '--json'], {
+    TEAMCODEX_CODEX_BIN: fakeCodex(), FAKE_CODEX_HANG: '1', FAKE_CODEX_HOME_FILE: homeFile, FAKE_CODEX_PID_FILE: pidFile,
+  });
+  await run.next(e => e.event === 'waiting');
+  for (let i = 0; i < 50 && !existsSync(pidFile); i += 1) await new Promise(r => setTimeout(r, 50));
+  const home = readFileSync(homeFile, 'utf8').trim();
+  run.child.stdin.end();
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }]);
+  assert.equal(existsSync(home), false);
+});
+
+test('a code pasted before the race starts is not lost', async () => {
+  const run = login(undefined, { TEAMPROXY_NEED_CODE_MS: '100000' });
+  run.child.stdin.write('pasted-early\n'); // may arrive before the callback server is up
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
+});
+
+const sync = (headers = { 'x-api-key': 'tc-test' }, method = 'POST') =>
+  fetch(`http://127.0.0.1:${t.port}/teamclaude/accounts/sync`, { method, headers });
+
+test('POST /teamclaude/accounts/sync: key required, POST only, applies the on-disk accounts', async () => {
+  await startServer();
+  assert.equal((await sync({ 'x-api-key': 'wrong' })).status, 401);
+  assert.equal((await sync(undefined, 'GET')).status, 405);
+  const config = readConfig();
+  config.accounts[0].enabled = false;
+  writeFileSync(t.configPath, JSON.stringify(config));
+  const res = await sync();
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, total: 2 });
+  // applied before the response: no polling needed
+  const status = await json(['status', '--json']);
+  assert.equal(status.accounts.find(a => a.name === 'api-1').usable, false);
+});
+
+test('without lsof (as on Windows) --json changes and login still apply live through accounts/sync', async () => {
+  await startServer();
+  // A PATH holding only node: no lsof or ps anywhere (Ubuntu has /usr/bin/lsof).
+  const bin = join(t.dir, 'bin');
+  mkdirSync(bin);
+  symlinkSync(process.execPath, join(bin, 'node'));
+  const noLsof = { PATH: bin };
+  const disable = await cli(['disable', 'api-1', '--json'], noLsof);
+  assert.deepEqual(JSON.parse(disable.stdout), { ok: true, account: 'api-1', enabled: false, applied: 'live' });
+  const status = await json(['status', '--json']);
+  assert.equal(status.accounts.find(a => a.name === 'api-1').usable, false);
+  const run = login(undefined, noLsof);
+  const auth = await run.next(e => e.event === 'auth_url');
+  await callback(auth.url);
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'live' });
+});
+
+test('POST /teamclaude/accounts/sync from a non-loopback address is refused (403) even with the key', async ctx => {
+  const external = Object.values(networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal);
+  if (!external) return ctx.skip('no non-loopback IPv4 interface on this machine to call from');
+  const config = readConfig();
+  config.proxy.host = '0.0.0.0';
+  writeFileSync(t.configPath, JSON.stringify(config));
+  await startServer();
+  const res = await fetch(`http://${external.address}:${t.port}/teamclaude/accounts/sync`, { method: 'POST', headers: { 'x-api-key': 'tc-test' } });
+  assert.equal(res.status, 403);
+  assert.match((await res.json()).error.message, /local-only/);
+});
+
+test('accounts/sync answers once the accounts are applied, without waiting for a slow quota fetch', async () => {
+  // A codex server whose wham/usage never answers in time: the sync reply must not wait for it.
+  writeFileSync(join(t.dir, 'mock-fetch.mjs'), `
+const real = globalThis.fetch;
+globalThis.fetch = (url, init) => String(url).includes('/wham/usage')
+  ? new Promise(() => {}) // never settles
+  : real(url, init);
+`);
+  const config = {
+    provider: 'codex',
+    proxy: { port: t.port, apiKey: 'tc-test', host: '127.0.0.1', allowNoAccounts: true },
+    activeWarmup: false,
+    accounts: [{ name: 'codex-1', provider: 'codex', type: 'oauth', accessToken: 'tok-1', refreshToken: 'r-1', accountId: 'ws-1', expiresAt: Date.now() + 3_600_000 }],
+  };
+  writeFileSync(t.configPath, JSON.stringify(config));
+  t.env.TEAMCLAUDE_PROVIDER = 'codex';
+  await startServer();
+  config.accounts.push({ ...config.accounts[0], name: 'codex-2', accessToken: 'tok-2', accountId: 'ws-2' });
+  writeFileSync(t.configPath, JSON.stringify(config));
+  const started = Date.now();
+  const res = await fetch(`http://127.0.0.1:${t.port}/teamclaude/accounts/sync`, {
+    method: 'POST', headers: { 'x-api-key': 'tc-test' }, signal: AbortSignal.timeout(5_000), // fail, not hang, if it waits again
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, total: 2 });
+  assert.ok(Date.now() - started < 5_000, `sync took ${Date.now() - started} ms`);
+});
+
+test('an older server (no accountsSync in its status) gets no POST: the change reports restart_required', async () => {
+  const posts = [];
+  const old = http.createServer((req, res) => {
+    if (req.method === 'POST') posts.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ accounts: [], switchThreshold: 0.98, usableCount: 0, totalCount: 2 })); // status without the flag
+  });
+  await new Promise(r => old.listen(t.port, '127.0.0.1', r));
+  try {
+    const bin = join(t.dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    const r = await cli(['disable', 'api-1', '--json'], { PATH: bin });
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, account: 'api-1', enabled: false, applied: 'restart_required' });
+    assert.deepEqual(posts, []);
+  } finally {
+    old.close();
+  }
 });

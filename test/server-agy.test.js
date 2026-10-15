@@ -533,3 +533,41 @@ test('every account failing authentication answers agy in the Google RPC shape',
     await Promise.all([closeServer(proxy), closeServer(upstream.server)]);
   }
 });
+
+test('an account added during an in-flight quota refresh is measured by that same refresh', async () => {
+  let releaseHeld;
+  const held = new Promise(resolve => { releaseHeld = resolve; });
+  const state = { hold: false };
+  const route = async (call, res) => {
+    if (call.url === '/v1internal:retrieveUserQuotaSummary') {
+      if (state.hold && call.headers.authorization === 'Bearer tok-a') {
+        state.hold = false;
+        await held;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(quotaSummary()));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"response":{}}');
+  };
+  route.ownsSummary = true;
+  const upstream = await agyUpstream(route);
+  const { manager, proxy } = await agyProxy([agyAccount('a')], upstream.url, { agyQuotaRefresh: true, warmupIntervalMs: 0 });
+  try {
+    await waitFor(() => manager.accounts[0].quota.agyQuotaAt); // the start-up refresh is done
+    state.hold = true;
+    const first = proxy.refreshQuotaAll(); // a's summary is held: the refresh stays in flight
+    await waitFor(() => upstream.calls.filter(c => c.headers.authorization === 'Bearer tok-a').length >= 2);
+    manager.addAccount(agyAccount('b')); // a live sync lands meanwhile and asks for a refresh too
+    const second = proxy.refreshQuotaAll();
+    releaseHeld();
+    const [r1, r2] = await Promise.all([first, second]);
+    assert.deepEqual(r2, r1);
+    assert.equal(r1.targets, 2);
+    assert.ok(manager.accounts[1].quota.agyQuotaAt, 'the new account was measured');
+  } finally {
+    releaseHeld();
+    await Promise.all([closeServer(proxy), closeServer(upstream.server)]);
+  }
+});

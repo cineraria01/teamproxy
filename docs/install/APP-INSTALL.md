@@ -22,7 +22,7 @@
 
 하지 않는 일: 셸 rc, `~/.claude/settings.json`, 상태줄, tmux 하단 줄, 계정 로그인, sudo.
 
-설정에 `proxy.allowNoAccounts: true`를 적으므로 계정이 0개여도 서버가 떠 있다(launchd 재기동 없음). `/teamclaude/status`는 200과 `totalCount: 0`, API 요청은 503 "계정이 없습니다. 로그인하세요"를 준다. `<풀> login`이 끝나면 실행 중인 서버에 SIGHUP을 보내 재시작 없이 새 계정을 쓴다. 플래그가 없는 설정은 지금처럼 "No accounts configured"로 종료한다.
+설정에 `proxy.allowNoAccounts: true`를 적으므로 계정이 0개여도 서버가 떠 있다(launchd 재기동 없음). `/teamclaude/status`는 200과 `totalCount: 0`, API 요청은 503 "계정이 없습니다. 로그인하세요"를 준다. `<풀> login`이 끝나면 실행 중인 서버에 반영해(SIGHUP, 또는 `POST /teamclaude/accounts/sync`) 재시작 없이 새 계정을 쓴다. 플래그가 없는 설정은 지금처럼 "No accounts configured"로 종료한다.
 
 ## 명령
 
@@ -97,7 +97,7 @@
 | `remove <이름> --json` | `{"ok":true,"account":"codex-1","applied":"live"}` |
 | `reload --json` | `{"ok":true,"measured":2,"targets":2,"total":2}` (서버가 없으면 `not_running`, 트래픽이 아직 없으면 `reload_failed`) |
 
-`applied`: `live`(실행 중 서버에 SIGHUP으로 반영) · `config_only`(서버가 없어 설정만 바꿈) · `restart_required`(서버가 라이브 반영을 못 함).
+`applied`: `live`(실행 중 서버에 SIGHUP 또는 `POST /teamclaude/accounts/sync`로 반영 — 아래 [Windows](#windows)) · `config_only`(서버가 없어 설정만 바꿈) · `restart_required`(서버가 라이브 반영을 못 함).
 계정 항목: `name`, `type`(`oauth`|`api`), `provider`, `plan`, `email`(가림), `enabled`, `usable`(서버가 없으면 `null`), `priority`, `fiveHour`/`sevenDay`(`{"usedPct":12.3,"resetsAt":"ISO"}`, 서버가 없으면 `null`), `rateLimitedUntil`, `error`(짧은 코드: `subscription-disabled`·`auth-revoked`·`refresh-failed`·`auth-rejected`). agy는 `claudeGpt`(Claude/GPT 그룹 5시간·주간)도 준다.
 오류 코드: `account_not_found`·`usage`·`not_running`·`reload_unsupported`·`reload_failed`.
 
@@ -119,8 +119,8 @@
   - `--device-auth`를 주면 `{"event":"auth_url","url":"…","user_code":"ABCD-12345","browser_opened":false}`로 코드를 함께 준다(앱이 코드를 보여 주고 URL을 연다).
 - `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.
 - 끝 줄 `done`. 오류 코드: `name_taken`(이미 있는 `--name`, 덮어쓰기·토큰 폐기를 막으려 거절)·`cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
-- SIGTERM/SIGINT: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`.
-- 로그인이 끝나면 실행 중인 서버에 SIGHUP을 보내 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다).
+- 취소: SIGTERM/SIGINT, 표준 입력 한 줄 `{"cancel":true}`, 또는 파이프로 받은 표준 입력의 EOF(앱이 파이프를 닫음). 셋 다 같은 정리를 한다: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`. 그래서 앱은 로그인 동안 표준 입력 파이프를 열어 둔다. 파이프가 아닌 표준 입력(`/dev/null`·`NUL`·파일)의 EOF는 취소로 보지 않는다(코드 붙여넣기만 못 한다). `{`로 시작하는 줄은 코드로 읽지 않는다.
+- 로그인이 끝나면 실행 중인 서버에 반영해(SIGHUP 또는 accounts/sync) 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다). 성공 끝 줄에 `applied`(`live`·`config_only`·`restart_required`)가 붙는다: `{"done":true,"ok":true,"account":"claude-2","applied":"live"}`. 성공 끝 줄에 `applied`가 없으면(반영 중에 취소가 와 저장만 끝난 경우) 반영 여부를 모르는 것이니, 앱이 서버에 `POST /teamclaude/accounts/sync`를 한 번 다시 보낸다(서버가 없으면 필요 없다).
 
 ## 묶음 만들기
 
@@ -141,4 +141,59 @@ node scripts/build-app-bundle.mjs [출력 폴더]   # 기본 dist/
 ## 동시성·취소 계약
 
 - 앱은 `login --json`을 **한 번에 하나만** 돌린다(풀이 달라도 동시에 돌리지 않는다). 그래도 저장 단계에서 같은 `--name`이 그사이 생겼으면 덮어쓰지 않고 `name_taken`으로 멈춘다.
-- 취소(SIGTERM)가 계정 저장이 끝난 뒤에 도착하면 로그인은 성공한 것이므로 `{"done":true,"ok":true,"account":"…"}`로 끝난다. 저장 직전·직후의 아주 좁은 틈에서는 `cancelled`가 나와도 계정이 이미 들어갔을 수 있으니, 취소 뒤에는 `accounts --json`으로 다시 확인한다.
+- 취소(SIGTERM·취소 줄·EOF)가 계정 저장이 끝난 뒤에 도착하면 로그인은 성공한 것이므로 `{"done":true,"ok":true,"account":"…"}`로 끝난다. 이때는 `applied`가 빠질 수 있으니 위처럼 앱이 sync를 다시 요청한다. 저장 직전·직후의 아주 좁은 틈에서는 `cancelled`가 나와도 계정이 이미 들어갔을 수 있으니, 취소 뒤에는 `accounts --json`으로 다시 확인한다.
+
+## Windows
+
+Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서 설치기는 **서비스를 등록하지 않고**, 앱(셀비)이 서버를 자식 프로세스로 띄우고 끈다. 관리자 권한·작업 스케줄러·Run 키·PowerShell·`.cmd`가 필요 없다(node.exe argv를 셸 없이 바로 실행).
+
+### 설치기 (`--app`·`--status`·`--uninstall`·`--login-command`)
+
+- 하는 일: 설정 `%USERPROFILE%\.config\{teamclaude,teamcodex,teamagy,teamgrok}.json`(맥과 같은 규칙: 없으면 만들고 `127.0.0.1`·`allowNoAccounts`, 있던 것은 `existing_kept`)과 매니페스트 `%LOCALAPPDATA%\Selvi\teamproxy\manifest.json`(`node`·`source`·풀별 버전), 로그 폴더 `%LOCALAPPDATA%\Selvi\teamproxy\logs`.
+- 하지 않는 일: npm 복사(압축을 푼 묶음 폴더 = `source`에서 바로 실행하므로 앱은 그 폴더를 지우거나 옮기지 않는다. 묶음을 바꾸면 `--app`을 다시 돌려 run 명세를 새로 받는다), 래퍼, 서비스 등록, 서버 기동.
+- `--prefix <홈>`(시험용)이면 루트가 `<홈>\AppData\Local\Selvi\teamproxy`, 설정이 `<홈>\.config\…`.
+- 충돌 검사는 포트만 본다(매니페스트에 있는 우리 풀은 건너뛴다). `--with-codex-cli`는 `unsupported_platform`(Codex는 2단계).
+- 단계 id: `preflight`·`conflicts`·`config:<풀>`·`run:<풀>`·`error`. 오류 코드: `missing_node`·`unsupported_platform`·`conflict_existing_install`·`install_failed`·`usage`.
+- `--uninstall [--purge]`: 매니페스트(와 `--purge`면 앱이 만든 설정·`.server.json`·`.quota.json`·로그 폴더)를 지운다. **앱이 먼저 서버를 끈다.** 매니페스트의 풀 포트에서 서버가 `/teamclaude/status`에 답하면 아무것도 지우지 않고 `{"done":true,"ok":false,"error":"server_running","running":["claude"],…}`(종료 코드 1)로 멈춘다.
+- 시험 전용: `node --test` 안에서(`NODE_TEST_CONTEXT`가 있을 때만) `TEAMPROXY_APP_PLATFORM=win32`이면 맥·리눅스에서도 이 분기를 돈다. 운영 실행에서는 무시한다(`test/app-installer-win.test.js`, CI는 `windows-latest`에서 실제로 돈다).
+
+### 실행 명세 (앱이 읽는 계약)
+
+`--app`과 `--status`의 끝 줄에서 설치된 풀마다 `run`(서버)과 `cli`(관리 명령 앞부분)를 준다. Windows 끝 줄에는 `label`·`loaded`가 없다(서비스가 없다).
+
+```json
+{"done": true, "ok": true, "version": "1.5.0", "pools": {
+  "claude": {"port": 3456, "installed": true, "running": false, "config": "created",
+    "run": {"argv": ["C:\\Users\\me\\AppData\\Local\\Selvi\\teamproxy\\runtime\\node-v24.21.0\\node.exe", "C:\\…\\bundle\\teamproxy-app-1.5.0\\src\\teamclaude.js", "server"],
+            "env": {"TEAMCLAUDE_CONFIG": "C:\\Users\\me\\.config\\teamclaude.json"},
+            "log": "C:\\Users\\me\\AppData\\Local\\Selvi\\teamproxy\\logs\\claude.log"},
+    "cli": {"argv": ["…\\node.exe", "…\\src\\teamclaude.js"], "env": {"TEAMCLAUDE_CONFIG": "…\\teamclaude.json"}}},
+  "agy": {"port": 3458, "installed": true, "running": false, "config": "created",
+    "run": {"argv": ["…\\node.exe", "…\\src\\index.js", "agy", "server"],
+            "env": {"TEAMCLAUDE_CONFIG": "…\\teamagy.json", "TEAMCLAUDE_PROVIDER": "agy"}, "log": "…\\logs\\agy.log"},
+    "cli": {"argv": ["…\\node.exe", "…\\src\\index.js", "agy"], "env": {"TEAMCLAUDE_CONFIG": "…\\teamagy.json", "TEAMCLAUDE_PROVIDER": "agy"}}}}}
+```
+
+- `run.argv`: 셸 없이 그대로 실행한다(`argv[0]`은 `--node`로 준 node.exe 절대 경로). `run.env`는 **더할 것만** 담는다. 앱은 자기 깨끗한 환경(SystemRoot·SystemDrive·USERPROFILE·APPDATA·LOCALAPPDATA·TEMP/TMP·PATHEXT·COMSPEC·PATH)에 이것을 얹고, 다른 `TEAMCLAUDE_*`(특히 `TEAMCLAUDE_SESSION_SUPERVISED`)는 넘기지 않는다.
+- `run.log`: 앱이 서버의 표준 출력·오류를 붙여 쓸 파일(폴더는 설치기가 만든다).
+- `cli`: 관리 명령은 `cli.argv + [명령…]`, 같은 `cli.env`. 예: `[…cli.argv, "disable", "claude-1", "--json"]`, 로그인은 `--login-command <풀>`이 `{"argv":[…cli.argv,"login","--name","agy-1"],"env":{…}}`로 준다.
+- 서버는 `/teamclaude/status`(127.0.0.1:`port`)로 살아 있는지 본다. 끄기는 앱이 프로세스(트리)를 끝낸다 — 워커는 부모가 끊기면 스스로 끝난다.
+
+### 계정 반영: `POST /teamclaude/accounts/sync`
+
+SIGHUP 대신 실행 중 서버에 "디스크의 계정을 다시 읽어 반영"을 요청한다(워커·연결·진행 중 응답은 그대로, SIGHUP과 같은 함수). 아직 시작 안 한 반영이 줄에 있으면 그것을 같이 기다린다(겹친 요청은 한 번으로 합쳐진다).
+
+- 루프백(127.0.0.1·::1)에서만, 설정에 `proxy.apiKey`가 있으면 `x-api-key`(또는 `Authorization: Bearer`)가 그 값이어야 한다. 본문 없는 `POST`.
+- 응답: `200 {"ok":true,"total":<계정 수>}`(계정 반영이 끝난 뒤 응답. 그 뒤 쿼터 다시 재기(codex·agy)는 기다리지 않는다) · `401` 키 불일치 · `403` 원격 · `405`/`400` 메서드·본문 · `500 {"error":{"type":"account_sync_failed",…}}`.
+- 지원 여부: 이 경로를 받는 서버는 `GET /teamclaude/status` 응답에 `"accountsSync": true`를 싣는다. 이 표시가 없는 옛 서버에는 보내지 않는다(옛 서버는 이 경로를 위(upstream)로 흘려보낸다). CLI도 표시가 있을 때만 보내고, 없으면 `restart_required`.
+- CLI `--json` 관리 명령(`login`·`enable`·`disable`·`priority`·`remove`)은 서버의 워커 pid를 확인할 수 없을 때(Windows는 늘 그렇다: lsof·ps가 없다) 이 경로를 써서 `applied:"live"`를 준다. 서버가 없으면 `config_only`, 이 경로가 없는 옛 서버면 `restart_required`. macOS는 확인된 워커가 있으면 지금처럼 SIGHUP을 쓴다(검증된 경로를 그대로 두고, 확인 못 할 때만 HTTP로 넘어간다).
+
+### 로그인 취소
+
+Windows에는 SIGTERM 핸들러가 없으니 앱은 표준 입력에 `{"cancel":true}` 한 줄을 쓰거나 파이프를 닫는다. 정리(Codex 자식·임시 `CODEX_HOME`)는 SIGTERM과 같은 경로다. 몇 초 안에 끝나지 않으면 앱이 프로세스를 끝낸다.
+
+### 그 밖
+
+- Claude 로그인 콜백 서버는 루프백에만 바인드한다(방화벽 창 없음): `127.0.0.1`과, OS에 있으면 같은 포트의 `::1`. 리디렉트 주소는 Claude가 등록한 `http://localhost:<포트>/callback` 그대로라 브라우저가 `localhost`를 어느 쪽으로 풀어도 받는다(`::1`을 못 열면 IPv4만으로 계속).
+- 설정 원자 쓰기의 `rename`은 `EPERM`/`EBUSY`/`EACCES`(백신·색인기가 잠깐 잡음)에 약 1.4초 동안 다시 시도한다.
+- Codex CLI(2단계): `TEAMCODEX_CODEX_BIN` → node.exe 옆 `node_modules\@openai\codex\node_modules\@openai\codex-win32-<x64|arm64>\vendor\<x86_64|aarch64>-pc-windows-msvc\bin\codex.exe`(npm 전역 설치 구조, 0.162.1의 `bin/codex.js`와 같은 규칙) → 끌어올려진 `node_modules\@openai\codex-win32-<arch>\…` → 옛 `@openai\codex\vendor\<triple>\bin\codex.exe` → PATH의 `codex` 순으로 찾는다(`codex.cmd`는 셸 없이 실행할 수 없다).

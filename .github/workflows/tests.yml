@@ -39,3 +39,22 @@ jobs:
         run: npm test -- --test-concurrency=1
       - name: Footer and status line tests (Python)
         run: npm run test:hud
+
+  windows:
+    name: Node.js 24 / Windows (app mode)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The Windows app path: installer (fake HOME/LOCALAPPDATA), run spec -> real server,
+      # accounts/sync and --json changes applied live without lsof/SIGHUP; codex.exe lookup;
+      # config writes (rename retry); loopback callback on 127.0.0.1 and ::1.
+      - name: App mode tests
+        run: node --test test/app-installer-win.test.js test/codex.test.js test/config.test.js test/oauth-callback.test.js
+      # Login cancel without SIGTERM (stdin line / EOF, not on a NUL stdin) and the sync route (no wait on quota);
+      # the rest of the file needs sh.
+      - name: App login and sync tests
+        run: node --test --test-name-pattern="on stdin cancels|EOF cancels a claude|not a pipe|pasted before the race|accounts/sync. key required|slow quota" test/app-json.test.js

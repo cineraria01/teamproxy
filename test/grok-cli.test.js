@@ -171,7 +171,7 @@ test('grok login --json: device-code events, grok-N names, a re-login of the sam
     assert.deepEqual(lines(first.stdout), [
       { event: 'auth_url', url: 'https://accounts.x.ai/oauth2/device?user_code=ABCD-1234', user_code: 'ABCD-1234', browser_opened: false },
       { event: 'waiting' },
-      { done: true, ok: true, account: 'grok-1' },
+      { done: true, ok: true, account: 'grok-1', applied: 'config_only' }, // no server running in this test
     ]);
     const device = xai.calls.find(call => call.url === '/oauth2/device/code');
     assert.equal(new URLSearchParams(device.body).get('client_id'), GROK_CLIENT_ID);

@@ -1,8 +1,10 @@
 // Machine-readable output for app-managed installs (docs/install/APP-INSTALL.md):
 // account views for `<pool> accounts|status --json` and the line-JSON login events.
+import net from 'node:net';
 import { createInterface } from 'node:readline';
 
-export const machine = { json: false, cancelling: false, finished: false, saved: null, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [] };
+export const machine = { json: false, cancelling: false, finished: false, saved: null, applied: null, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [],
+  stdin: null, onCode: null, pendingCodes: [] };
 
 export const emit = fields => process.stdout.write(`${JSON.stringify(fields)}\n`);
 
@@ -10,9 +12,10 @@ export const emit = fields => process.stdout.write(`${JSON.stringify(fields)}\n`
 export function emitDone(fields) {
   if (machine.finished) return;
   machine.finished = true;
+  machine.stdin?.close(); // let the process exit once the login is over
   // Cancelled after the account was already saved: the login did succeed, so say so.
   const cancelled = machine.cancelling && !machine.saved;
-  emit({ done: true, ...(cancelled ? { ok: false, error: 'cancelled' } : machine.saved ? { ok: true, account: machine.saved } : fields) });
+  emit({ done: true, ...(cancelled ? { ok: false, error: 'cancelled' } : machine.saved ? { ok: true, account: machine.saved, ...(machine.applied && { applied: machine.applied }) } : fields) });
 }
 
 /** a***@gmail.com — the app never needs the full address. */
@@ -65,11 +68,17 @@ export function errorCode(err) {
   return 'login_failed';
 }
 
-/** Switch a login run to line-JSON: events on stdout, human chatter to stderr, SIGTERM cleans up. */
+/**
+ * Switch a login run to line-JSON: events on stdout, human chatter to stderr.
+ * Cancel = SIGTERM/SIGINT, a `{"cancel":true}` line on stdin, or EOF of a piped stdin (Windows has no
+ * SIGTERM handler: the app closes the pipe or writes the line). Every other stdin line is a pasted code.
+ * A stdin that is not a pipe (/dev/null, NUL, a file) ends at once, so its EOF is not a cancel.
+ */
 export function enableMachineLogin() {
   machine.json = true;
   console.log = (...parts) => console.error(...parts);
   const cancel = async () => {
+    if (machine.cancelling || machine.finished) return;
     machine.cancelling = true; // errors caused by killing the child are not login failures
     for (const cleanup of machine.cleanups.splice(0)) await Promise.resolve(cleanup()).catch(() => {});
     emitDone({});
@@ -77,7 +86,25 @@ export function enableMachineLogin() {
   };
   process.once('SIGTERM', cancel);
   process.once('SIGINT', cancel);
+  const lines = createInterface({ input: process.stdin });
+  machine.stdin = lines;
+  lines.on('line', line => {
+    const text = line.trim();
+    if (!text) return;
+    if (text.startsWith('{')) {
+      try { if (JSON.parse(text)?.cancel === true) cancel(); } catch { /* not a cancel line */ }
+      return;
+    }
+    if (machine.onCode) machine.onCode(text); else machine.pendingCodes.push(text);
+  });
+  if (stdinIsPipe()) lines.on('close', () => { if (!machine.finished) cancel(); });
 }
+
+// Node builds process.stdin by handle type (guessHandleType): PIPE/TCP -> net.Socket, FILE (a file,
+// /dev/null, NUL) -> fs.ReadStream, TTY -> tty.ReadStream. Checked on macOS for /dev/null, a file, a shell
+// pipe and a spawn pipe; the Windows named-pipe case rests on that rule and the windows-latest CI job.
+// fstat is no use there: the CI job showed a piped stdin is not reported as a FIFO (its EOF never cancelled).
+const stdinIsPipe = () => process.stdin instanceof net.Socket && !process.stdin.isTTY;
 
 /** The app opens the browser itself: hand it the URL and say we are waiting. */
 export function announceAuthUrl(url, extra = {}) {
@@ -106,21 +133,19 @@ function parseCodeInput(text, expectedState) {
  */
 export function machineCodeRace(callbackPromise, expectedState) {
   return new Promise((resolve, reject) => {
-    const lines = createInterface({ input: process.stdin });
     let settled = false;
     const timer = setTimeout(() => { if (!settled) emit({ event: 'need_code' }); }, machine.needCodeMs);
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      lines.close();
+      machine.onCode = null;
       fn(value);
     };
-    lines.on('line', line => {
-      const text = line.trim();
-      if (!text) return;
+    machine.onCode = text => {
       try { settle(resolve, parseCodeInput(text, expectedState)); } catch (err) { settle(reject, err); }
-    });
+    };
+    if (machine.pendingCodes.length) machine.onCode(machine.pendingCodes.shift());
     callbackPromise.then(code => settle(resolve, code), err => settle(reject, err));
   });
 }
