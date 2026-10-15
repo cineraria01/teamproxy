@@ -398,26 +398,40 @@ teamagy update --ref <브랜치|태그|커밋> --wait 900 --json
 
 1. 받기: `~/src/teamproxy`가 있으면 그 클론(깨끗하고 그 브랜치에 있을 때만 fast-forward), 없으면
    `~/.cache/teamproxy-update`에 clone. 설치할 내용은 대상 커밋의 `git archive`라 클론의 수정 중 파일은 섞이지 않는다.
-2. 로컬 수정 검사: 설치본 `src/`의 파일(`__pycache__`·`.pyc` 제외)마다 git blob id가 포크 이력(대상 커밋 + `origin/main`)에
-   있는지 본다. 없는 파일이 하나라도 있으면 그 목록을 보이고 멈춘다(아무것도 바꾸지 않는다). 이미 같으면 "이미 최신"이다.
-   파일은 같아도 서버의 `x-teamcodex-source-hash`가 다르면(옛 코드로 도는 중) 재시작만 한다.
-3. 재시작 방법 확인: systemd 사용자 단위 `<풀>`이 active면 `systemctl --user restart <풀>`, 아니면 tmux 소켓 `<풀>`의
-   세션 `proxy`를 끊는다(launchd가 다시 띄움). 둘 다 없으면 바꾸기 전에 멈춘다(`--no-restart`로 파일만 바꾸고 손으로 다시 띄운다).
-4. 요청 0 대기: 다시 띄울 풀들의 모든 계정 `inflight` 합이 2초 간격 두 번 연속 0일 때까지. `--wait`를 넘기면 아무것도 바꾸지 않고 멈춘다.
-5. 백업과 덮기: `src` → `src.pre-<YYYYMMDD-HHMMSS>`(이름 바꾸기), `package.json.pre-…` 복사 뒤 새 `src/`·`package.json`.
-   대상 `package.json`에 런타임 의존성이 있으면 덮지 않는다(파일 복사로는 갱신할 수 없다).
-6. 다시 띄우기와 확인: 새 서버 pid가 뜰 때까지(최대 120초) 기다린 뒤 `<풀> status --json`이 `ok`·`running`,
+   `~/src/teamproxy`의 origin이 포크가 아니면 경고한다(`--json`의 `warnings: ["origin_not_fork"]`). 그 저장소의 커밋을 그대로 설치하니 확인한다.
+2. 로컬 수정 검사: 설치본 `src/`의 파일(`__pycache__`·`.pyc` 제외)마다 git blob id가 포크 이력에 있는지 본다. 이력은 대상 커밋,
+   `origin/main`, 그리고 그 설치본에 마지막으로 설치한 커밋(`<설치본>/.teamproxy-commit`, `--ref <기능 브랜치>`로 올렸어도 다음 main 갱신이 막히지 않게)이다.
+   없는 파일이 하나라도 있으면 그 목록을 보이고 멈춘다(`local_changes`, 아무것도 바꾸지 않는다).
+   파일이 같고 서버의 `x-teamcodex-source-hash`도 같으면 "이미 최신"이다. 파일만 같고 서버가 옛 코드로 돌면 재시작만 한다.
+3. 재시작 방법 확인: 감독자가 다시 띄워 주는 풀만 재시작한다. Linux는 systemd 사용자 단위 `<풀>`이 active일 때 `systemctl --user restart <풀>`만,
+   맥은 tmux 소켓 `<풀>`의 세션 `proxy`가 있고 launchd 작업(라벨이 `.<풀>`로 끝나거나 그 프로세스가 `<풀>-tmux-server`)이 떠 있을 때
+   그 세션을 끊는다. 없으면 바꾸기 전에 멈춘다(`no_restart_method`. `--no-restart`로 파일만 바꾸고 손으로 다시 띄운다).
+4. 잠금: `<설치본>/.update.lock`(pid). 살아 있는 다른 update가 쥐고 있으면 멈춘다(`locked`), 죽은 pid의 잠금은 넘겨받는다.
+5. 요청 0 대기와 drain(runbook [teamcodex-runtime-deployment](../runbooks/teamcodex-runtime-deployment.md)의 순서):
+   감독자의 `x-teamcodex-active-requests`(없는 옛 서버는 계정 `inflight` 합)가 2초 간격 두 번 연속 0이 되면
+   `POST /teamclaude/deployment/drain`(lifecycle id + `x-api-key`, 15초 뒤 자동 해제)으로 새 요청을 503으로 돌린다. 그 순간 진행 중이 0이 아니면
+   drain을 풀고 다시 기다린다. `--wait`를 넘기면 "진행 중 요청 N개"를 보이고 아무것도 바꾸지 않고 멈춘다(`wait_timeout`).
+   그 풀을 다른 세션·에이전트가 계속 쓰고 있으면 0이 오지 않으니 그들이 쉴 때 다시 실행한다. 재시작 직전에 풀마다 다시 확인한다.
+6. 백업과 덮기: 새 판을 같은 폴더의 `src.new-<YYYYMMDD-HHMMSS>`에 먼저 다 복사한 뒤 이름 바꾸기 두 번(`src`→`src.pre-…`, `src.new-…`→`src`)만 한다.
+   `package.json`도 같은 방식(`package.json.pre-…`). 대상 `package.json`에 런타임 의존성이 있으면 덮지 않는다.
+7. 다시 띄우기와 확인: 새 서버 pid가 뜰 때까지(최대 120초) 기다린 뒤 `<풀> status --json`이 `ok`·`running`,
    계정 이름·활성 상태가 설정 파일과 같은지, 모델 목록이 200인지 본다. 모델 목록은 갱신 **전에도** 200이던 풀만 요구한다.
    - Claude `GET /v1/models` + `anthropic-version: 2023-06-01`, Codex `GET /codex/models?client_version=<codex --version>`,
      agy `POST /v1internal:fetchAvailableModels`, grok `GET /v1/models`
-7. 확인이 실패하면 새 판을 `src.failed-…`·`package.json.failed-…`로 옮기고 백업을 제자리로 돌린 뒤 다시 띄운다. 종료 코드 1.
+8. 확인이 실패하면 새 판을 `src.failed-…`·`package.json.failed-…`로 옮기고 백업을 제자리로 돌린 뒤, 이미 재시작한 풀만 다시 띄운다
+   (`restored`, 종료 코드 1). 되돌리기도 실패하면 `restore_failed`와 설치본 상태(`state`)를 낸다. 파일은 그대로이고 재시작만 실패했으면 `restart_failed`.
+9. 백업(`src.pre-*`·`package.json.pre-*`·`*.failed-*`)은 종류마다 최근 2개만 남긴다.
+
+Ctrl-C·SIGTERM으로 끊으면 덮은 뒤일 때 옛 파일로 되돌리고 이미 재시작한 풀을 다시 띄운 뒤 끝낸다(종료 코드 130, `interrupted_restored`).
 
 한 설치본을 여러 풀이 같이 쓰면(예: `teamcodex-global` 하나로 teamclaude·teamcodex) 그 풀들을 모두 다시 띄운다.
 셀비 앱 모드 설치본(`~/.local/share/teamproxy-app`, launchd `kr.selvi.teamproxy.*`)은 건드리지 않고 안내만 한다. 그건 앱이 고정 묶음으로 갱신한다.
 git 클론(`.git`이 있는 폴더)도 설치본이 아니라 건너뛴다.
 
-다시 띄우는 동안 그 프록시를 거치던 스트림은 끊긴다. 그 프록시로 도는 Claude Code 세션 안에서 돌려도 되지만,
-그 세션의 다른 에이전트가 계속 요청 중이면 `--wait` 동안 기다린다.
+`--ref`로 `update` 명령이 없는 옛 판(이 명령이 생기기 전 커밋)으로 내리면 그 설치본에서는 이 명령이 사라진다. 그때는 경고를 내고,
+다음 갱신은 다른 설치본의 `update`나 §8-1 손 절차로 한다.
+
+다시 띄우는 동안 그 프록시를 거치던 스트림은 끊긴다. drain 동안(최대 15초) 새 요청은 503 + `retry-after: 1`을 받는다.
 
 ### 8-1. 손 절차 (비상용)
 
@@ -432,7 +446,7 @@ done                                    # 하나라도 나오면 멈춘다
 d=$(date +%Y%m%d)
 cp -a <설치본>/src <설치본>/src.pre-$d && cp <설치본>/package.json <설치본>/package.json.pre-$d
 rsync -a --delete ~/src/teamproxy/src/ <설치본>/src/ && cp ~/src/teamproxy/package.json <설치본>/package.json
-curl -s http://127.0.0.1:<포트>/teamclaude/status | grep -o '"inflight": *[0-9]*'   # 모두 0일 때
+curl -s -D - -o /dev/null http://127.0.0.1:<포트>/teamclaude/status | grep -i x-teamcodex-active-requests   # 0일 때
 tmux -L <풀> kill-session -t proxy      # 맥. Linux는 systemctl --user restart <풀>
 <풀> status --json                      # ok:true, 계정 수·이름·활성 상태가 전과 같은지
 curl -s -o /dev/null -w '%{http_code}\n' -H 'anthropic-version: 2023-06-01' http://127.0.0.1:3456/v1/models   # 200

@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
+  copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -43,11 +43,20 @@ export async function updateCommand({ pool, configPath, argv }) {
   const pollMs = Number(process.env.TEAMPROXY_UPDATE_POLL_MS) || 2000;
   const say = line => (opts.json ? console.error : console.log)(`[${pool} update] ${line}`);
   const results = [];
+  const warnings = [];
   const finish = (ok, extra = {}) => {
     say(ok ? `끝: ${summary(results)}` : `실패: ${extra.message ?? summary(results)}`);
-    if (opts.json) emit({ ok, ...extra, installs: results });
+    if (opts.json) emit({ ok, ...extra, ...(warnings.length ? { warnings } : {}), installs: results });
     return ok ? 0 : 1;
   };
+  const guard = { active: null };
+  const onSignal = signal => {
+    if (guard.active) interruptInstall(guard.active);
+    finish(false, { error: 'interrupted', message: `${signal}로 중단 — ${guard.active?.entry.result ?? '바꾼 것 없음'}` });
+    process.exit(130);
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
 
   try {
     // 1. Which installs, and which running servers each one serves.
@@ -74,7 +83,7 @@ export async function updateCommand({ pool, configPath, argv }) {
     if (!installs.length) return finish(true);
 
     // 2. The target commit and its files.
-    const repo = prepareRepo(opts, say);
+    const repo = prepareRepo(opts, say, warnings);
     const stage = mkdtempSync(join(tmpdir(), 'teamproxy-update-'));
     try {
       const archive = git(['-C', repo.dir, 'archive', repo.commit, 'src', 'package.json'], { encoding: 'buffer' });
@@ -85,15 +94,12 @@ export async function updateCommand({ pool, configPath, argv }) {
       }
       const target = fileMap(join(stage, 'src'));
       const targetHash = sourceHash(join(stage, 'src'));
-      // Published history: the target plus origin/main, so an older --ref can still replace newer files.
-      const history = new Set(git(['-C', repo.dir, 'rev-list', '--objects', repo.commit, 'refs/remotes/origin/main'])
-        .split('\n').map(l => l.split(' ')[0]));
 
       for (const root of installs) {
         const entry = { path: tilde(root), to: repo.short, result: null, pools: [] };
         results.push(entry);
         await updateInstall({
-          root, entry, repo, stage, target, targetHash, history, opts, say, pollMs,
+          root, entry, repo, stage, target, targetHash, opts, say, pollMs, guard,
           pools: servers.filter(s => s.root === root),
         });
       }
@@ -107,16 +113,18 @@ export async function updateCommand({ pool, configPath, argv }) {
   }
 }
 
-const FAILURES = new Set(['local_changes', 'no_restart_method', 'wait_timeout', 'restored', 'restore_failed']);
+const FAILURES = new Set(['local_changes', 'locked', 'no_restart_method', 'wait_timeout', 'restart_failed', 'restored', 'restore_failed']);
+const MARKER = '.teamproxy-commit';
 
-async function updateInstall({ root, entry, repo, stage, target, targetHash, history, opts, say, pollMs, pools }) {
+async function updateInstall({ root, entry, repo, stage, target, targetHash, opts, say, pollMs, pools, guard }) {
   const where = tilde(root);
   const current = fileMap(join(root, 'src'));
+  const history = historyFor(repo, root);
   const local = [...current].filter(([, blob]) => !history.has(blob)).map(([path]) => path);
   if (local.length) {
     entry.result = 'local_changes';
     entry.files = local;
-    say(`멈춤: ${where}에 포크 이력(${repo.short}·origin/main)에 없는 수정 ${local.length}개 — ${local.join(', ')}`);
+    say(`멈춤: ${where}에 포크 이력(${repo.short}·origin/main·설치 기록)에 없는 수정 ${local.length}개 — ${local.join(', ')}`);
     return;
   }
   const changed = diffMaps(current, target);
@@ -133,84 +141,124 @@ async function updateInstall({ root, entry, repo, stage, target, targetHash, his
   }
   say(`${where}: 파일 ${changed.total}개 바뀜(추가 ${changed.added}·변경 ${changed.modified}·삭제 ${changed.removed})${pkgSame ? '' : ' + package.json'}`
     + `, 다시 띄울 풀: ${restartPools.map(p => p.pool).join(', ') || '없음'}`);
+  if (!existsSync(join(stage, 'src', 'update.js'))) say(`주의: ${repo.short}에는 update 명령이 없습니다 — 이 판으로 내리면 다음 갱신은 손 절차로 해야 합니다`);
 
   for (const p of restartPools) {
     p.method = restartMethod(p.pool);
     if (!p.method) {
       entry.result = 'no_restart_method';
-      say(`멈춤: ${p.pool}을 다시 띄울 방법을 찾지 못했습니다(systemd 사용자 단위·tmux 세션 proxy 없음). --no-restart로 파일만 바꾼 뒤 손으로 다시 띄우세요`);
+      say(`멈춤: ${p.pool}을 다시 띄울 감독자를 찾지 못했습니다(systemd 사용자 단위도, launchd가 감독하는 tmux 세션 proxy도 없음). `
+        + '--no-restart로 파일만 바꾼 뒤 손으로 다시 띄우세요');
       return;
     }
   }
   if (opts.dryRun) {
     entry.result = 'dry_run';
-    for (const p of restartPools) say(`(dry-run) ${p.pool}: 요청 0을 기다린 뒤 ${p.method.label}`);
+    for (const p of restartPools) say(`(dry-run) ${p.pool}: 요청 0과 drain 뒤 ${p.method.label}`);
     say(`(dry-run) ${where}: 백업 뒤 src/·package.json을 ${repo.short}로 덮습니다 — 아무것도 바꾸지 않았습니다`);
     return;
   }
 
-  // Baselines: verification only demands what worked before the update.
-  for (const p of restartPools) {
-    p.probeBefore = await probeModels(p);
-    p.accountsBefore = accountSnapshot(p.config);
+  const lock = acquireLock(root);
+  if (!lock.ok) {
+    entry.result = 'locked';
+    say(`멈춤: ${where}을 다른 update(pid ${lock.holder})가 갱신 중입니다`);
+    return;
   }
-  if (restartPools.length) {
-    say(`요청 0 기다림: ${restartPools.map(p => p.pool).join(', ')} (최대 ${opts.waitSec}초)`);
-    if (!await waitIdle(restartPools, opts.waitSec * 1000, pollMs)) {
-      entry.result = 'wait_timeout';
-      say(`멈춤: ${opts.waitSec}초 안에 진행 중 요청이 0이 되지 않았습니다 — 아무것도 바꾸지 않았습니다(--wait로 늘리기)`);
+  const stamp = freeStamp(root);
+  const state = { root, stamp, entry, swapped: false, done: false, restarted: [], prevMarker: readText(join(root, MARKER)) };
+  guard.active = state;
+  try {
+    // Baselines: verification only demands what worked before the update.
+    for (const p of restartPools) {
+      p.probeBefore = await probeModels(p);
+      p.accountsBefore = accountSnapshot(p.config);
+    }
+    if (restartPools.length) {
+      say(`요청 0 기다림: ${restartPools.map(p => p.pool).join(', ')} (최대 ${opts.waitSec}초)`);
+      const quiet = await quiesce(restartPools, Date.now() + opts.waitSec * 1000, pollMs);
+      if (!quiet.ok) {
+        entry.result = 'wait_timeout';
+        say(`멈춤: 진행 중 요청 ${quiet.active}개 — 이 풀을 쓰는 다른 세션이 쉴 때 다시 실행하세요(--wait로 늘리기). 아무것도 바꾸지 않았습니다`);
+        return;
+      }
+    }
+
+    if (!filesSame) {
+      swapIn(root, stage, stamp);
+      state.swapped = true;
+      writeFileSync(join(root, MARKER), `${repo.commit}\n`);
+      entry.backup = `src.pre-${stamp}`;
+      say(`덮음: ${where} → ${repo.short} (백업 src.pre-${stamp}, package.json.pre-${stamp})`);
+    }
+    if (!opts.restart) {
+      state.done = true;
+      entry.result = 'updated_no_restart';
+      pruneBackups(root);
+      for (const p of pools) say(`다시 띄우지 않음: ${p.pool} — 다음 재시작 때 반영`);
       return;
     }
-  }
 
-  const stamp = timestamp();
-  const src = join(root, 'src');
-  const pkgFile = join(root, 'package.json');
-  if (!filesSame) {
-    renameSync(src, `${src}.pre-${stamp}`);
-    copyFileSync(pkgFile, `${pkgFile}.pre-${stamp}`);
-    try {
-      cpSync(join(stage, 'src'), src, { recursive: true });
-      copyFileSync(join(stage, 'package.json'), pkgFile);
-    } catch (err) {
-      // Never leave the install without its src/ (a disk-full copy, say).
-      rmSync(src, { recursive: true, force: true });
-      renameSync(`${src}.pre-${stamp}`, src);
-      copyFileSync(`${pkgFile}.pre-${stamp}`, pkgFile);
-      throw err;
+    let failure = null;
+    for (const p of restartPools) {
+      const quiet = await quiesce([p], Date.now() + opts.waitSec * 1000, pollMs); // drain lease is short: renew per pool
+      if (!quiet.ok) { failure = `${p.pool} 진행 중 요청 ${quiet.active}개`; break; }
+      state.restarted.push(p);
+      failure = await restartAndVerify(p, pollMs, say);
+      if (failure) break;
     }
-    entry.backup = `src.pre-${stamp}`;
-    say(`덮음: ${where} → ${repo.short} (백업 src.pre-${stamp}, package.json.pre-${stamp})`);
-  }
-  if (!opts.restart) {
-    entry.result = 'updated_no_restart';
-    for (const p of pools) say(`다시 띄우지 않음: ${p.pool} — 다음 재시작 때 반영`);
-    return;
-  }
-
-  let failure = null;
-  for (const p of restartPools) {
-    failure = await restartAndVerify(p, pollMs, say);
-    if (failure) break;
-  }
-  if (!failure) {
-    entry.result = 'updated';
-    return;
-  }
-  say(`확인 실패: ${failure} — 되돌립니다`);
-  if (!filesSame) {
-    renameSync(src, `${src}.failed-${stamp}`);
-    renameSync(`${src}.pre-${stamp}`, src);
-    renameSync(pkgFile, `${pkgFile}.failed-${stamp}`);
-    renameSync(`${pkgFile}.pre-${stamp}`, pkgFile);
+    if (!failure) {
+      state.done = true;
+      entry.result = 'updated';
+      pruneBackups(root);
+      return;
+    }
+    entry.failure = failure;
+    if (!state.swapped) {
+      state.done = true;
+      entry.result = 'restart_failed';
+      say(`재시작 실패: ${failure} — 파일은 바꾸지 않았습니다. 손으로 확인하세요`);
+      return;
+    }
+    say(`확인 실패: ${failure} — 되돌립니다`);
+    try {
+      restoreFiles(state);
+    } catch (err) {
+      entry.result = 'restore_failed';
+      entry.state = installState(root);
+      say(`되돌리기 실패: ${err.message} — 설치본 상태: ${entry.state}`);
+      return;
+    }
+    state.done = true;
+    entry.result = 'restored';
+    pruneBackups(root);
     say(`되돌림: ${where} (실패한 판은 src.failed-${stamp}에 남김)`);
+    for (const p of state.restarted) {
+      const again = await restartAndVerify(p, pollMs, say, { restoring: true });
+      if (again) { entry.result = 'restore_failed'; say(`되돌린 판도 확인 실패: ${p.pool} — ${again}. 손으로 확인하세요`); }
+    }
+  } finally {
+    guard.active = null;
+    rmSync(lock.file, { force: true });
   }
-  entry.failure = failure;
-  entry.result = 'restored';
-  for (const p of restartPools) {
-    const again = await restartAndVerify(p, pollMs, say, { restoring: true });
-    if (again) { entry.result = 'restore_failed'; say(`되돌린 판도 확인 실패: ${p.pool} — ${again}. 손으로 확인하세요`); }
+}
+
+/** Ctrl-C / SIGTERM mid-update: put the old files back and restart what already runs the new ones. */
+function interruptInstall(state) {
+  try {
+    if (state.swapped && !state.done) {
+      restoreFiles(state);
+      for (const p of state.restarted) run(p.method.cmd[0], p.method.cmd.slice(1));
+      state.entry.result = 'interrupted_restored';
+    } else {
+      state.entry.result ??= 'interrupted';
+    }
+  } catch (err) {
+    state.entry.result = 'restore_failed';
+    state.entry.state = installState(state.root);
+    state.entry.failure = err.message;
   }
+  rmSync(join(state.root, '.update.lock'), { force: true });
 }
 
 async function restartAndVerify(p, pollMs, say, { restoring = false } = {}) {
@@ -227,7 +275,7 @@ async function restartAndVerify(p, pollMs, say, { restoring = false } = {}) {
     await sleep(Math.min(pollMs, 500));
   }
   if (!fresh) return `${RESTART_TIMEOUT_MS / 1000}초 안에 새 서버가 뜨지 않음`;
-  Object.assign(p, { pid: fresh.pid, port: fresh.port, entry: fresh.entry, root: fresh.root });
+  Object.assign(p, { pid: fresh.pid, port: fresh.port, entry: fresh.entry, root: fresh.root, lifecycleId: fresh.lifecycleId });
 
   const status = statusJson(p);
   if (!status?.ok || !status.running) return `${p.pool} status --json이 ok/running이 아님`;
@@ -271,6 +319,7 @@ function readServer(pool, configPath) {
   if (!entry) return null;
   return {
     pool, configPath, pid: state.pid, port: state.port, entry, root: dirname(dirname(entry)),
+    lifecycleId: typeof state.lifecycle?.id === 'string' ? state.lifecycle.id : null,
     config: readJson(configPath) ?? {},
   };
 }
@@ -294,10 +343,17 @@ function isInstall(root) {
 
 // ── repository ──────────────────────────────────────────────
 
-function prepareRepo(opts, say) {
+function prepareRepo(opts, say, warnings) {
   const own = join(homedir(), 'src', 'teamproxy');
+  const expected = process.env.TEAMPROXY_UPDATE_URL || DEFAULT_URL;
   let dir = own;
-  if (!existsSync(join(own, '.git'))) {
+  if (existsSync(join(own, '.git'))) {
+    const origin = run('git', ['-C', own, 'remote', 'get-url', 'origin']).stdout.trim();
+    if (normalizeUrl(origin) !== normalizeUrl(expected)) {
+      warnings.push('origin_not_fork');
+      say(`경고: ${tilde(own)}의 origin(${origin || '없음'})이 포크(${expected})가 아닙니다 — 그 저장소의 커밋을 설치합니다`);
+    }
+  } else {
     dir = join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'teamproxy-update');
     if (!existsSync(join(dir, '.git'))) {
       say(`클론: ${process.env.TEAMPROXY_UPDATE_URL || DEFAULT_URL} → ${tilde(dir)}`);
@@ -322,6 +378,7 @@ function prepareRepo(opts, say) {
 
 // ── live server ─────────────────────────────────────────────
 
+/** Active requests: the supervisor's own count (x-teamcodex-active-requests); account inflight only on servers without it. */
 async function liveStatus(p) {
   try {
     const res = await fetch(`http://127.0.0.1:${p.port}/teamclaude/status`, {
@@ -329,9 +386,11 @@ async function liveStatus(p) {
       signal: AbortSignal.timeout(5000),
     });
     const data = await res.json();
+    const header = res.headers.get('x-teamcodex-active-requests');
     return {
       sourceHash: res.headers.get('x-teamcodex-source-hash'),
-      inflight: (data.accounts ?? []).reduce((n, a) => n + (Number(a.inflight) || 0), 0),
+      active: header != null ? Number(header)
+        : (data.accounts ?? []).reduce((n, a) => n + (Number(a.inflight) || 0), 0),
     };
   } catch {
     return null;
@@ -339,15 +398,51 @@ async function liveStatus(p) {
 }
 
 /** Every pool idle on two consecutive polls, `pollMs` apart. */
-async function waitIdle(pools, budgetMs, pollMs) {
-  const deadline = Date.now() + budgetMs;
+async function waitIdle(pools, deadline, pollMs) {
   let idleStreak = 0;
   for (;;) {
     const counts = await Promise.all(pools.map(liveStatus));
-    idleStreak = counts.every(c => c && c.inflight === 0) ? idleStreak + 1 : 0;
-    if (idleStreak >= 2) return true;
-    if (Date.now() + pollMs > deadline) return false;
+    const active = counts.reduce((n, c) => n + (c ? c.active : 0), 0);
+    idleStreak = counts.every(c => c && c.active === 0) ? idleStreak + 1 : 0;
+    if (idleStreak >= 2) return { ok: true };
+    if (Date.now() + pollMs > deadline) return { ok: false, active };
     await sleep(pollMs);
+  }
+}
+
+/** The supervisor's deployment fence (runbook teamcodex-runtime-deployment): null when this server has none. */
+async function drain(p, on) {
+  const apiKey = p.config.proxy?.apiKey;
+  if (!p.lifecycleId || !apiKey) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${p.port}/teamclaude/deployment/drain`, {
+      method: on ? 'POST' : 'DELETE',
+      headers: { 'x-api-key': apiKey, 'x-teamcodex-lifecycle-id': p.lifecycleId },
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await res.json();
+    return res.ok && data.draining === on && Number.isInteger(data.activeRequests) ? data.activeRequests : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Idle, then fenced (new requests get 503 + retry-after while the 15 s lease lasts) with zero in flight. */
+async function quiesce(pools, deadline, pollMs) {
+  for (;;) {
+    const idle = await waitIdle(pools, deadline, pollMs);
+    if (!idle.ok) return idle;
+    let active = 0;
+    const fenced = [];
+    for (const p of pools) {
+      const n = await drain(p, true);
+      if (n === null) continue;
+      fenced.push(p);
+      active += n;
+    }
+    if (!active) return { ok: true };
+    await Promise.all(fenced.map(p => drain(p, false)));
+    if (Date.now() + pollMs > deadline) return { ok: false, active };
   }
 }
 
@@ -377,15 +472,25 @@ function accountSnapshot(config) {
   return (config.accounts ?? []).map(a => [a.name, a.enabled !== false]);
 }
 
-/** systemd user unit (Linux servers) first, then the launchd-supervised tmux session (macOS). */
+/** A supervisor that starts the pool again: a systemd user unit, or (macOS) a launchd job owning the tmux session. */
 function restartMethod(pool) {
   if (run('systemctl', ['--user', 'is-active', '--quiet', pool]).status === 0) {
     return { cmd: ['systemctl', '--user', 'restart', pool], label: `systemctl --user restart ${pool}` };
   }
-  if (run('tmux', ['-L', pool, 'has-session', '-t', 'proxy']).status === 0) {
-    return { cmd: ['tmux', '-L', pool, 'kill-session', '-t', 'proxy'], label: `tmux -L ${pool} kill-session -t proxy` };
-  }
-  return null;
+  if (process.platform !== 'darwin') return null;
+  if (run('tmux', ['-L', pool, 'has-session', '-t', 'proxy']).status !== 0) return null;
+  const label = launchdLabel(pool);
+  if (!label) return null;
+  return { cmd: ['tmux', '-L', pool, 'kill-session', '-t', 'proxy'], label: `tmux -L ${pool} kill-session -t proxy (launchd ${label})` };
+}
+
+/** The running launchd job for this pool: label `….<pool>`, or one whose process is `<pool>-tmux-server`. */
+function launchdLabel(pool) {
+  const jobs = run('launchctl', ['list']).stdout.split('\n').map(l => l.trim().split(/\s+/))
+    .filter(([pid, , label]) => /^\d+$/.test(pid) && label?.includes(pool));
+  const byLabel = jobs.find(([, , label]) => label.endsWith(`.${pool}`));
+  if (byLabel) return byLabel[2];
+  return jobs.find(([pid]) => run('ps', ['-ww', '-o', 'command=', '-p', pid]).stdout.includes(`${pool}-tmux-server`))?.[2] ?? null;
 }
 
 let codexVersion;
@@ -430,6 +535,86 @@ function sourceHash(srcDir) {
   return digest.digest('hex');
 }
 
+/** Copy the new tree beside src/ first, so the switch itself is two renames. */
+function swapIn(root, stage, stamp) {
+  const src = join(root, 'src');
+  const pkg = join(root, 'package.json');
+  const discard = () => {
+    for (const f of [`${src}.new-${stamp}`, `${pkg}.new-${stamp}`, `${pkg}.pre-${stamp}`]) rmSync(f, { recursive: true, force: true });
+  };
+  try {
+    cpSync(join(stage, 'src'), `${src}.new-${stamp}`, { recursive: true });
+    copyFileSync(join(stage, 'package.json'), `${pkg}.new-${stamp}`);
+    copyFileSync(pkg, `${pkg}.pre-${stamp}`);
+    renameSync(src, `${src}.pre-${stamp}`);
+  } catch (err) {
+    discard();
+    throw err;
+  }
+  try {
+    renameSync(`${src}.new-${stamp}`, src);
+  } catch (err) {
+    renameSync(`${src}.pre-${stamp}`, src);
+    discard();
+    throw err;
+  }
+  renameSync(`${pkg}.new-${stamp}`, pkg);
+}
+
+/** Back to the pre-update files; works from any point of swapIn. The new tree is kept as *.failed-<stamp>. */
+function restoreFiles({ root, stamp, prevMarker }) {
+  for (const name of ['src', 'package.json']) {
+    const live = join(root, name);
+    const pre = `${live}.pre-${stamp}`;
+    if (!existsSync(pre)) continue;
+    if (existsSync(live)) renameSync(live, `${live}.failed-${stamp}`);
+    renameSync(pre, live);
+  }
+  rmSync(join(root, `src.new-${stamp}`), { recursive: true, force: true });
+  rmSync(join(root, `package.json.new-${stamp}`), { force: true });
+  if (prevMarker == null) rmSync(join(root, MARKER), { force: true });
+  else writeFileSync(join(root, MARKER), prevMarker);
+}
+
+/** Keep the two newest of each backup kind. */
+function pruneBackups(root) {
+  const names = readdirSync(root);
+  for (const prefix of ['src.pre-', 'package.json.pre-', 'src.failed-', 'package.json.failed-']) {
+    for (const old of names.filter(n => n.startsWith(prefix)).sort().slice(0, -2)) rmSync(join(root, old), { recursive: true, force: true });
+  }
+}
+
+function installState(root) {
+  const names = readdirSync(root).filter(n => /^(src|package\.json)(\.|$)/.test(n));
+  return names.sort().join(', ') || '비어 있음';
+}
+
+/** One update per install at a time; a lock left by a dead process is taken over. */
+function acquireLock(root) {
+  const file = join(root, '.update.lock');
+  for (let i = 0; i < 2; i++) {
+    try {
+      writeFileSync(file, String(process.pid), { flag: 'wx' });
+      return { ok: true, file };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const holder = Number(readText(file));
+      if (Number.isInteger(holder) && holder > 0 && isAlive(holder)) return { ok: false, holder };
+      rmSync(file, { force: true });
+    }
+  }
+  return { ok: false, holder: '?' };
+}
+
+/** Blobs the fork has published: the target, origin/main, and the commit this install was last updated to. */
+function historyFor(repo, root) {
+  const revs = [repo.commit, 'refs/remotes/origin/main'];
+  const installed = readText(join(root, MARKER))?.trim();
+  if (/^[0-9a-f]{40}$/.test(installed ?? '')
+      && run('git', ['-C', repo.dir, 'cat-file', '-e', `${installed}^{commit}`]).status === 0) revs.push(installed);
+  return new Set(git(['-C', repo.dir, 'rev-list', '--objects', ...revs]).split('\n').map(l => l.split(' ')[0]));
+}
+
 // ── helpers ─────────────────────────────────────────────────
 
 function run(cmd, args, { input, env, timeout = 60_000, check = false, encoding = 'utf8' } = {}) {
@@ -442,6 +627,15 @@ function run(cmd, args, { input, env, timeout = 60_000, check = false, encoding 
 
 function git(args, opts = {}) {
   return run('git', args, { ...opts, check: true }).stdout;
+}
+
+/** https://github.com/o/r(.git) and git@github.com:o/r(.git) compare equal. */
+function normalizeUrl(url) {
+  return url.trim().replace(/^git@([^:]+):/, 'https://$1/').replace(/\.git$|\/$/g, '').toLowerCase();
+}
+
+function readText(path) {
+  try { return readFileSync(path, 'utf8'); } catch { return null; }
 }
 
 function readJson(path) {
@@ -458,6 +652,14 @@ function isAlive(pid) {
 
 function sameBytes(a, b) {
   try { return readFileSync(a).equals(readFileSync(b)); } catch { return false; }
+}
+
+/** A backup suffix no earlier run in this install has used (two runs can land in the same second). */
+function freeStamp(root) {
+  const base = timestamp();
+  let stamp = base;
+  for (let i = 2; readdirSync(root).some(n => n.endsWith(`-${stamp}`) && /^(src|package\.json)\.(pre|new|failed)-/.test(n)); i++) stamp = `${base}-${i}`;
+  return stamp;
 }
 
 /** Local YYYYMMDD-HHMMSS, the backup suffix. */
