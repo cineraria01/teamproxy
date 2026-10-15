@@ -28,10 +28,12 @@ def check():
         count.write_text("3")
         renderer = home / ".claude/statusline-teamclaude.py"
         renderer.parent.mkdir()
-        # Stands in for the Claude Code status line: one row per account, the count read from a file.
+        # Stands in for the Claude Code status line: one row per account, the count read from a file,
+        # or its one "TC down" row while the proxy is unreachable.
         renderer.write_text("from pathlib import Path\n"
-                            f"n = int(Path({str(count)!r}).read_text())\n"
-                            "print('\\n'.join(f'account {i}' for i in range(n)))\n")
+                            f"text = Path({str(count)!r}).read_text()\n"
+                            "print('\\x1b[31mTC down\\x1b[0m' if text == 'down' else\n"
+                            "      '\\n'.join(f'account {i}' for i in range(int(text))))\n")
         base = [tmux, "-L", home.name, "-f", "/dev/null"]
         try:
             subprocess.run(base + ["new-session", "-d", "-s", "t", "-x", "100", "-y", "30", "sleep 300"],
@@ -55,9 +57,16 @@ def check():
             for rows in (45, 20):
                 subprocess.run(base + ["resize-window", "-t", "t", "-y", str(rows)], check=True)
                 eventually(lambda: height() == 2)
-            lines = subprocess.run(base + ["capture-pane", "-p", "-t", footer], capture_output=True, text=True).stdout
-            assert lines.rstrip("\n").split("\n") == ["account 0", "account 1"], lines
+            def shown():
+                return subprocess.run(base + ["capture-pane", "-p", "-t", footer],
+                                      capture_output=True, text=True).stdout.rstrip("\n").split("\n")
+
+            assert shown() == ["account 0", "account 1"], shown()
             print("PASS: a window resize keeps the footer at its row count")
+            count.write_text("down")
+            eventually(lambda: shown() == ["", "TC down"])
+            assert height() == 2, height()
+            print("PASS: a proxy outage keeps the footer height and shows the row at the bottom")
         finally:
             subprocess.run(base + ["kill-server"], capture_output=True)
 

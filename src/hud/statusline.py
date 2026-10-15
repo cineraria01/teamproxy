@@ -395,6 +395,10 @@ def main():
                 rows = (claude_rows(color) if args.claude else
                         render(read_status(config), color=color, width=shutil.get_terminal_size().columns,
                                agy=args.agy, grok=args.grok))
+                # The Claude status line prints one "TC down"/"not installed" row instead of raising. The account
+                # count is unknown then, so the footer keeps its height (a proxy restart must not resize the CLI).
+                failed = args.claude and len(rows) == 1 and re.sub(r"\033\[[0-9;]*m", "", rows[0]).endswith(
+                    ("TC down", "teamclaude not installed"))
             except FileNotFoundError:
                 rows = [f"{title}: config missing. Run: {add_account}"]
                 failed = True
@@ -415,8 +419,8 @@ def main():
                     subprocess.run([shutil.which("tmux") or "tmux", "resize-pane", "-t", pane, "-y", str(len(rows))],
                                    capture_output=True)
                 # Autowrap off: in a narrow pane a long row is clipped instead of pushing rows out of view.
-                # Bottom-aligned until the resize lands, or when tmux cannot give the footer that many rows.
-                pad = "\n" * max(0, height - len(rows))
+                # Bottom-aligned in the footer until the resize lands, or when tmux cannot give it that many rows.
+                pad = "\n" * max(0, height - len(rows)) if pane else ""
                 sys.stdout.write("\033[?7l\033[H\033[J" + pad + "\n".join(rows))
                 sys.stdout.flush()
             else:
