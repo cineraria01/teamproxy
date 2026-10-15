@@ -3,7 +3,7 @@ import https from 'node:https';
 import { mkdir, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
   brotliDecompressSync,
@@ -362,6 +362,14 @@ export function resolveAnthropicUsageUrl(configured, upstream) {
     }
   } catch { /* not a URL — no usage endpoint */ }
   return null;
+}
+
+/** Constant-time proxy-key check (a missing or differently sized key is simply a mismatch). */
+function keyMatches(given, expected) {
+  if (typeof given !== 'string' || typeof expected !== 'string') return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function createProxyServer(accountManager, config, hooks = {}) {
@@ -1658,14 +1666,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         return;
       }
       if ((isRotateRequest || isResetCreditRequest || isReloadRequest || isAccountsSyncRequest) && proxyApiKey
-          && clientKey !== proxyApiKey && bearerKey !== proxyApiKey) {
+          && !keyMatches(clientKey, proxyApiKey) && !keyMatches(bearerKey, proxyApiKey)) {
         rejectEarlyRequest(req, res, 401, { 'Content-Type': 'application/json' }, {
           type: 'error',
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },
         });
         return;
       }
-      if (proxyApiKey && clientKey !== proxyApiKey && bearerKey !== proxyApiKey && !isLocal) {
+      if (proxyApiKey && !keyMatches(clientKey, proxyApiKey) && !keyMatches(bearerKey, proxyApiKey) && !isLocal) {
         rejectEarlyRequest(req, res, 401, { 'Content-Type': 'application/json' }, {
           type: 'error',
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },

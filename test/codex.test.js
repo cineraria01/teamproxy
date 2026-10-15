@@ -180,12 +180,19 @@ test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then P
   );
 
   // Given: win32 with @openai/codex installed beside node.exe — its native codex.exe, per arch
-  for (const [arch, triple] of [['x64', 'x86_64-pc-windows-msvc'], ['arm64', 'aarch64-pc-windows-msvc']]) {
-    const exe = `C:\\nodejs\\node_modules\\@openai\\codex\\vendor\\${triple}\\codex\\codex.exe`;
-    assert.equal(
-      resolveCodexCliBin({ env: {}, execPath: 'C:\\nodejs\\node.exe', exists: p => p === exe, platform: 'win32', arch }),
-      exe,
-    );
+  // (layout checked against an installed @openai/codex tree: <pkg>/node_modules/@openai/codex-<plat>/vendor/<triple>/bin/codex)
+  for (const [arch, plat, triple] of [['x64', 'x64', 'x86_64-pc-windows-msvc'], ['arm64', 'arm64', 'aarch64-pc-windows-msvc']]) {
+    const m = 'C:\\nodejs\\node_modules\\@openai';
+    const nested = `${m}\\codex\\node_modules\\@openai\\codex-win32-${plat}\\vendor\\${triple}\\bin\\codex.exe`;
+    const hoisted = `${m}\\codex-win32-${plat}\\vendor\\${triple}\\bin\\codex.exe`;
+    const legacy = `${m}\\codex\\vendor\\${triple}\\bin\\codex.exe`;
+    for (const exe of [nested, hoisted, legacy]) {
+      assert.equal(
+        resolveCodexCliBin({ env: {}, execPath: 'C:\\nodejs\\node.exe', exists: p => p === exe, platform: 'win32', arch }),
+        exe,
+      );
+    }
+    assert.equal(resolveCodexCliBin({ env: {}, execPath: 'C:\\nodejs\\node.exe', exists: () => true, platform: 'win32', arch }), nested);
   }
   // and TEAMCODEX_CODEX_BIN still wins on win32
   assert.equal(

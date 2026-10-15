@@ -294,8 +294,10 @@ export function raceWithStdinCode(callbackPromise, expectedState) {
 }
 
 // `host` binds the listener (default 127.0.0.1: only this machine's browser calls
-// back, and an all-interfaces bind opens a Windows firewall prompt); `successLocation: null`
-// answers with a plain page instead of redirecting to Claude's success URL (Antigravity login).
+// back, and an all-interfaces bind opens a Windows firewall prompt). With 127.0.0.1 the same port is
+// also bound on ::1 when the OS has it, because Claude's registered redirect is http://localhost:<port>
+// and a browser may resolve localhost to ::1. `successLocation: null` answers with a plain page
+// instead of redirecting to Claude's success URL (Antigravity login).
 export function startCallbackServer(expectedState, {
   host = '127.0.0.1',
   successLocation = 'https://platform.claude.com/oauth/code/success?app=claude-code',
@@ -304,7 +306,7 @@ export function startCallbackServer(expectedState, {
     let resolveCode, rejectCode;
     const codePromise = new Promise((res, rej) => { resolveCode = res; rejectCode = rej; });
 
-    const server = http.createServer((req, res) => {
+    const handle = (req, res) => {
       const url = new URL(req.url, `http://localhost`);
 
       if (url.pathname === '/callback') {
@@ -341,10 +343,22 @@ export function startCallbackServer(expectedState, {
 
       res.writeHead(404);
       res.end('Not found');
-    });
+    };
+    const server = http.createServer(handle);
 
     server.listen(0, host, () => {
-      resolve({ port: server.address().port, codePromise, server });
+      const { port } = server.address();
+      if (host !== '127.0.0.1') {
+        resolve({ port, codePromise, server });
+        return;
+      }
+      // Best effort: no IPv6 loopback (or the port taken there) leaves IPv4 alone, as before.
+      const v6 = http.createServer(handle);
+      v6.once('error', () => resolve({ port, codePromise, server }));
+      v6.listen(port, '::1', () => {
+        server.once('close', () => v6.close());
+        resolve({ port, codePromise, server, v6 });
+      });
     });
     server.on('error', reject);
 

@@ -191,11 +191,19 @@ export function resolveCodexCliBin({
   // TEAMCODEX_CODEX_BIN stays as the explicit escape hatch in both directions.
   if (env.TEAMCODEX_CODEX_BIN) return env.TEAMCODEX_CODEX_BIN;
   if (platform === 'win32') {
-    // npm's codex.cmd shim can't be spawned without a shell (CVE-2024-27980); run the native
-    // binary @openai/codex ships. A global npm install on Windows puts node_modules beside node.exe.
+    // npm's codex.cmd shim can't be spawned without a shell (CVE-2024-27980); run the native binary.
+    // A global npm install on Windows puts node_modules beside node.exe. Same lookup as the package's
+    // own bin/codex.js (0.162.1): the optional platform package @openai/codex-win32-<arch> (nested
+    // under @openai/codex, or hoisted), then the legacy in-package vendor/ folder.
+    const plat = arch === 'arm64' ? 'arm64' : 'x64';
     const triple = arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
-    const exe = win32.join(win32.dirname(execPath), 'node_modules', '@openai', 'codex', 'vendor', triple, 'codex', 'codex.exe');
-    if (exists(exe)) return exe;
+    const modules = win32.join(win32.dirname(execPath), 'node_modules', '@openai');
+    const found = [
+      win32.join(modules, 'codex', 'node_modules', '@openai', `codex-win32-${plat}`),
+      win32.join(modules, `codex-win32-${plat}`),
+      win32.join(modules, 'codex'),
+    ].map(root => win32.join(root, 'vendor', triple, 'bin', 'codex.exe')).find(exists);
+    if (found) return found;
   } else {
     // win32: the extension-less `codex` next to node.exe is npm's POSIX shim,
     // which CreateProcess can't run — the bare lookup resolving codex.exe wins.

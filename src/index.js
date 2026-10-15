@@ -1696,11 +1696,14 @@ async function proxyWorkerCommand() {
   hooks.onAccountsSync = () => liveSync();
   const server = createProxyServer(accountManager, config, hooks);
   let liveSyncChain = Promise.resolve();
+  let queuedSync = null; // a sync that has not started yet already covers any later request
   // Account-only reload: keep the worker, sockets, affinity map, prompt caches,
   // and every in-flight response alive. Serializing requests avoids overlapping
   // remove/add passes when several CLI changes land together.
   const liveSync = () => {
+    if (queuedSync) return queuedSync;
     const run = liveSyncChain.then(async () => {
+      queuedSync = null; // from here on the disk is read: a later change needs a new run
       const diskConfig = await accountManager.readAfterAccountFlagWrites(() => loadConfig());
       if (!diskConfig) return;
       if (poolConfigMismatch(diskConfig.provider, dedicatedMode, true)) {
@@ -1717,6 +1720,7 @@ async function proxyWorkerCommand() {
       }
       console.log('[TeamClaude] Applied account config without restarting the worker');
     });
+    queuedSync = run;
     liveSyncChain = run.catch(() => {});
     return run;
   };

@@ -155,7 +155,7 @@ Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서
 - 충돌 검사는 포트만 본다(매니페스트에 있는 우리 풀은 건너뛴다). `--with-codex-cli`는 `unsupported_platform`(Codex는 2단계).
 - 단계 id: `preflight`·`conflicts`·`config:<풀>`·`run:<풀>`·`error`. 오류 코드: `missing_node`·`unsupported_platform`·`conflict_existing_install`·`install_failed`·`usage`.
 - `--uninstall [--purge]`: 매니페스트(와 `--purge`면 앱이 만든 설정·`.server.json`·`.quota.json`·로그 폴더)를 지운다. **앱이 먼저 서버를 끈다.**
-- 시험: `TEAMPROXY_APP_PLATFORM=win32`이면 맥·리눅스에서도 이 분기를 돈다(`test/app-installer-win.test.js`, CI는 `windows-latest`에서 실제로 돈다).
+- 시험 전용: `node --test` 안에서(`NODE_TEST_CONTEXT`가 있을 때만) `TEAMPROXY_APP_PLATFORM=win32`이면 맥·리눅스에서도 이 분기를 돈다. 운영 실행에서는 무시한다(`test/app-installer-win.test.js`, CI는 `windows-latest`에서 실제로 돈다).
 
 ### 실행 명세 (앱이 읽는 계약)
 
@@ -181,7 +181,7 @@ Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서
 
 ### 계정 반영: `POST /teamclaude/accounts/sync`
 
-SIGHUP 대신 실행 중 서버에 "디스크의 계정을 다시 읽어 반영"을 요청한다(워커·연결·진행 중 응답은 그대로, SIGHUP과 같은 함수).
+SIGHUP 대신 실행 중 서버에 "디스크의 계정을 다시 읽어 반영"을 요청한다(워커·연결·진행 중 응답은 그대로, SIGHUP과 같은 함수). 아직 시작 안 한 반영이 줄에 있으면 그것을 같이 기다린다(겹친 요청은 한 번으로 합쳐진다).
 
 - 루프백(127.0.0.1·::1)에서만, 설정에 `proxy.apiKey`가 있으면 `x-api-key`(또는 `Authorization: Bearer`)가 그 값이어야 한다. 본문 없는 `POST`.
 - 응답: `200 {"ok":true,"total":<계정 수>}`(반영이 끝난 뒤 응답) · `401` 키 불일치 · `403` 원격 · `405`/`400` 메서드·본문 · `500 {"error":{"type":"account_sync_failed",…}}`.
@@ -193,6 +193,6 @@ Windows에는 SIGTERM 핸들러가 없으니 앱은 표준 입력에 `{"cancel":
 
 ### 그 밖
 
-- Claude 로그인 콜백 서버는 `127.0.0.1`에만 바인드한다(방화벽 창 없음). 리디렉트 주소는 Claude가 등록한 `http://localhost:<포트>/callback` 그대로다.
-- 설정 원자 쓰기의 `rename`은 `EPERM`/`EBUSY`(백신·색인기가 잠깐 잡음)에 약 1.4초 동안 다시 시도한다.
-- Codex CLI(2단계): `TEAMCODEX_CODEX_BIN` → node.exe 옆 `node_modules\@openai\codex\vendor\<x86_64|aarch64>-pc-windows-msvc\codex\codex.exe` → PATH의 `codex` 순으로 찾는다(`codex.cmd`는 셸 없이 실행할 수 없다).
+- Claude 로그인 콜백 서버는 루프백에만 바인드한다(방화벽 창 없음): `127.0.0.1`과, OS에 있으면 같은 포트의 `::1`. 리디렉트 주소는 Claude가 등록한 `http://localhost:<포트>/callback` 그대로라 브라우저가 `localhost`를 어느 쪽으로 풀어도 받는다(`::1`을 못 열면 IPv4만으로 계속).
+- 설정 원자 쓰기의 `rename`은 `EPERM`/`EBUSY`/`EACCES`(백신·색인기가 잠깐 잡음)에 약 1.4초 동안 다시 시도한다.
+- Codex CLI(2단계): `TEAMCODEX_CODEX_BIN` → node.exe 옆 `node_modules\@openai\codex\node_modules\@openai\codex-win32-<x64|arm64>\vendor\<x86_64|aarch64>-pc-windows-msvc\bin\codex.exe`(npm 전역 설치 구조, 0.162.1의 `bin/codex.js`와 같은 규칙) → 끌어올려진 `node_modules\@openai\codex-win32-<arch>\…` → 옛 `@openai\codex\vendor\<triple>\bin\codex.exe` → PATH의 `codex` 순으로 찾는다(`codex.cmd`는 셸 없이 실행할 수 없다).

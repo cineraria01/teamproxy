@@ -14,8 +14,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-// TEAMPROXY_APP_PLATFORM lets tests run the Windows path on any OS.
-const WIN = (process.env.TEAMPROXY_APP_PLATFORM || process.platform) === 'win32';
+// Test only: under `node --test` (NODE_TEST_CONTEXT is set and inherited by the installer it spawns),
+// TEAMPROXY_APP_PLATFORM=win32 runs the Windows path on any OS. Outside tests it is ignored.
+const platformOverride = process.env.NODE_TEST_CONTEXT ? process.env.TEAMPROXY_APP_PLATFORM : null;
+const WIN = (platformOverride || process.platform) === 'win32';
 const LABEL_PREFIX = 'kr.selvi.teamproxy.';
 const MARKER = '# teamproxy-app';
 // pool -> command name, default port, config file, node entry (script + leading args), extra env

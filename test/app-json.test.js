@@ -4,9 +4,9 @@ import http from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const CLI = fileURLToPath(new URL('../src/index.js', import.meta.url));
 let t;
@@ -48,7 +48,7 @@ globalThis.fetch = async (url, init) => {
   return real(url, init);
 };
 `);
-  t = { dir, port, configPath, config, env: { ...process.env, LC_ALL: 'C', TEAMCLAUDE_PROVIDER: 'anthropic', TEAMCLAUDE_CONFIG: configPath, NODE_OPTIONS: `--import=${join(dir, 'mock-fetch.mjs')}` }, servers: [] };
+  t = { dir, port, configPath, config, env: { ...process.env, LC_ALL: 'C', TEAMCLAUDE_PROVIDER: 'anthropic', TEAMCLAUDE_CONFIG: configPath, NODE_OPTIONS: `--import=${pathToFileURL(join(dir, 'mock-fetch.mjs')).href}` }, servers: [] };
 });
 
 afterEach(async () => {
@@ -302,6 +302,15 @@ test('a {"cancel":true} line on stdin cancels with a done line', async () => {
   assert.deepEqual(run.events.at(-1), { done: true, ok: false, error: 'cancelled' });
 });
 
+test('stdin EOF cancels a claude login with a done line', async () => {
+  const run = login();
+  await run.next(e => e.event === 'waiting');
+  run.child.stdin.end();
+  const [code] = await run.exit;
+  assert.equal(code, 1);
+  assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }]);
+});
+
 test('stdin EOF cancels a codex login and removes its temp CODEX_HOME', async () => {
   const homeFile = join(t.dir, 'codex-home.txt');
   const pidFile = join(t.dir, 'codex.pid');
@@ -357,4 +366,16 @@ test('without lsof (as on Windows) --json changes and login still apply live thr
   const [code] = await run.exit;
   assert.equal(code, 0);
   assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'live' });
+});
+
+test('POST /teamclaude/accounts/sync from a non-loopback address is refused (403) even with the key', async () => {
+  const external = Object.values(networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal);
+  assert.ok(external, 'this test needs one non-loopback IPv4 interface');
+  const config = readConfig();
+  config.proxy.host = '0.0.0.0';
+  writeFileSync(t.configPath, JSON.stringify(config));
+  await startServer();
+  const res = await fetch(`http://${external.address}:${t.port}/teamclaude/accounts/sync`, { method: 'POST', headers: { 'x-api-key': 'tc-test' } });
+  assert.equal(res.status, 403);
+  assert.match((await res.json()).error.message, /local-only/);
 });

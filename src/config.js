@@ -27,8 +27,8 @@ export function assertSafeProxyConfig(config) {
 }
 
 // Windows: an antivirus scanner or the search indexer briefly holding the target makes rename
-// fail with EPERM/EBUSY. Retry with a growing pause (about 1.4 s in all) before giving up.
-const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY']);
+// fail with EPERM/EBUSY/EACCES. Retry with a growing pause (about 1.4 s in all) before giving up.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 const RENAME_ATTEMPTS = 8;
 const renameDelayMs = attempt => 50 * attempt;
 

@@ -50,6 +50,10 @@ jobs:
         with:
           node-version: 24
       # The Windows app path: installer (fake HOME/LOCALAPPDATA), run spec -> real server,
-      # accounts/sync and --json changes applied live without lsof/SIGHUP; codex.exe lookup.
+      # accounts/sync and --json changes applied live without lsof/SIGHUP; codex.exe lookup;
+      # config writes (rename retry); loopback callback on 127.0.0.1 and ::1.
       - name: App mode tests
-        run: node --test test/app-installer-win.test.js test/codex.test.js
+        run: node --test test/app-installer-win.test.js test/codex.test.js test/config.test.js test/oauth-callback.test.js
+      # Login cancel without SIGTERM (stdin line / EOF) and the sync route; the rest of the file needs sh.
+      - name: App login and sync tests
+        run: node --test --test-name-pattern="on stdin cancels|EOF cancels a claude|pasted before the race|accounts/sync. key required" test/app-json.test.js

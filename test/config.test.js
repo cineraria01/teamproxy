@@ -215,7 +215,8 @@ test('config/quota writes are atomic: valid content, 0600, no temp leftovers', a
     await saveConfig({ proxy: { port: 1 }, accounts: [{ name: 'A', type: 'apikey', apiKey: 'a' }] });
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8'));
     assert.equal(cfg.accounts[0].name, 'A');
-    assert.equal((await stat(cfgPath)).mode & 0o777, 0o600, 'config stays private');
+    // Windows has no POSIX mode bits (the profile ACL keeps it private there).
+    if (process.platform !== 'win32') assert.equal((await stat(cfgPath)).mode & 0o777, 0o600, 'config stays private');
 
     writeQuotaCacheSync({ savedAt: 1, accounts: [] });
     assert.deepEqual(await readQuotaCache(), { savedAt: 1, accounts: [] });
@@ -466,14 +467,14 @@ test('atomicConfigUpdate recovers a lock whose owner process is dead', async () 
   }
 });
 
-test('rename retries a briefly locked target (EPERM/EBUSY, as antivirus causes on Windows) and nothing else', async () => {
+test('rename retries a briefly locked target (EPERM/EBUSY/EACCES, as antivirus causes on Windows) and nothing else', async () => {
   const flaky = codes => {
     const calls = [];
     return { calls, fn: (from, to) => { calls.push([from, to]); const code = codes.shift(); if (code) throw Object.assign(new Error(code), { code }); } };
   };
-  const a = flaky(['EPERM', 'EBUSY']);
+  const a = flaky(['EPERM', 'EBUSY', 'EACCES']);
   await renameWithRetry('a', 'b', a.fn);
-  assert.equal(a.calls.length, 3);
+  assert.equal(a.calls.length, 4);
   const s = flaky(['EBUSY']);
   renameWithRetrySync('a', 'b', s.fn);
   assert.equal(s.calls.length, 2);
