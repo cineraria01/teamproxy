@@ -1,6 +1,6 @@
 // Machine-readable output for app-managed installs (docs/install/APP-INSTALL.md):
 // account views for `<pool> accounts|status --json` and the line-JSON login events.
-import { fstatSync } from 'node:fs';
+import net from 'node:net';
 import { createInterface } from 'node:readline';
 
 export const machine = { json: false, cancelling: false, finished: false, saved: null, applied: null, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [],
@@ -100,14 +100,10 @@ export function enableMachineLogin() {
   if (stdinIsPipe()) lines.on('close', () => { if (!machine.finished) cancel(); });
 }
 
-function stdinIsPipe() {
-  try {
-    const stat = fstatSync(0);
-    return stat.isFIFO() || stat.isSocket(); // a Windows named pipe reports as a FIFO
-  } catch {
-    return false;
-  }
-}
+// Node builds process.stdin by handle type: a pipe or socket (a Windows named pipe too) is a net.Socket,
+// a file or /dev/null or NUL an fs.ReadStream, a terminal a tty.ReadStream. fstat cannot tell on Windows:
+// a named pipe is not reported as a FIFO there (CI: a piped EOF never cancelled).
+const stdinIsPipe = () => process.stdin instanceof net.Socket && !process.stdin.isTTY;
 
 /** The app opens the browser itself: hand it the URL and say we are waiting. */
 export function announceAuthUrl(url, extra = {}) {

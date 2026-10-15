@@ -161,7 +161,7 @@ const callback = (authUrl, code = 'the-code') => {
   redirect.pathname = '/callback';
   redirect.searchParams.set('code', code);
   redirect.searchParams.set('state', u.searchParams.get('state'));
-  return fetch(redirect).then(r => r.text());
+  return fetch(redirect, { redirect: 'manual' }).then(r => r.text()); // never follow the 302 out to the internet
 };
 
 test('claude login --json: auth_url, waiting, callback, done', async () => {
@@ -293,7 +293,7 @@ test('a name that appears between the pre-check and the save is not overwritten 
 
 // ── Windows paths (no SIGTERM handler, no SIGHUP, no lsof) ──
 
-test('a {"cancel":true} line on stdin cancels with a done line', async () => {
+test('a {"cancel":true} line on stdin cancels with a done line', { timeout: 30_000 }, async () => {
   const run = login();
   await run.next(e => e.event === 'waiting');
   run.child.stdin.write('{"cancel":true}\n');
@@ -302,7 +302,7 @@ test('a {"cancel":true} line on stdin cancels with a done line', async () => {
   assert.deepEqual(run.events.at(-1), { done: true, ok: false, error: 'cancelled' });
 });
 
-test('a login --json whose stdin is not a pipe (/dev/null, NUL) is not cancelled by its EOF', async () => {
+test('a login --json whose stdin is not a pipe (/dev/null, NUL) is not cancelled by its EOF', { timeout: 30_000 }, async () => {
   const run = login(undefined, {}, 'ignore');
   const auth = await run.next(e => e.event === 'waiting').then(() => run.events.find(e => e.event === 'auth_url'));
   await new Promise(r => setTimeout(r, 1_500));
@@ -313,7 +313,7 @@ test('a login --json whose stdin is not a pipe (/dev/null, NUL) is not cancelled
   assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
 });
 
-test('stdin EOF cancels a claude login with a done line', async () => {
+test('stdin EOF cancels a claude login with a done line', { timeout: 30_000 }, async () => {
   const run = login();
   await run.next(e => e.event === 'waiting');
   run.child.stdin.end();
@@ -322,7 +322,7 @@ test('stdin EOF cancels a claude login with a done line', async () => {
   assert.deepEqual(run.events.filter(e => e.done), [{ done: true, ok: false, error: 'cancelled' }]);
 });
 
-test('stdin EOF cancels a codex login and removes its temp CODEX_HOME', async () => {
+test('stdin EOF cancels a codex login and removes its temp CODEX_HOME', { timeout: 30_000 }, async () => {
   const homeFile = join(t.dir, 'codex-home.txt');
   const pidFile = join(t.dir, 'codex.pid');
   const run = login(['codex', 'login', '--name', 'codex-1', '--json'], {
