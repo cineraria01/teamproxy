@@ -155,7 +155,7 @@ test('rerun is idempotent; an older recorded version is reinstalled and restarte
 test('a launch agent from someone else running the same command is a conflict', () => {
   const agents = join(t.home, 'Library/LaunchAgents');
   mkdirSync(agents, { recursive: true });
-  writeFileSync(join(agents, 'com.hyeongsu.teamcodex.plist'), '<plist><string>/x/.local/bin/teamcodex</string></plist>');
+  writeFileSync(join(agents, 'com.example.teamcodex.plist'), '<plist><string>/x/.local/bin/teamcodex</string></plist>');
   const { steps, done } = app(['--app'], { expect: 1 });
   assert.deepEqual([done.ok, done.error], [false, 'conflict_existing_install']);
   assert.equal(steps.at(-1).status, 'fail');
