@@ -47,11 +47,6 @@ def check():
         assert oneshot(flags, modes["grok"][2]), flags
     assert not oneshot(["--model", "grok-4.7"], modes["grok"][2])
     assert modes["grok"][1] == "Grok" and modes["grok"][3] == "M-Enter" and modes["grok"][4] == "--always-approve"
-    # Claude conversations default to --effort max; an explicit effort is kept.
-    assert launcher.with_effort([]) == ["--effort", "max"]
-    assert launcher.with_effort(["--effort", "high"]) == ["--effort", "high"]
-    assert launcher.with_effort(["--effort=low", "-c"]) == ["--effort=low", "-c"]
-    assert launcher.with_effort(["--dangerously-skip-permissions"]) == ["--dangerously-skip-permissions", "--effort", "max"]
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         fake = Path(directory) / "teamagy"
         fake.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
@@ -166,9 +161,8 @@ def check():
                     # Only Claude Code is told that the footer shows the account table.
                     assert hud == ("1" if mode == "claude" else None), (mode, hud)
                     pids = [parent, child]
+                    # The launcher adds no --effort: Claude Code takes it from its own settings.
                     expected = ["--model", "m"] if mode in ("agy", "claude") else ["resume", "test-id"]
-                    if mode == "claude":
-                        expected += ["--effort", "max"]
                     assert forwarded == ["run", "--", *expected], forwarded
                     assert launched_in == str(root), launched_in
                     session = sessions().split()[0]

@@ -36,14 +36,6 @@ def oneshot(arguments, flags):
     return any(a.startswith("-") and a.lstrip("-").split("=")[0] in flags for a in arguments)
 
 
-def with_effort(arguments):
-    # Claude Code's settings.json cannot store max and CLAUDE_CODE_EFFORT_LEVEL would override subagent effort, so
-    # the conversation session gets max from the launcher unless the caller chose an effort.
-    if any(a == "--effort" or a.startswith("--effort=") for a in arguments):
-        return arguments
-    return [*arguments, "--effort", "max"]
-
-
 def launch(arguments):
     mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy", "--grok") else "codex"
     if mode != "codex":
@@ -60,7 +52,6 @@ def launch(arguments):
                  "  teamcodex -- resume ID     Continue an existing conversation\n" if mode == "codex" else
                  f"  {command} -p PROMPT          Print mode, no footer (also without a terminal)\n"
                  f"  {command} -- SUBCOMMAND      {cli} subcommand, no footer\n")
-              + (f"  {command}                  … (Claude: --effort max by default)\n" if mode == "claude" else "")
               + f"  {command} --yolo               {cli} without approval prompts ({yolo})\n"
               + f"  {command} --keep-alive [{cli} arguments]  Keep running after detach\n"
               "  Closing the terminal or Ctrl-b d stops the session by default.\n"
@@ -77,8 +68,6 @@ def launch(arguments):
     if (oneshot(arguments, flags) or (mode == "grok" and arguments[:1] and arguments[0] in GROK_ONESHOT_SUBCOMMANDS)
             or not (sys.stdin.isatty() and sys.stdout.isatty())):
         os.execv(proxy, [proxy, "run", "--", *arguments])
-    if mode == "claude" and not subcommand:
-        arguments = with_effort(arguments)
     if not tmux:
         sys.exit("Requires tmux. macOS: brew install tmux")
     try:
