@@ -140,10 +140,11 @@ def launch(arguments):
         run("set-option", "-t", session, "set-titles", "on")
         run("set-option", "-t", session, "set-titles-string",
             "#{?#{==:#{pane_title},#{host}},#{window_name},#{pane_title}}")
-        footer = run("split-window", "-d", "-P", "-F", "#{pane_id}", "-v", "-l", str(rows), "-t", top,
-                     sys.executable, str(statusline), "--watch", *(["--codex-pane", top] if mode == "codex" else ["--" + mode]))
-        for event in ("client-attached", "client-resized"):
-            run("set-hook", "-t", session, event, f"resize-pane -t {footer} -y {rows}")
+        # The footer keeps its own height equal to its row count (statusline.py --watch), including after a
+        # window resize. A fixed client-resized hook ran before tmux resized the window and the footer grew
+        # to 15 rows for a 6-row table.
+        run("split-window", "-d", "-v", "-l", str(rows), "-t", top,
+            sys.executable, str(statusline), "--watch", *(["--codex-pane", top] if mode == "codex" else ["--" + mode]))
         if not keep_alive:
             # Setting this before the first attachment destroys the new session immediately.
             run("set-hook", "-a", "-t", session, "client-attached",
