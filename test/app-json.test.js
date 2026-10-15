@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -53,7 +53,7 @@ globalThis.fetch = async (url, init) => {
 
 afterEach(async () => {
   for (const child of t.servers) { child.kill('SIGTERM'); await once(child, 'exit').catch(() => {}); }
-  rmSync(t.dir, { recursive: true, force: true });
+  rmSync(t.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 const cli = (args, env = {}) => new Promise(done => {
@@ -130,8 +130,8 @@ test('changes without a server are config_only; errors are JSON with exit 1', as
 
 // ── login events ──
 
-function login(args = ['login', '--name', 'app-1', '--json'], env = {}) {
-  const child = spawn(process.execPath, [CLI, ...args], { env: { ...t.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+function login(args = ['login', '--name', 'app-1', '--json'], env = {}, stdin = 'pipe') {
+  const child = spawn(process.execPath, [CLI, ...args], { env: { ...t.env, ...env }, stdio: [stdin, 'pipe', 'pipe'] });
   const events = [];
   const waiters = [];
   let buffer = '';
@@ -302,6 +302,17 @@ test('a {"cancel":true} line on stdin cancels with a done line', async () => {
   assert.deepEqual(run.events.at(-1), { done: true, ok: false, error: 'cancelled' });
 });
 
+test('a login --json whose stdin is not a pipe (/dev/null, NUL) is not cancelled by its EOF', async () => {
+  const run = login(undefined, {}, 'ignore');
+  const auth = await run.next(e => e.event === 'waiting').then(() => run.events.find(e => e.event === 'auth_url'));
+  await new Promise(r => setTimeout(r, 1_500));
+  assert.equal(run.events.some(e => e.done), false, JSON.stringify(run.events));
+  await callback(auth.url);
+  const [code] = await run.exit;
+  assert.equal(code, 0);
+  assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'config_only' });
+});
+
 test('stdin EOF cancels a claude login with a done line', async () => {
   const run = login();
   await run.next(e => e.event === 'waiting');
@@ -355,7 +366,11 @@ test('POST /teamclaude/accounts/sync: key required, POST only, applies the on-di
 
 test('without lsof (as on Windows) --json changes and login still apply live through accounts/sync', async () => {
   await startServer();
-  const noLsof = { PATH: `${join(process.execPath, '..')}:/usr/bin:/bin` };
+  // A PATH holding only node: no lsof or ps anywhere (Ubuntu has /usr/bin/lsof).
+  const bin = join(t.dir, 'bin');
+  mkdirSync(bin);
+  symlinkSync(process.execPath, join(bin, 'node'));
+  const noLsof = { PATH: bin };
   const disable = await cli(['disable', 'api-1', '--json'], noLsof);
   assert.deepEqual(JSON.parse(disable.stdout), { ok: true, account: 'api-1', enabled: false, applied: 'live' });
   const status = await json(['status', '--json']);
@@ -368,9 +383,9 @@ test('without lsof (as on Windows) --json changes and login still apply live thr
   assert.deepEqual(run.events.at(-1), { done: true, ok: true, account: 'app-1', applied: 'live' });
 });
 
-test('POST /teamclaude/accounts/sync from a non-loopback address is refused (403) even with the key', async () => {
+test('POST /teamclaude/accounts/sync from a non-loopback address is refused (403) even with the key', async ctx => {
   const external = Object.values(networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal);
-  assert.ok(external, 'this test needs one non-loopback IPv4 interface');
+  if (!external) return ctx.skip('no non-loopback IPv4 interface on this machine to call from');
   const config = readConfig();
   config.proxy.host = '0.0.0.0';
   writeFileSync(t.configPath, JSON.stringify(config));
@@ -378,4 +393,52 @@ test('POST /teamclaude/accounts/sync from a non-loopback address is refused (403
   const res = await fetch(`http://${external.address}:${t.port}/teamclaude/accounts/sync`, { method: 'POST', headers: { 'x-api-key': 'tc-test' } });
   assert.equal(res.status, 403);
   assert.match((await res.json()).error.message, /local-only/);
+});
+
+test('accounts/sync answers once the accounts are applied, without waiting for a slow quota fetch', async () => {
+  // A codex server whose wham/usage never answers in time: the sync reply must not wait for it.
+  writeFileSync(join(t.dir, 'mock-fetch.mjs'), `
+const real = globalThis.fetch;
+globalThis.fetch = (url, init) => String(url).includes('/wham/usage')
+  ? new Promise(() => {}) // never settles
+  : real(url, init);
+`);
+  const config = {
+    provider: 'codex',
+    proxy: { port: t.port, apiKey: 'tc-test', host: '127.0.0.1', allowNoAccounts: true },
+    activeWarmup: false,
+    accounts: [{ name: 'codex-1', provider: 'codex', type: 'oauth', accessToken: 'tok-1', refreshToken: 'r-1', accountId: 'ws-1', expiresAt: Date.now() + 3_600_000 }],
+  };
+  writeFileSync(t.configPath, JSON.stringify(config));
+  t.env.TEAMCLAUDE_PROVIDER = 'codex';
+  await startServer();
+  config.accounts.push({ ...config.accounts[0], name: 'codex-2', accessToken: 'tok-2', accountId: 'ws-2' });
+  writeFileSync(t.configPath, JSON.stringify(config));
+  const started = Date.now();
+  const res = await fetch(`http://127.0.0.1:${t.port}/teamclaude/accounts/sync`, {
+    method: 'POST', headers: { 'x-api-key': 'tc-test' }, signal: AbortSignal.timeout(5_000), // fail, not hang, if it waits again
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, total: 2 });
+  assert.ok(Date.now() - started < 5_000, `sync took ${Date.now() - started} ms`);
+});
+
+test('an older server (no accountsSync in its status) gets no POST: the change reports restart_required', async () => {
+  const posts = [];
+  const old = http.createServer((req, res) => {
+    if (req.method === 'POST') posts.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ accounts: [], switchThreshold: 0.98, usableCount: 0, totalCount: 2 })); // status without the flag
+  });
+  await new Promise(r => old.listen(t.port, '127.0.0.1', r));
+  try {
+    const bin = join(t.dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    const r = await cli(['disable', 'api-1', '--json'], { PATH: bin });
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, account: 'api-1', enabled: false, applied: 'restart_required' });
+    assert.deepEqual(posts, []);
+  } finally {
+    old.close();
+  }
 });

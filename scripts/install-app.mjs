@@ -426,8 +426,17 @@ async function runStatusWindows(L) {
 }
 
 // The app stops the servers first; nothing here is registered with Windows, so files are all there is.
-function runUninstallWindows(L, purge) {
+async function runUninstallWindows(L, purge) {
   const manifest = readManifest(L);
+  // A server still answering would keep its files open and rewrite its config: the app stops it first.
+  const running = [];
+  for (const pool of Object.keys(manifest.pools)) if (await fetchStatus(poolPort(L, pool))) running.push(pool);
+  if (running.length) {
+    const detail = `${running.join(', ')}: 서버가 아직 실행 중입니다. 먼저 끄고 다시 지웁니다.`;
+    step('error', 'fail', detail);
+    emit({ done: true, ok: false, error: 'server_running', running, detail });
+    return 1;
+  }
   const removed = [];
   for (const pool of Object.keys(manifest.pools)) {
     if (purge) purgeConfig(L, pool, manifest);

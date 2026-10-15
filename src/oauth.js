@@ -354,7 +354,7 @@ export function startCallbackServer(expectedState, {
       }
       // Best effort: no IPv6 loopback (or the port taken there) leaves IPv4 alone, as before.
       const v6 = http.createServer(handle);
-      v6.once('error', () => resolve({ port, codePromise, server }));
+      v6.on('error', () => resolve({ port, codePromise, server })); // on: a later error must not crash the login either
       v6.listen(port, '::1', () => {
         server.once('close', () => v6.close());
         resolve({ port, codePromise, server, v6 });

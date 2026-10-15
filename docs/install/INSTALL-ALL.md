@@ -363,7 +363,7 @@ cd ~/some-project && teamgrok                                        # grok 화�
 
 ## 7. 최종 점검표
 
-- [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.4.0`
+- [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.5.0`
 - [ ] `buildCodexProxyArgs`가 `chatgpt_base_url` 옵션을 추가하지 않음 — 포크의 `test/codex.test.js`, `test/codex-run.test.js`로 검증
 - [ ] `launchctl list | grep -E 'teamclaude|teamcodex|teamagy'` 두 줄(teamagy를 했으면 세 줄), 상태 0
 - [ ] `teamclaude status`·`teamcodex status`에 계정이 보이고 `curl` status 200

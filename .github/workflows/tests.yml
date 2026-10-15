@@ -54,6 +54,7 @@ jobs:
       # config writes (rename retry); loopback callback on 127.0.0.1 and ::1.
       - name: App mode tests
         run: node --test test/app-installer-win.test.js test/codex.test.js test/config.test.js test/oauth-callback.test.js
-      # Login cancel without SIGTERM (stdin line / EOF) and the sync route; the rest of the file needs sh.
+      # Login cancel without SIGTERM (stdin line / EOF, not on a NUL stdin) and the sync route (no wait on quota);
+      # the rest of the file needs sh.
       - name: App login and sync tests
-        run: node --test --test-name-pattern="on stdin cancels|EOF cancels a claude|pasted before the race|accounts/sync. key required" test/app-json.test.js
+        run: node --test --test-name-pattern="on stdin cancels|EOF cancels a claude|not a pipe|pasted before the race|accounts/sync. key required|slow quota" test/app-json.test.js

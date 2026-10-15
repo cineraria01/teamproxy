@@ -191,4 +191,10 @@ test('the run spec starts a server; accounts/sync and --json changes apply live'
     status = await cli(['status', '--json']);
   }
   assert.deepEqual([status.running, status.accounts[0].enabled, status.accounts[0].usable], [true, false, false]);
+
+  // --uninstall refuses while the server still answers, and leaves everything in place
+  const refused = (await app(['--uninstall', '--purge'], 1)).done;
+  assert.deepEqual([refused.ok, refused.error, refused.running], [false, 'server_running', ['claude']]);
+  assert.equal(existsSync(configOf('claude')), true);
+  assert.equal(existsSync(join(t.root, 'manifest.json')), true);
 });

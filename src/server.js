@@ -365,7 +365,7 @@ export function resolveAnthropicUsageUrl(configured, upstream) {
 }
 
 /** Constant-time proxy-key check (a missing or differently sized key is simply a mismatch). */
-function keyMatches(given, expected) {
+export function keyMatches(given, expected) {
   if (typeof given !== 'string' || typeof expected !== 'string') return false;
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
@@ -1858,11 +1858,12 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // by the tracker, RAM/loadavg are instantaneous.
         const includeIdentity = isLocal
           && Boolean(proxyApiKey)
-          && clientKey === proxyApiKey
+          && keyMatches(clientKey, proxyApiKey)
           && req.headers['x-teamcodex-status-identity'] === '1';
         res.end(JSON.stringify({
           ...accountManager.getStatus({ includeIdentity }),
           host: hostTracker.sample(),
+          accountsSync: true, // POST /teamclaude/accounts/sync exists (an older server would forward that path upstream)
           ...(provider === 'codex'
             ? {
                 resetCredits: {

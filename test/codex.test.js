@@ -146,6 +146,7 @@ test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then P
       env: { TEAMCODEX_CODEX_BIN: '/opt/custom/codex' },
       execPath: '/nodes/v24/bin/node',
       exists: () => true,
+      platform: 'linux',
     }),
     '/opt/custom/codex',
   );
@@ -157,13 +158,14 @@ test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then P
       env: {},
       execPath: '/nodes/v24/bin/node',
       exists: p => p === join('/nodes/v24/bin', 'codex'),
+      platform: 'linux',
     }),
     join('/nodes/v24/bin', 'codex'),
   );
 
   // Given: neither — bare PATH lookup is the legacy fallback
   assert.equal(
-    resolveCodexCliBin({ env: {}, execPath: '/nodes/v24/bin/node', exists: () => false }),
+    resolveCodexCliBin({ env: {}, execPath: '/nodes/v24/bin/node', exists: () => false, platform: 'linux' }),
     'codex',
   );
 

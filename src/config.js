@@ -28,27 +28,29 @@ export function assertSafeProxyConfig(config) {
 
 // Windows: an antivirus scanner or the search indexer briefly holding the target makes rename
 // fail with EPERM/EBUSY/EACCES. Retry with a growing pause (about 1.4 s in all) before giving up.
+// Elsewhere those codes are real permission errors and fail at once (`retry` is on for win32 only).
 const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 const RENAME_ATTEMPTS = 8;
 const renameDelayMs = attempt => 50 * attempt;
+const RETRY_RENAME = process.platform === 'win32';
 
-export async function renameWithRetry(from, to, renameFn = rename) {
+export async function renameWithRetry(from, to, renameFn = rename, retry = RETRY_RENAME) {
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await renameFn(from, to);
     } catch (err) {
-      if (attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      if (!retry || attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
       await new Promise(done => setTimeout(done, renameDelayMs(attempt)));
     }
   }
 }
 
-export function renameWithRetrySync(from, to, renameFn = renameSync) {
+export function renameWithRetrySync(from, to, renameFn = renameSync, retry = RETRY_RENAME) {
   for (let attempt = 1; ; attempt += 1) {
     try {
       return renameFn(from, to);
     } catch (err) {
-      if (attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
+      if (!retry || attempt >= RENAME_ATTEMPTS || !RENAME_RETRY_CODES.has(err.code)) throw err;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, renameDelayMs(attempt));
     }
   }
@@ -332,6 +334,15 @@ export async function readQuotaCache() {
   } catch {
     return null; // missing or unreadable → start unmeasured, exactly as before
   }
+}
+
+/** The periodic snapshot: async, so a slow rename (Windows retries) never blocks the event loop. */
+export async function writeQuotaCache(data) {
+  try {
+    const path = getQuotaCachePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFileAtomic(path, JSON.stringify(data, null, 2) + '\n');
+  } catch { /* best-effort — a failed snapshot must never break the proxy */ }
 }
 
 /**

@@ -290,8 +290,10 @@ test('atomic config and quota renames fsync their parent directory', async () =>
         }
       });
     });
-    assert.ok(result.asyncDirectorySyncs > 0, 'async rename must fsync its directory');
-    assert.ok(result.syncDirectorySyncs > 0, 'sync rename must fsync its directory');
+    if (process.platform !== 'win32') { // Windows cannot fsync a directory, so config.js skips it there
+      assert.ok(result.asyncDirectorySyncs > 0, 'async rename must fsync its directory');
+      assert.ok(result.syncDirectorySyncs > 0, 'sync rename must fsync its directory');
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -467,21 +469,25 @@ test('atomicConfigUpdate recovers a lock whose owner process is dead', async () 
   }
 });
 
-test('rename retries a briefly locked target (EPERM/EBUSY/EACCES, as antivirus causes on Windows) and nothing else', async () => {
+test('rename retries a briefly locked target (EPERM/EBUSY/EACCES, as antivirus causes on Windows) and nothing else; only on Windows', async () => {
   const flaky = codes => {
     const calls = [];
     return { calls, fn: (from, to) => { calls.push([from, to]); const code = codes.shift(); if (code) throw Object.assign(new Error(code), { code }); } };
   };
   const a = flaky(['EPERM', 'EBUSY', 'EACCES']);
-  await renameWithRetry('a', 'b', a.fn);
+  await renameWithRetry('a', 'b', a.fn, true);
   assert.equal(a.calls.length, 4);
   const s = flaky(['EBUSY']);
-  renameWithRetrySync('a', 'b', s.fn);
+  renameWithRetrySync('a', 'b', s.fn, true);
   assert.equal(s.calls.length, 2);
   const other = flaky(['ENOENT']);
-  await assert.rejects(renameWithRetry('a', 'b', other.fn), { code: 'ENOENT' });
+  await assert.rejects(renameWithRetry('a', 'b', other.fn, true), { code: 'ENOENT' });
   assert.equal(other.calls.length, 1);
   const stuck = flaky(Array(8).fill('EPERM'));
-  assert.throws(() => renameWithRetrySync('a', 'b', stuck.fn), { code: 'EPERM' });
+  assert.throws(() => renameWithRetrySync('a', 'b', stuck.fn, true), { code: 'EPERM' });
   assert.equal(stuck.calls.length, 8);
+  // Off Windows (the default there) EPERM is a real permission error: no retry.
+  const posix = flaky(['EPERM']);
+  await assert.rejects(renameWithRetry('a', 'b', posix.fn, false), { code: 'EPERM' });
+  assert.equal(posix.calls.length, 1);
 });

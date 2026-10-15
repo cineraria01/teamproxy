@@ -39,7 +39,7 @@ WATCHDOG = ROOT / "scripts/codex_502_watchdog.py"
 ACCOUNT_MANAGER = ROOT / "src/account-manager.js"
 ACCOUNT_MANAGER_SHA256 = "10a8466c3aca49137935dae04ad89e67a741298ae10baab404ae405f5b220836"
 CONFIG = ROOT / "src/config.js"
-CONFIG_SHA256 = "37665e5466b6fcdf22a9f0bec1319cf713a93e2e2019048c6d48545e2239c654"
+CONFIG_SHA256 = "00d573770ddfc1b4ec51c0db097072cc22693bc2346f114f67b1e13293a6f848"
 WATCHDOG_TESTS = (
     ROOT / "test/test_codex_502_watchdog.py",
     ROOT / "test/test_codex_502_watchdog_variants.py",

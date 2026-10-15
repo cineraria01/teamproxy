@@ -149,12 +149,12 @@ Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서
 
 ### 설치기 (`--app`·`--status`·`--uninstall`·`--login-command`)
 
-- 하는 일: 설정 `%USERPROFILE%\.config\{teamclaude,teamcodex,teamagy}.json`(맥과 같은 규칙: 없으면 만들고 `127.0.0.1`·`allowNoAccounts`, 있던 것은 `existing_kept`)과 매니페스트 `%LOCALAPPDATA%\Selvi\teamproxy\manifest.json`(`node`·`source`·풀별 버전), 로그 폴더 `%LOCALAPPDATA%\Selvi\teamproxy\logs`.
+- 하는 일: 설정 `%USERPROFILE%\.config\{teamclaude,teamcodex,teamagy,teamgrok}.json`(맥과 같은 규칙: 없으면 만들고 `127.0.0.1`·`allowNoAccounts`, 있던 것은 `existing_kept`)과 매니페스트 `%LOCALAPPDATA%\Selvi\teamproxy\manifest.json`(`node`·`source`·풀별 버전), 로그 폴더 `%LOCALAPPDATA%\Selvi\teamproxy\logs`.
 - 하지 않는 일: npm 복사(압축을 푼 묶음 폴더 = `source`에서 바로 실행하므로 앱은 그 폴더를 지우거나 옮기지 않는다. 묶음을 바꾸면 `--app`을 다시 돌려 run 명세를 새로 받는다), 래퍼, 서비스 등록, 서버 기동.
 - `--prefix <홈>`(시험용)이면 루트가 `<홈>\AppData\Local\Selvi\teamproxy`, 설정이 `<홈>\.config\…`.
 - 충돌 검사는 포트만 본다(매니페스트에 있는 우리 풀은 건너뛴다). `--with-codex-cli`는 `unsupported_platform`(Codex는 2단계).
 - 단계 id: `preflight`·`conflicts`·`config:<풀>`·`run:<풀>`·`error`. 오류 코드: `missing_node`·`unsupported_platform`·`conflict_existing_install`·`install_failed`·`usage`.
-- `--uninstall [--purge]`: 매니페스트(와 `--purge`면 앱이 만든 설정·`.server.json`·`.quota.json`·로그 폴더)를 지운다. **앱이 먼저 서버를 끈다.**
+- `--uninstall [--purge]`: 매니페스트(와 `--purge`면 앱이 만든 설정·`.server.json`·`.quota.json`·로그 폴더)를 지운다. **앱이 먼저 서버를 끈다.** 매니페스트의 풀 포트에서 서버가 `/teamclaude/status`에 답하면 아무것도 지우지 않고 `{"done":true,"ok":false,"error":"server_running","running":["claude"],…}`(종료 코드 1)로 멈춘다.
 - 시험 전용: `node --test` 안에서(`NODE_TEST_CONTEXT`가 있을 때만) `TEAMPROXY_APP_PLATFORM=win32`이면 맥·리눅스에서도 이 분기를 돈다. 운영 실행에서는 무시한다(`test/app-installer-win.test.js`, CI는 `windows-latest`에서 실제로 돈다).
 
 ### 실행 명세 (앱이 읽는 계약)
@@ -184,7 +184,7 @@ Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서
 SIGHUP 대신 실행 중 서버에 "디스크의 계정을 다시 읽어 반영"을 요청한다(워커·연결·진행 중 응답은 그대로, SIGHUP과 같은 함수). 아직 시작 안 한 반영이 줄에 있으면 그것을 같이 기다린다(겹친 요청은 한 번으로 합쳐진다).
 
 - 루프백(127.0.0.1·::1)에서만, 설정에 `proxy.apiKey`가 있으면 `x-api-key`(또는 `Authorization: Bearer`)가 그 값이어야 한다. 본문 없는 `POST`.
-- 응답: `200 {"ok":true,"total":<계정 수>}`(반영이 끝난 뒤 응답) · `401` 키 불일치 · `403` 원격 · `405`/`400` 메서드·본문 · `500 {"error":{"type":"account_sync_failed",…}}`.
+- 응답: `200 {"ok":true,"total":<계정 수>}`(계정 반영이 끝난 뒤 응답. 그 뒤 쿼터 다시 재기(codex·agy)는 기다리지 않는다) · `401` 키 불일치 · `403` 원격 · `405`/`400` 메서드·본문 · `500 {"error":{"type":"account_sync_failed",…}}`.
 - CLI `--json` 관리 명령(`login`·`enable`·`disable`·`priority`·`remove`)은 서버의 워커 pid를 확인할 수 없을 때(Windows는 늘 그렇다: lsof·ps가 없다) 이 경로를 써서 `applied:"live"`를 준다. 서버가 없으면 `config_only`, 이 경로가 없는 옛 서버면 `restart_required`. macOS는 확인된 워커가 있으면 지금처럼 SIGHUP을 쓴다(검증된 경로를 그대로 두고, 확인 못 할 때만 HTTP로 넘어간다).
 
 ### 로그인 취소

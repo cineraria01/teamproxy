@@ -7,9 +7,9 @@ import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCacheSync, normalizeTokenRefreshIntervalMs } from './config.js';
+import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCache, writeQuotaCacheSync, normalizeTokenRefreshIntervalMs } from './config.js';
 import { AccountManager } from './account-manager.js';
-import { createProxyServer } from './server.js';
+import { createProxyServer, keyMatches } from './server.js';
 import { applyLocalByokKey, normalizeByokConfig } from './byok.js';
 import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon } from './oauth.js';
 import {
@@ -521,7 +521,7 @@ async function superviseServerCommand() {
     if (req.url !== DEPLOYMENT_DRAIN_PATH) return false;
     if (!isLocal
         || !proxyApiKey
-        || req.headers['x-api-key'] !== proxyApiKey
+        || !keyMatches(req.headers['x-api-key'], proxyApiKey)
         || req.headers[LIFECYCLE_ID_HEADER] !== lifecycleId) {
       rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
         error: { type: 'permission_error', message: 'Deployment control requires the live local lifecycle identity.' },
@@ -613,8 +613,8 @@ async function superviseServerCommand() {
       });
       return;
     }
-    if (config.proxy?.apiKey && clientKey !== config.proxy.apiKey
-      && bearerKey !== config.proxy.apiKey && !isLocal) {
+    if (config.proxy?.apiKey && !keyMatches(clientKey, config.proxy.apiKey)
+      && !keyMatches(bearerKey, config.proxy.apiKey) && !isLocal) {
       rejectPublicRequest(req, res, 401, { 'content-type': 'application/json' }, {
         type: 'error',
         error: { type: 'authentication_error', message: 'Invalid proxy API key' },
@@ -1529,7 +1529,7 @@ async function proxyWorkerCommand() {
     if (cur) accountManager.currentIndex = cur.index;
     console.log(`[TeamClaude] Restored quota snapshot for ${quotaCache.accounts.length} account(s)`);
   }
-  const saveQuotaSnapshot = () => writeQuotaCacheSync({
+  const quotaSnapshot = () => ({
     savedAt: new Date().toISOString(),
     currentAccount: accountManager.accounts[accountManager.currentIndex]?.name || null,
     accounts: accountManager.exportQuotaState(),
@@ -1540,6 +1540,9 @@ async function proxyWorkerCommand() {
     // inside the listen callback.)
     probeTemplate: server.exportProbeTemplate?.() ?? null,
   });
+  // The minute timer writes async (a Windows rename retry must not stall requests); the exit write stays sync.
+  const saveQuotaSnapshot = () => writeQuotaCacheSync(quotaSnapshot());
+  const saveQuotaSnapshotAsync = () => { writeQuotaCache(quotaSnapshot()); };
 
   // Persist refreshed tokens back to config (re-read from disk to avoid clobbering
   // accounts added externally, e.g. by `teamcodex import` while server is running)
@@ -1711,7 +1714,9 @@ async function proxyWorkerCommand() {
       }
       await syncAccountsFromDisk(diskConfig, config, accountManager);
       if (agyMode) adoptAgyClientFromConfig(accountManager, diskConfig); // first login after a client-less start
-      if (codexMode || agyMode) await server.refreshQuotaAll();
+      // Not awaited: the accounts are applied now, and a slow quota probe must not hold the sync reply
+      // (the CLI's wait would run out and report restart_required for a change that did land).
+      if (codexMode || agyMode) server.refreshQuotaAll().catch(err => console.error(`[TeamClaude] Quota refresh after account sync failed: ${err.message}`));
       if (process.connected) {
         process.send({
           type: 'teamcodex:capacity',
@@ -1757,7 +1762,7 @@ async function proxyWorkerCommand() {
     // → server.close → process.exit) and every minute as a crash backstop
     // (a SIGKILL loses at most the last interval). The 'exit' write is sync.
     process.on('exit', saveQuotaSnapshot);
-    setInterval(saveQuotaSnapshot, 60_000).unref();
+    setInterval(saveQuotaSnapshotAsync, 60_000).unref();
     // Keep idle OAuth refresh chains rotating and retry refresh-caused errors.
     // A numeric 0 disables the sweep; malformed values use the 5-minute default.
     const tokenRefreshIntervalMs = normalizeTokenRefreshIntervalMs(config.tokenRefreshIntervalMs);
@@ -3688,6 +3693,10 @@ async function removeCommand() {
 /** POST /teamclaude/accounts/sync; true when the server applied the on-disk accounts. */
 async function requestAccountsSync(port, config) {
   try {
+    // An older server has no such route and would forward the POST upstream: ask only one that says so.
+    const status = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, { signal: AbortSignal.timeout(5_000) })
+      .then(r => r.json()).catch(() => null);
+    if (status?.accountsSync !== true) return false;
     const res = await fetch(`http://127.0.0.1:${port}/teamclaude/accounts/sync`, {
       method: 'POST',
       headers: config.proxy?.apiKey ? { 'x-api-key': config.proxy.apiKey } : undefined,
@@ -4059,6 +4068,7 @@ async function upsertOAuthAccount(name, creds, source = 'unknown') {
   });
   console.log(`${action} account "${name}"`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4302,6 +4312,7 @@ async function upsertAgyAccount(config, explicitName, creds, source) {
   });
   console.log(`${action} Antigravity account "${name}"${assist?.tierId ? ` (${assist.tierId})` : ''}`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4460,6 +4471,7 @@ async function upsertGrokAccount(config, explicitName, creds, source) {
   });
   console.log(`${action} Grok account "${name}"${user?.tier ? ` (${user.tier})` : ''}`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   return name;
 }
@@ -4512,6 +4524,7 @@ async function upsertCodexAccount(name, creds, source = 'unknown') {
   });
   console.log(`${action} Codex account "${name}"`);
   console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
   await noteRunningServerReload(savedConfig);
   await revokeReplacedCodexToken(replaced, creds, name);
   return name;
