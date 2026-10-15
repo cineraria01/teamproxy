@@ -1,5 +1,6 @@
 // Machine-readable output for app-managed installs (docs/install/APP-INSTALL.md):
 // account views for `<pool> accounts|status --json` and the line-JSON login events.
+import { fstatSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 export const machine = { json: false, cancelling: false, finished: false, saved: null, applied: null, needCodeMs: Number(process.env.TEAMPROXY_NEED_CODE_MS) || 20_000, cleanups: [],
@@ -69,8 +70,9 @@ export function errorCode(err) {
 
 /**
  * Switch a login run to line-JSON: events on stdout, human chatter to stderr.
- * Cancel = SIGTERM/SIGINT, a `{"cancel":true}` line on stdin, or stdin EOF (Windows has no SIGTERM
- * handler: the app closes the pipe or writes the line). Every other stdin line is a pasted code.
+ * Cancel = SIGTERM/SIGINT, a `{"cancel":true}` line on stdin, or EOF of a piped stdin (Windows has no
+ * SIGTERM handler: the app closes the pipe or writes the line). Every other stdin line is a pasted code.
+ * A stdin that is not a pipe (/dev/null, NUL, a file) ends at once, so its EOF is not a cancel.
  */
 export function enableMachineLogin() {
   machine.json = true;
@@ -95,7 +97,16 @@ export function enableMachineLogin() {
     }
     if (machine.onCode) machine.onCode(text); else machine.pendingCodes.push(text);
   });
-  lines.on('close', () => { if (!machine.finished) cancel(); });
+  if (stdinIsPipe()) lines.on('close', () => { if (!machine.finished) cancel(); });
+}
+
+function stdinIsPipe() {
+  try {
+    const stat = fstatSync(0);
+    return stat.isFIFO() || stat.isSocket(); // a Windows named pipe reports as a FIFO
+  } catch {
+    return false;
+  }
 }
 
 /** The app opens the browser itself: hand it the URL and say we are waiting. */

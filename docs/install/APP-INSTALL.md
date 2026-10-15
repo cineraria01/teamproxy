@@ -119,7 +119,7 @@
   - `--device-auth`를 주면 `{"event":"auth_url","url":"…","user_code":"ABCD-12345","browser_opened":false}`로 코드를 함께 준다(앱이 코드를 보여 주고 URL을 연다).
 - `need_code`: 20초(`TEAMPROXY_NEED_CODE_MS`) 안에 콜백이 없을 때 한 번. 이때 표준 입력으로 **인증 코드 또는 콜백 URL 한 줄**을 받는다(코드는 늘 받을 수 있다). teamcodex에는 이 경로가 없다.
 - 끝 줄 `done`. 오류 코드: `name_taken`(이미 있는 `--name`, 덮어쓰기·토큰 폐기를 막으려 거절)·`cancelled`·`login_timeout`·`state_mismatch`·`oauth_denied`·`token_exchange_failed`·`codex_not_found`·`login_failed`. 종료 코드는 성공 0, 실패 1.
-- 취소: SIGTERM/SIGINT, 표준 입력 한 줄 `{"cancel":true}`, 또는 표준 입력 EOF(앱이 파이프를 닫음). 셋 다 같은 정리를 한다: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`. 그래서 앱은 로그인 동안 표준 입력 파이프를 열어 둔다(`/dev/null`·닫힌 입력이면 곧바로 취소된다). `{`로 시작하는 줄은 코드로 읽지 않는다.
+- 취소: SIGTERM/SIGINT, 표준 입력 한 줄 `{"cancel":true}`, 또는 파이프로 받은 표준 입력의 EOF(앱이 파이프를 닫음). 셋 다 같은 정리를 한다: 자식 `codex`를 끄고 임시 `CODEX_HOME`을 지운 뒤 `{"done":true,"ok":false,"error":"cancelled"}`. 그래서 앱은 로그인 동안 표준 입력 파이프를 열어 둔다. 파이프가 아닌 표준 입력(`/dev/null`·`NUL`·파일)의 EOF는 취소로 보지 않는다(코드 붙여넣기만 못 한다). `{`로 시작하는 줄은 코드로 읽지 않는다.
 - 로그인이 끝나면 실행 중인 서버에 반영해(SIGHUP 또는 accounts/sync) 재시작 없이 새 계정을 쓴다(계정 0개로 떠 있던 서버도 같다). 성공 끝 줄에 `applied`(`live`·`config_only`·`restart_required`)가 붙는다: `{"done":true,"ok":true,"account":"claude-2","applied":"live"}`.
 
 ## 묶음 만들기
@@ -162,9 +162,9 @@ Windows에는 launchd·sh 래퍼·SIGHUP·SIGTERM 핸들러가 없다. 그래서
 `--app`과 `--status`의 끝 줄에서 설치된 풀마다 `run`(서버)과 `cli`(관리 명령 앞부분)를 준다. Windows 끝 줄에는 `label`·`loaded`가 없다(서비스가 없다).
 
 ```json
-{"done": true, "ok": true, "version": "1.4.0", "pools": {
+{"done": true, "ok": true, "version": "1.5.0", "pools": {
   "claude": {"port": 3456, "installed": true, "running": false, "config": "created",
-    "run": {"argv": ["C:\\Users\\me\\AppData\\Local\\Selvi\\teamproxy\\runtime\\node-v24.21.0\\node.exe", "C:\\…\\bundle\\teamproxy-app-1.4.0\\src\\teamclaude.js", "server"],
+    "run": {"argv": ["C:\\Users\\me\\AppData\\Local\\Selvi\\teamproxy\\runtime\\node-v24.21.0\\node.exe", "C:\\…\\bundle\\teamproxy-app-1.5.0\\src\\teamclaude.js", "server"],
             "env": {"TEAMCLAUDE_CONFIG": "C:\\Users\\me\\.config\\teamclaude.json"},
             "log": "C:\\Users\\me\\AppData\\Local\\Selvi\\teamproxy\\logs\\claude.log"},
     "cli": {"argv": ["…\\node.exe", "…\\src\\teamclaude.js"], "env": {"TEAMCLAUDE_CONFIG": "…\\teamclaude.json"}}},
