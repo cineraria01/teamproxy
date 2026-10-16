@@ -694,6 +694,18 @@ console.log(JSON.stringify({ args: process.argv.slice(2) }));
   }
 });
 
+test('run passes Claude subcommands through without a launch model', async () => {
+  for (const args of [['mcp', 'list'], ['plugin', 'install', 'x@y'], ['doctor']]) {
+    const result = await runModelFixture({ status: { accounts: [] }, args: ['--', ...args] });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, args);
+  }
+  // A prompt is not a subcommand: the launch model is still added.
+  const prompt = await runModelFixture({ status: { accounts: [] }, args: ['--', 'fix the mcp list'], modelFallbacks: {} });
+  assert.equal(prompt.status, 0, prompt.stderr);
+  assert.deepEqual(JSON.parse(prompt.stdout.trim()).args, ['fix the mcp list', '--model', 'claude-fable-5']);
+});
+
 test('run preserves every explicit Fable opt-in form', async t => {
   const status = { accounts: [] };
 
