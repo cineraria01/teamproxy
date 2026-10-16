@@ -2804,6 +2804,14 @@ function displayModel(model) {
 }
 
 async function syncLaunchModel(config, claudeArgs, childEnv) {
+  // Claude Code subcommands (`claude --help` Commands) reject `--model` ("unknown option '--model'"),
+  // so `teamclaude -- mcp list` must reach Claude unchanged. Kept local: run executes before module-level consts below it.
+  // ponytail: checks the first argument only and the list follows Claude Code by hand; `claude --debug mcp list` still gets --model.
+  const subcommands = [
+    'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install', 'kill', 'logs',
+    'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade',
+  ];
+  if (subcommands.includes(claudeArgs[0])) return;
   const explicitModel = modelArgValue(claudeArgs) || childEnv.ANTHROPIC_MODEL || null;
   const configuredModel = typeof config.launchModel === 'string'
       && config.launchModel.length > 0
