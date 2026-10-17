@@ -136,7 +136,9 @@ test('buildCodexProxyArgs uses a login-free HTTP-only local provider', () => {
   assert.doesNotMatch(args[3], /env_key/);
   // image_gen is only offered to an OpenAI-auth or actor-authorized provider
   assert.match(args[3], /http_headers = \{ "x-openai-actor-authorization" = "teamcodex" \}/);
-  assert.equal(args.some(arg => arg.startsWith('chatgpt_base_url=')), false);
+  // ChatGPT services (codex_apps MCP, plugins, analytics) ride the pool too
+  assert.equal(args[4], '-c');
+  assert.equal(args[5], 'chatgpt_base_url="http://127.0.0.1:4567/backend-api/"');
 });
 
 test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then PATH', () => {
@@ -244,6 +246,8 @@ test('buildCodexProxyArgs router mode points Codex at the router capability URL,
   // And: the plain pool launch is unchanged and sends no placeholder bearer
   assert.match(buildCodexProxyArgs(4567, userArgs)[3], /base_url = "http:\/\/127\.0\.0\.1:4567\/codex"/);
   assert.doesNotMatch(buildCodexProxyArgs(4567, userArgs)[3], /"authorization"/);
+  // ChatGPT services go straight to the pool proxy in router mode as well
+  assert.equal(args[5], 'chatgpt_base_url="http://127.0.0.1:4567/backend-api/"');
 });
 
 test('resolveCodexRouter is off by default and embeds the caller key from config, env, or file', () => {

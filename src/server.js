@@ -3283,12 +3283,20 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     headers['x-api-key'] = account.credential;
   }
 
+  // Codex's chatgpt_base_url (codex_apps MCP, plugins, analytics) points at
+  // <proxy>/backend-api/, so those requests carry the pool account's token
+  // instead of the local auth.json one. They go to the configured upstream's
+  // origin (chatgpt.com) with the path kept as-is, and are not inference: their
+  // 401/429 pass through without parking, throttling or a global cooldown.
+  const chatgptBackend = ctx.provider === 'codex' && req.url.startsWith('/backend-api/');
   const hasDuplicatedCodexPrefix = ctx.provider === 'codex'
     && /\/codex\/?$/.test(new URL(upstream).pathname)
     && req.url.startsWith('/codex/');
-  const upstreamUrl = hasDuplicatedCodexPrefix
-    ? `${upstream.replace(/\/$/, '')}${req.url.slice('/codex'.length)}`
-    : `${upstream}${req.url}`;
+  const upstreamUrl = chatgptBackend
+    ? `${new URL(upstream).origin}${req.url}`
+    : hasDuplicatedCodexPrefix
+      ? `${upstream.replace(/\/$/, '')}${req.url.slice('/codex'.length)}`
+      : `${upstream}${req.url}`;
   const method = req.method;
   const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
   const metadataOnlyLog = ctx.provider === 'codex';
@@ -3435,7 +3443,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // excluded from BOTH selection and warm-up, then switch to another account.
     // Without this, warm-up would keep routing client traffic to a revoked
     // account (it stays unmeasured/active), yielding repeated 401s.
-    if (upstreamRes.status === 401) {
+    if (upstreamRes.status === 401 && !chatgptBackend) {
       await upstreamRes.body?.cancel();
 
       if (account.type === 'oauth' && account.refreshToken
@@ -3817,7 +3825,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // fleet would mark every account throttled and break unrelated requests.
     // isExhausted() (checked after updateQuota folds in the 429 headers)
     // distinguishes them.
-    if (upstreamRes.status === 429) {
+    if (upstreamRes.status === 429 && !chatgptBackend) {
       let retryAfter = parseInt(upstreamRes.headers.get('retry-after'), 10);
       if (Number.isNaN(retryAfter)) retryAfter = 60;
       retryAfter = Math.min(Math.max(retryAfter, 1), 300); // clamp [1s, 5m]

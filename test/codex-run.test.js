@@ -81,7 +81,7 @@ console.log(JSON.stringify({
     assert.equal(child.args[1], 'model_provider="teamcodex_proxy"');
     assert.match(child.args[3], /requires_openai_auth = false/);
     assert.match(child.args[3], /supports_websockets = false/);
-    assert.equal(child.args.some(arg => arg.startsWith('chatgpt_base_url=')), false);
+    assert.equal(child.args[5], 'chatgpt_base_url="http://127.0.0.1:4567/backend-api/"');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

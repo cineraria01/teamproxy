@@ -66,7 +66,10 @@ CLI는 자기 설치 폴더에서 뜬 서버만 알아본다. 래퍼의 경로�
 
 포크에 기존 로컬 패치 05가 반영되어 별도 패치가 필요 없다.
 추론 요청은 `model_providers.teamcodex_proxy.base_url`로 보내고,
-`chatgpt_base_url`은 덮어쓰지 않아 Codex의 ChatGPT 부가 기능 주소를 유지한다.
+`chatgpt_base_url`은 `http://127.0.0.1:<포트>/backend-api/`로 바꿔 ChatGPT 앱(codex_apps MCP)·플러그인 목록·분석 이벤트도
+프록시를 거쳐 풀 계정 토큰으로 `https://chatgpt.com/backend-api/*`에 간다. 로컬 `~/.codex/auth.json`이 만료돼도
+`codex_apps MCP: HTTP 401` 경고가 나지 않는다(2026-10-17). 이 경로의 401·429는 계정을 막거나 쉬게 하지 않고 그대로 넘긴다.
+(2026-09-27에 뺐던 옛 값 `http://127.0.0.1:<포트>`는 `/backend-api`가 없어 상류 주소가 틀렸다.)
 
 ### 1-2. Claude 풀 래퍼 `~/.local/bin/teamclaude` 만들기
 
@@ -364,7 +367,7 @@ cd ~/some-project && teamgrok                                        # grok 화�
 ## 7. 최종 점검표
 
 - [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.5.0`
-- [ ] `buildCodexProxyArgs`가 `chatgpt_base_url` 옵션을 추가하지 않음 — 포크의 `test/codex.test.js`, `test/codex-run.test.js`로 검증
+- [ ] `buildCodexProxyArgs`가 `chatgpt_base_url="http://127.0.0.1:<포트>/backend-api/"`를 넣음 — 포크의 `test/codex.test.js`, `test/codex-run.test.js`, `test/server-codex-backend-api.test.js`로 검증
 - [ ] `launchctl list | grep -E 'teamclaude|teamcodex|teamagy'` 두 줄(teamagy를 했으면 세 줄), 상태 0
 - [ ] `teamclaude status`·`teamcodex status`에 계정이 보이고 `curl` status 200
 - [ ] `claude -p "OK" --model claude-fable-5-1` 응답, 하단 상태라인 표시

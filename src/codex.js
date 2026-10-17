@@ -420,6 +420,12 @@ export function buildCodexProxyArgs(port, userArgs, { routerBaseUrl = null } = {
     'model_provider="teamcodex_proxy"',
     '-c',
     `model_providers.teamcodex_proxy={ ${provider} }`,
+    // codex_apps MCP, plugin lists and analytics use chatgpt_base_url with the
+    // local auth.json token; through the proxy they get the pool account's
+    // (default "https://chatgpt.com/backend-api/", so keep /backend-api/).
+    // Router mode points here too: loopback callers need no proxy key.
+    '-c',
+    `chatgpt_base_url="http://127.0.0.1:${port}/backend-api/"`,
   ];
   if (userArgs[0] === 'resume') {
     return [...userArgs, ...overrides];
