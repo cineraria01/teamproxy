@@ -43,7 +43,9 @@ function request(port, method = 'POST', model = 'claude-fable-5') {
   });
 }
 
-test('pre-response network error does not replay an unsafe POST', async () => {
+test('pre-response network error does not replay an unsafe POST', async (t) => {
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   const authsSeen = [];
   const bodiesSeen = [];
   const upstream = http.createServer(async (req, res) => {
@@ -75,6 +77,8 @@ test('pre-response network error does not replay an unsafe POST', async () => {
       'Upstream connection failed after dispatch. Request was not replayed.',
     );
     assert.equal(authsSeen.length, 1, 'an ambiguous POST must not be replayed internally');
+    assert.ok(errors.some(line => /request 1, (UND_ERR_SOCKET|ECONNRESET)/.test(line)),
+      `network failures must include the request number and transport code: ${errors.join('\n')}`);
     assert.deepEqual(bodiesSeen, [{
       model: 'claude-fable-5',
       messages: [{ role: 'user', content: 'hi' }],

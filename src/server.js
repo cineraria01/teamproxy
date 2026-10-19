@@ -4515,7 +4515,8 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
       return;
     }
 
-    console.error(`[TeamClaude] Upstream error (account "${account.name}"):`, err.message);
+    const transportCode = err.cause?.code || err.code || err.name || 'unknown';
+    console.error(`[TeamClaude] Upstream error (account "${account.name}", request ${reqId}, ${transportCode}):`, err.message);
 
     if (logDir) {
       appendLogSection(metadataOnlyLog

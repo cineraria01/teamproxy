@@ -164,7 +164,7 @@ ${pair('Label', L.label(pool), '  ')}  <key>ProgramArguments</key>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
   <key>EnvironmentVariables</key>
   <dict>
 ${pair('HOME', L.home, '    ')}${pair('PATH', path, '    ')}  </dict>

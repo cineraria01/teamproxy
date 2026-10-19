@@ -83,6 +83,19 @@ message = API Error: 502 Upstream connection failed after dispatch. Request was 
 실행 중인 supervised Claude 세션 안에서 `teamclaude stop` 또는 `restart`를 실행하지
 마세요. 해당 명령은 거부되며, 의도적인 재시작은 별도 터미널에서 수행합니다.
 
+### macOS 실행 등급과 연결 오류 진단
+
+launchd 프록시는 `ProcessType: Standard`로 설치합니다. `Background`는 호스트 부하가
+높을 때 CPU와 I/O를 강하게 제한해 상태 조회와 시작도 지연시킬 수 있습니다.
+앱 설치기를 다시 실행하면 이전 `Background` 설정도 `Standard`로 정정합니다.
+수동 설치는 `docs/install/INSTALL-ALL.md`의 launchd 설정을 따릅니다.
+
+연결 실패 로그의 `request <번호>, <코드>`로 같은 요청의 활동 기록과 대조합니다.
+예를 들어 `UND_ERR_SOCKET`은 소켓 단절, `UND_ERR_CONNECT_TIMEOUT`은 연결 시간
+초과, `ENOTFOUND`는 이름 해석 실패를 구분합니다. 코드는 최초 장애 원인을
+단정하는 근거가 아니며, 정상 실행 등급도 upstream 장애를 막지는 못합니다.
+오류를 숨기기 위해 원본 POST의 자동 재전송이나 safe-reopen 예산을 늘리지 않습니다.
+
 ## 재발 검증
 
 ```bash

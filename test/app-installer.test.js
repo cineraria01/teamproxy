@@ -120,6 +120,7 @@ test('--app installs wrappers, config, launchd agents and nothing else', () => {
     assert.ok(plist.includes(`<string>${wrapper}</string>\n    <string>server</string>`));
     assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/);
     assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/);
+    assert.match(plist, /<key>ProcessType<\/key>\s*<string>Standard<\/string>/);
     assert.ok(plist.includes(join(t.home, 'Library/Logs/teamproxy', `${pool}.log`)));
     assert.ok(plist.includes(`${join(t.dir, 'noderoot/bin')}:`), 'launchd PATH starts with the node folder');
     assert.equal(existsSync(join(t.launchd, labelOf(pool))), true);
@@ -150,6 +151,20 @@ test('rerun is idempotent; an older recorded version is reinstalled and restarte
   writeFileSync(manifest, JSON.stringify(data));
   const update = Object.fromEntries(app(['--app']).steps.filter(s => s.status !== 'start').map(s => [s.step, s.status]));
   assert.deepEqual([update['npm:codex'], update['launchd:codex'], update['npm:claude']], ['ok', 'ok', 'skip']);
+});
+
+test('rerun repairs a Background agent without reinstalling the package', () => {
+  app(['--app', '--pools', 'claude']);
+  const path = join(t.home, 'Library/LaunchAgents', `${labelOf('claude')}.plist`);
+  writeFileSync(path, plistOf('claude').replace('<string>Standard</string>', '<string>Background</string>'));
+  const boots = calls().split('bootstrap').length;
+
+  const { steps, done } = app(['--app', '--pools', 'claude']);
+  assert.equal(done.ok, true);
+  assert.equal(steps.find(s => s.step === 'npm:claude' && s.status !== 'start').status, 'skip');
+  assert.equal(steps.find(s => s.step === 'launchd:claude' && s.status !== 'start').status, 'ok');
+  assert.match(plistOf('claude'), /<key>ProcessType<\/key>\s*<string>Standard<\/string>/);
+  assert.equal(calls().split('bootstrap').length, boots + 1);
 });
 
 test('a launch agent from someone else running the same command is a conflict', () => {

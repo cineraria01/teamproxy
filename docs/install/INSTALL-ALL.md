@@ -281,7 +281,7 @@ for label, wrapper, out in [
         'Label': label,
         'ProgramArguments': [str(home/'.local/bin'/wrapper)],
         'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10,
-        'ProcessType': 'Background',
+        'ProcessType': 'Standard',
         'EnvironmentVariables': {'HOME': str(home), 'PATH': path_env},
         'StandardOutPath': str(out), 'StandardErrorPath': str(out),
     }, p.open('wb'))
