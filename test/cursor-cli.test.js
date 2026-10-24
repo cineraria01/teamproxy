@@ -293,6 +293,7 @@ test('the real server: the public port takes HTTP/1.1 and cursor-agent\'s h2c st
   agent.on('stream', (stream, headers) => {
     if (headers['x-hold']) {
       stream.respond({ ':status': 200, 'content-type': 'application/connect+proto' });
+      stream.write(Buffer.from([0, 0, 0, 0, 1, 9])); // one data frame: the stream is committed to the client
       hold.then(() => stream.end());
       return;
     }
@@ -367,6 +368,7 @@ test('the real server: the public port takes HTTP/1.1 and cursor-agent\'s h2c st
     const holder = http2.connect(`http://[::1]:${port}`);
     const held = holder.request({ ':method': 'POST', ':path': '/agent.v1.AgentService/Run', 'content-type': 'application/connect+proto', 'x-hold': '1' });
     held.on('error', () => {});
+    held.resume(); // consume it, or it never reaches 'close'
     held.write(first);
     let seen = null;
     for (let i = 0; i < 50 && seen !== '1'; i++) {
@@ -374,6 +376,28 @@ test('the real server: the public port takes HTTP/1.1 and cursor-agent\'s h2c st
       seen = await activeRequests();
     }
     assert.equal(seen, '1');
+    // A drain reply comes after the worker stopped taking h2 streams, and counts the live one.
+    const state = JSON.parse(await readFile(join(dir, 'teamcursor.server.json'), 'utf8'));
+    const drain = await new Promise((resolve, reject) => {
+      const req = http.request(`http://127.0.0.1:${port}/teamclaude/deployment/drain`, {
+        method: 'POST', agent: false,
+        headers: { 'x-api-key': 'proxy-key', 'x-teamcodex-lifecycle-id': state.lifecycle.id, 'content-length': '0' },
+      }, res => { let body = ''; res.on('data', c => { body += c; }); res.on('end', () => resolve(JSON.parse(body))); });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.deepEqual(drain, { draining: true, activeRequests: 1 });
+    const refusedSession = http2.connect(`http://127.0.0.1:${port}`);
+    const refused = await new Promise((resolve, reject) => {
+      const req = refusedSession.request({ ':method': 'POST', ':path': '/agent.v1.AgentService/Run', 'content-type': 'application/connect+proto' });
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+      req.on('error', reject);
+      req.end(first);
+    });
+    refusedSession.close();
+    assert.equal(JSON.parse(refused.subarray(5).toString()).error.code, 'unavailable');
     releaseHold();
     held.end();
     await new Promise(resolve => held.on('close', resolve));

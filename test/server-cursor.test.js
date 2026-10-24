@@ -487,3 +487,25 @@ test('HTTP/1.1 agent RPCs go to the agent upstream; --log-to never writes x-blob
     await rm(logDir, { recursive: true, force: true });
   }
 });
+
+test('headers but no byte before the upstream ends: not an empty 200 — the next account serves', async () => {
+  for (const code of [http2.constants.NGHTTP2_NO_ERROR, http2.constants.NGHTTP2_CANCEL]) {
+    const agent = await agentUpstream((call, stream) => {
+      if (call.account !== 'a') return false;
+      stream.on('error', () => {});
+      stream.respond({ ':status': 200, 'content-type': 'application/connect+proto' });
+      setTimeout(() => (code === http2.constants.NGHTTP2_NO_ERROR ? stream.end() : stream.close(code)), 20);
+      return true;
+    });
+    const { manager, proxy, h2 } = await cursorProxy([cursorAccount('a'), cursorAccount('b')], { agent: agent.url });
+    try {
+      const result = await runStream(h2, { parts: ['once'] });
+      assert.equal(result.headers['x-served-by'], 'b', `code ${code}`);
+      assert.deepEqual(result.body, Buffer.concat([frame('echo:once'), frame('{}', 2)]));
+      await settle(50);
+      assert.deepEqual(manager.accounts.map(a => a.inflight), [0, 0]);
+    } finally {
+      await closeAll(proxy.cursorH2, proxy, agent.server);
+    }
+  }
+});

@@ -466,9 +466,20 @@ async function superviseServerCommand() {
   // cursor: h2 agent streams the worker relays (tunnelled, so invisible here) — reported over IPC.
   let workerH2Streams = 0;
   const activeRequests = () => activePublicRequests + workerH2Streams;
-  const tellWorkerDraining = () => {
-    try { if (worker?.connected) worker.send({ type: 'teamcodex:draining', draining: deploymentDraining }); } catch { /* replaced worker */ }
-  };
+  // Resolves once the worker has applied the drain state (its ack carries its live h2 stream
+  // count), so a drain reply never counts before the worker stopped taking new h2 streams.
+  let drainAck = null;
+  const tellWorkerDraining = () => new Promise(resolve => {
+    const done = () => { clearTimeout(timer); if (drainAck === done) drainAck = null; resolve(); };
+    const timer = setTimeout(done, 1000); // no answer (no worker, old worker): count what we know
+    timer.unref?.();
+    drainAck?.();
+    drainAck = done;
+    try {
+      if (worker?.connected) worker.send({ type: 'teamcodex:draining', draining: deploymentDraining });
+      else done();
+    } catch { done(); }
+  });
   let activeBufferedRequestBytes = 0;
   let restartCount = 0;
   let restartTimer = null;
@@ -570,11 +581,10 @@ async function superviseServerCommand() {
       }, deploymentDrainLeaseMs);
       deploymentDrainTimer.unref?.();
     }
-    tellWorkerDraining();
-    rejectPublicRequest(req, res, 200, { 'content-type': 'application/json' }, {
+    tellWorkerDraining().then(() => rejectPublicRequest(req, res, 200, { 'content-type': 'application/json' }, {
       draining: deploymentDraining,
       activeRequests: activeRequests(),
-    });
+    }));
     return true;
   }
 
@@ -1185,8 +1195,10 @@ async function superviseServerCommand() {
         requestShutdown({ workerWillExit: true });
         return;
       }
-      if (message?.type === 'teamcodex:h2-streams' && Number.isFinite(message.count)) {
+      if ((message?.type === 'teamcodex:h2-streams' || message?.type === 'teamcodex:draining-ack')
+          && Number.isFinite(message.count)) {
         workerH2Streams = Math.max(0, Math.floor(message.count));
+        if (message.type === 'teamcodex:draining-ack') drainAck?.();
         return;
       }
       if (message?.type === 'teamcodex:capacity'
@@ -1246,6 +1258,7 @@ async function superviseServerCommand() {
         worker = null;
         workerReady = false;
         workerPort = null;
+        workerH2Streams = 0; // its h2 streams died with it
       }
       clearTimeout(stableTimer);
       if (stopping) {
@@ -1456,7 +1469,8 @@ async function superviseServerCommand() {
     // cursor: `localhost` binds both loopbacks explicitly (cursor-agent tries ::1 first).
     const bindHost = cursorSniffer && host === 'localhost' ? '127.0.0.1' : host;
     if (cursorSniffer && (host === '0.0.0.0' || host === '::')) {
-      console.error(`[TeamCursor] proxy.host ${host} exposes the pool beyond this machine; cursor-agent only needs localhost.`);
+      console.error(`[TeamCursor] proxy.host ${host} exposes the pool beyond this machine; cursor-agent only needs localhost.`
+        + (host === '0.0.0.0' ? ' 0.0.0.0 does not listen on ::1, so cursor-agent\'s h2 (localhost) connection cannot reach it.' : ''));
     }
     publicServer.listen(...(bindHost ? [port, bindHost] : [port]), () => {
       publicServer.removeListener('error', onListenError);
@@ -1924,6 +1938,9 @@ async function proxyWorkerCommand() {
   process.on('message', message => {
     if (message?.type === 'teamcodex:draining') {
       server.setDraining?.(message.draining === true);
+      try {
+        if (process.connected) process.send({ type: 'teamcodex:draining-ack', count: server.cursorStreamCount?.() ?? 0 });
+      } catch { /* supervisor gone */ }
       return;
     }
     if (message?.type !== 'teamcodex:ping' || !process.connected) return;

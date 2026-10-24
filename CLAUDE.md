@@ -33,6 +33,8 @@ node src/index.js grok server      # same command set as agy; login = xAI device
 node src/index.js cursor server    # same command set as grok; login = Cursor browser flow (poll)
 ```
 
+Under a teamclaude-supervised session (`TEAMCLAUDE_SESSION_SUPERVISED=1` is inherited) `run-env`/`run-recovery` tests fail; run the suite as `env -u TEAMCLAUDE_SESSION_SUPERVISED -u TEAMCLAUDE_HUD -u TMUX -u TMUX_PANE npm test`.
+
 `config.json` is gitignored; `config.example.json` is the template. To exercise the proxy end-to-end, start `server` in one terminal and `node src/index.js run` (or `eval $(node src/index.js env)` then `claude`) in another.
 
 ## Hard constraints (do not break these)

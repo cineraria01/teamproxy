@@ -1370,6 +1370,9 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       });
       up.on('trailers', t => { if (committed) trailers = t; });
       up.on('end', () => {
+        // Headers but not one byte before the end (an RST CANCEL/NO_ERROR): an empty 200 without an end
+        // frame would leave cursor-agent hanging — treat it like a lost upstream.
+        if (!committed && responseHeaders && heldBytes === 0 && streaming && agent) return upstreamLost();
         if (!committed) decide(null); // no headers yet → upstreamLost
         if (!committed || upstreamStream !== up) return; // replaying elsewhere, or handled
         stream.end();
@@ -2641,6 +2644,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // port to the supervisor, which tunnels cursor-agent's h2 connections here).
   if (provider === 'cursor') {
     server.setDraining = draining => { cursorDraining = draining === true; };
+    server.cursorStreamCount = () => cursorStreams.size;
     server.cursorH2 = http2.createServer();
     server.cursorH2.on('stream', handleCursorStream);
     server.cursorH2.on('sessionError', () => { /* a broken client session only ends its own streams */ });
