@@ -68,13 +68,24 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
 ## How a completion runs
 
 1. Pool check (above). Concurrency check.
-2. The lane home `<dir>/home` (created once, 0700, kept across requests and restarts so only the first run is cold)
-   gets `CURSOR_LANE_PERMISSIONS` in `home/.config/cursor/cli-config.json` (see Security).
+2. The lane folder `<dir>` (`home/`, `workspace/`, 0700) is made if missing **before every run** — it is kept across
+   requests and restarts so only the first run is cold, and deleting it while idle is safe (the next request
+   rebuilds it). Then the tool fence is written where it differs (see Security): `home/.config/cursor/cli-config.json`
+   and `home/.cursor/hooks.json`.
 3. `cursor-agent --disable-codebase-ref --disable-indexing --disable-auto-update --disable-project-configs -p
-   --output-format json --mode ask --trust [--model <id>] --workspace <dir>/workspace`, prompt on stdin, env:
-   the proxy's own environment minus `TEAMCLAUDE_*`, `TMUX*`, `CURSOR_AUTH_TOKEN`, `CURSOR_API_BASE_URL`,
-   `CURSOR_WEBSITE_URL`, plus `HOME`/`XDG_*` = lane home, `CURSOR_API_ENDPOINT=http://localhost:<public port>/teamcursor-lane`,
+   --output-format json --mode ask --trust [--model <id>] --workspace <dir>/workspace`, prompt on stdin. The env is
+   **an allowlist** of the proxy's own (`PATH`, `TMPDIR`/`TMP`/`TEMP`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `USER`,
+   `LOGNAME`, `SHELL`, the `*_proxy` variables, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`/`_DIR`, and the Windows system
+   variables; case-insensitive), plus `HOME`/`XDG_*` = lane home, `CURSOR_CONFIG_DIR=<home>/.config/cursor`,
+   `CURSOR_DATA_DIR=<home>/.cursor`, `CURSOR_API_ENDPOINT=http://localhost:<public port>/teamcursor-lane`,
    `CURSOR_API_KEY=<per-process random key>`, `AGENT_CLI_CREDENTIAL_STORE=memory`, `DIRENV_DISABLE=1`, `NO_COLOR=1`.
+   Why an allowlist: the bundle reads 100+ `CURSOR_*` / `AGENT_CLI_*` / `EXEC_DAEMON_*` switches, and
+   `CURSOR_CONFIG_DIR` / `CURSOR_DATA_DIR` win over `XDG_CONFIG_HOME` / `HOME` (`cursor-config/dist/paths.js`), so an
+   inherited one would have moved the lane's config — and the fence — to the user's `~/.cursor` (2026-10-25 audit).
+   Measured: a dev pool started with `CURSOR_CONFIG_DIR=CURSOR_DATA_DIR=~/.cursor` and
+   `AGENT_CLI_CREDENTIAL_STORE=file` left `~/.cursor` byte-identical and wrote no `auth.json` anywhere.
+   A spawn `ENOENT` while the workspace is gone (deleted mid-run) is a 502 about the lane folder, not
+   `cursor_cli_not_found` (spawn reports a missing cwd as ENOENT too).
 4. The child exchanges its key at the lane (`POST /teamcursor-lane/auth/exchange_user_api_key`, answered by the
    worker with an unsigned look-alike session JWT, `sub teamcursor|lane`), then every API call and its agent stream
    come back through `/teamcursor-lane/…`: the worker strips the prefix and relays them exactly like `teamcursor run`
@@ -84,7 +95,10 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
    account's plugins were 164 MB and 4 min on a fresh home, and their hooks/rules would ride every turn.
 5. Reply = cursor-agent's `result` text: the first JSON object `{"tool_calls":[…]}` with offered names, or
    `{"content":"…"}`, found anywhere in the text (Cursor user rules prepend a header such as `현재 사용 모델: …`);
-   no usable JSON → the text itself.
+   no usable JSON → the text itself. One pass finds the balanced `{…}` spans (quotes count only inside braces),
+   outermost first, and at most 64 are tried with `JSON.parse` — linear time. The first draft rescanned from every
+   `{` (quadratic: 80 000 `{` took 5.4 s on the worker's event loop, enough for a reply provoked by web text to stall
+   every other stream); four 80 000-character floods now parse in 62 ms together (test).
 6. Chats (`home/.config/cursor/chats/<hash>/<id>`) and transcripts (`home/.cursor/projects/<ws>/agent-transcripts/<id>`)
    older than 1 h are deleted after each run (they hold the prompts).
 7. The client hanging up aborts the run: SIGTERM, SIGKILL after 5 s. `cursor-agent` is a bash script that `exec`s
@@ -128,8 +142,24 @@ the lane test will not catch that, the run time (+30 s) and the dialog will.
   `permissions: {allow: [], deny: ["Read(**)", "Write(**)"]}` (written before each run when it differs; cursor-agent
   keeps a list it finds). Measured after the change: `Read` → "Permission denied" (also for a dot directory), `Grep`
   → "No matches found", `Shell` (`ls`, `cat`) → "Rejected" (the CLI's default allowlist `Shell(ls)` is gone). The
-  model still sees the tool list; only execution is refused. Web search/fetch were not fenced (they run on Cursor's
-  side and can only see what the prompt already contains).
+  model still sees the tool list; only execution is refused.
+- **Second layer: a hook that blocks every local tool.** `home/.cursor/hooks.json` (cursor-agent's user hooks file,
+  `homedir()/.cursor/hooks.json`) holds `{"version":1,"hooks":{"preToolUse":[{"command":"exit 2","failClosed":true}]}}`
+  — no matcher, so every tool cursor-agent executes locally is refused before it runs (exit code 2 = block). The lane
+  needs no local tool; this also covers tools the permission list does not name. Measured: `Read` and `Grep` now
+  answer `Hook "exit 2" blocked this action`, and a logging hook confirmed that preToolUse fires in the lane for
+  local tools.
+- **Web fetch (2026-10-25 audit).** The bundle registers a local Fetch executor that calls `fetch(url)` with no
+  permission check (`this.register(a.IGA, yl(new Ea))`, `LocalFetchExecutor`). Measured with a loopback bait HTTP
+  server (random port, logs every request) and five probes asking to fetch and quote it: **0 requests reached the
+  bait**. The model's web fetch is a server-side dynamic tool (`GetDynamicTools` / `CallDynamicTool` `WebFetch`):
+  `http://127.0.0.1:<port>` → "Cannot fetch from localhost … this tool runs from an isolated server";
+  `http://127.0.0.1.nip.io:<port>` (resolves to 127.0.0.1) and `https://example.com` → "Web fetch rejected: User
+  Rejected" — print mode cannot approve, and the lane pins `approvalMode: "allowlist"` and
+  `autoAcceptWebSearch: false` in `cli-config.json` to keep it that way; `gpt-5.3-codex-low` and
+  `claude-opus-5-thinking-high` reported no web fetch tool at all. The preToolUse hook saw no `Fetch` in those runs,
+  so the local executor never ran; if it ever does, the hook above blocks it. What a server-side fetch can reach is
+  only what the prompt already contains.
 - The lane home holds cursor-agent's settings, `authInfo` (email, user id from `GetMe`), chats ≤ 1 h old; `0700`.
 
 ## Measured (2026-10-25, owner's Mac, real Ultra account, dev pool on 3470 with a copied config)

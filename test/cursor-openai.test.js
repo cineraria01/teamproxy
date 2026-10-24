@@ -4,18 +4,19 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AccountManager } from '../src/account-manager.js';
 import { createProxyServer } from '../src/server.js';
 import {
+  CURSOR_LANE_HOOKS,
   CURSOR_LANE_PERMISSIONS,
   buildCursorPrompt,
   chatCompletion,
   chatCompletionSse,
   cursorPoolProblem,
-  enforceLanePermissions,
+  enforceLaneConfig,
   isCursorLanePath,
   isCursorOpenAIPath,
   laneEnv,
@@ -103,6 +104,24 @@ test('reply: tool calls or text out of whatever cursor-agent printed around the 
   assert.deepEqual(parseCursorReply('{"content":"{\\"a\\":1}"}'), { content: '{"a":1}' }, 'JSON text inside content stays text');
   assert.deepEqual(parseCursorReply('just words'), { content: 'just words' });
   assert.deepEqual(parseCursorReply('{"a":1}'), { content: '{"a":1}' }, 'a bare JSON answer is the text');
+  assert.deepEqual(parseCursorReply('모델: 5" 화면 } 끝\n{"content":"ok"}'), { content: 'ok' }, 'quotes and braces outside an object do not count');
+  assert.deepEqual(parseCursorReply('{ draft\n{"content":"ok"}'), { content: 'ok' }, 'an unclosed brace before the answer');
+  assert.deepEqual(parseCursorReply('{"outer":{"content":"inner"}}'), { content: 'inner' }, 'nested objects are tried after the outer one');
+});
+
+test('reply parsing stays linear on brace floods (a reply the web text could provoke)', () => {
+  const floods = [
+    '{'.repeat(80_000),
+    '{"a":'.repeat(16_000) + '1' + '}'.repeat(16_000),
+    '{}'.repeat(40_000),
+    `${'{"x":"'.repeat(13_000)}{"content":"ok"}`,
+  ];
+  for (const text of floods) {
+    const started = Date.now();
+    parseCursorReply(text, ['ping']);
+    const ms = Date.now() - started;
+    assert.ok(ms < 1000, `${text.slice(0, 12)}… (${text.length} chars) took ${ms} ms`); // the per-{ rescan: 5 s for the first
+  }
 });
 
 test('chat.completion and its SSE form', () => {
@@ -147,33 +166,49 @@ test('pool problem: no account or no working login → 401, all throttled → 42
   assert.equal(cursorPoolProblem([{ ...ok, status: 'exhausted' }], now).retryAfter, 60);
 });
 
-test('lane env: memory credential store (no macOS keychain dialog), lane endpoint, nothing of the parent pool', () => {
-  const env = laneEnv({ PATH: '/bin', HOME: '/Users/me', TEAMCLAUDE_PROVIDER: 'cursor', TEAMCLAUDE_CONFIG: '/c.json', CURSOR_AUTH_TOKEN: 'real', TMUX: 'x' },
-    { port: 3460, home: '/lane/home', apiKey: 'key_1', platform: 'darwin' });
+test('lane env: memory credential store (no macOS keychain dialog), lane paths pinned, only an allowlist of the parent', () => {
+  const env = laneEnv({
+    PATH: '/bin', HOME: '/Users/me', LANG: 'ko_KR.UTF-8', LC_ALL: 'C', https_proxy: 'http://proxy:8080', TMPDIR: '/tmp/x',
+    CURSOR_CONFIG_DIR: '/Users/me/.cursor', CURSOR_DATA_DIR: '/Users/me/.cursor', AGENT_CLI_CREDENTIAL_STORE: 'file',
+    AGENT_CLI_LOAD_HISTORY: '1', EXEC_DAEMON_MCP_ENABLED: 'true', CURSOR_AUTH_TOKEN: 'real', CURSOR_API_BASE_URL: 'x',
+    TEAMCLAUDE_PROVIDER: 'cursor', TEAMCLAUDE_CONFIG: '/c.json', TMUX: 'x', NODE_OPTIONS: '--require /evil.js', SSH_AUTH_SOCK: '/s',
+  }, { port: 3460, home: '/lane/home', apiKey: 'key_1', platform: 'darwin' });
   assert.equal(env.AGENT_CLI_CREDENTIAL_STORE, 'memory');
   assert.equal(env.HOME, '/lane/home');
   assert.equal(env.XDG_CONFIG_HOME, '/lane/home/.config');
+  assert.equal(env.CURSOR_CONFIG_DIR, '/lane/home/.config/cursor', 'it wins over XDG_CONFIG_HOME in cursor-agent');
+  assert.equal(env.CURSOR_DATA_DIR, '/lane/home/.cursor', 'it wins over HOME in cursor-agent');
   assert.equal(env.CURSOR_API_ENDPOINT, 'http://localhost:3460/teamcursor-lane', 'localhost: the agent stream comes here too');
   assert.equal(env.CURSOR_API_KEY, 'key_1');
-  assert.equal(env.PATH, '/bin');
-  for (const key of ['TEAMCLAUDE_PROVIDER', 'TEAMCLAUDE_CONFIG', 'CURSOR_AUTH_TOKEN', 'TMUX']) assert.equal(key in env, false, key);
+  for (const [key, value] of [['PATH', '/bin'], ['LANG', 'ko_KR.UTF-8'], ['LC_ALL', 'C'], ['https_proxy', 'http://proxy:8080'], ['TMPDIR', '/tmp/x']]) {
+    assert.equal(env[key], value, key);
+  }
+  for (const key of ['AGENT_CLI_LOAD_HISTORY', 'EXEC_DAEMON_MCP_ENABLED', 'CURSOR_AUTH_TOKEN', 'CURSOR_API_BASE_URL',
+    'TEAMCLAUDE_PROVIDER', 'TEAMCLAUDE_CONFIG', 'TMUX', 'NODE_OPTIONS', 'SSH_AUTH_SOCK']) assert.equal(key in env, false, key);
 });
 
-test('lane home: permissions enforced and kept, old chats and transcripts pruned', async t => {
+test('lane home: the tool fence is enforced and kept, old chats and transcripts pruned', async t => {
   const home = await mkdtemp(join(tmpdir(), 'teamcursor-lane-home-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const config = join(home, '.config', 'cursor', 'cli-config.json');
+  const hooks = join(home, '.cursor', 'hooks.json');
+  const fence = { permissions: CURSOR_LANE_PERMISSIONS, approvalMode: 'allowlist', autoAcceptWebSearch: false };
 
-  enforceLanePermissions(home);
-  assert.deepEqual(JSON.parse(await readFile(config, 'utf8')), { version: 1, permissions: CURSOR_LANE_PERMISSIONS });
-  await writeFile(config, JSON.stringify({ version: 1, model: { modelId: 'composer-2.5' }, permissions: { allow: ['Shell(ls)'], deny: [] } }));
-  enforceLanePermissions(home);
+  enforceLaneConfig(home);
+  assert.deepEqual(JSON.parse(await readFile(config, 'utf8')), { version: 1, ...fence });
+  assert.deepEqual(JSON.parse(await readFile(hooks, 'utf8')), CURSOR_LANE_HOOKS);
+  assert.deepEqual(CURSOR_LANE_HOOKS.hooks.preToolUse, [{ command: 'exit 2', failClosed: true }], 'no matcher: every local tool');
+  await writeFile(config, JSON.stringify({ version: 1, model: { modelId: 'composer-2.5' }, permissions: { allow: ['Shell(ls)'], deny: [] }, autoAcceptWebSearch: true }));
+  await writeFile(hooks, '{"version":1,"hooks":{}}');
+  enforceLaneConfig(home);
   const merged = JSON.parse(await readFile(config, 'utf8'));
   assert.deepEqual(merged.permissions, CURSOR_LANE_PERMISSIONS, 'the CLI default allowlist (Shell(ls)) is replaced');
+  assert.equal(merged.autoAcceptWebSearch, false);
   assert.deepEqual(merged.model, { modelId: 'composer-2.5' }, 'cursor-agent settings stay');
+  assert.deepEqual(JSON.parse(await readFile(hooks, 'utf8')), CURSOR_LANE_HOOKS, 'the hook is put back');
   const old = new Date(Date.now() - 2 * HOUR);
   await utimes(config, old, old);
-  enforceLanePermissions(home);
+  enforceLaneConfig(home);
   assert.equal((await stat(config)).mtimeMs, old.getTime(), 'already right: not rewritten');
 
   const chat = name => join(home, '.config', 'cursor', 'chats', 'wshash', name);
@@ -304,6 +339,8 @@ test('a completion round trip: the child dials the lane, its token never reaches
     'only GetMe went upstream: prefix stripped, lane token swapped for the account bearer');
   const permissions = JSON.parse(await readFile(join(env.HOME, '.config', 'cursor', 'cli-config.json'), 'utf8')).permissions;
   assert.deepEqual(permissions, CURSOR_LANE_PERMISSIONS, 'the lane home denies file reads before the first run');
+  assert.deepEqual(JSON.parse(await readFile(join(env.HOME, '.cursor', 'hooks.json'), 'utf8')), CURSOR_LANE_HOOKS);
+  assert.equal(env.CURSOR_DATA_DIR, join(env.HOME, '.cursor'));
 });
 
 test('stream: one delta, the finish, usage when asked, [DONE]', async t => {
@@ -376,26 +413,44 @@ test('errors: busy → 429 retry-after 5, timeout → 504, failed run → 502, b
   assert.equal(plain.spawns.length, 0);
 });
 
-test('a missing cursor-agent is 503 cursor_cli_not_found', async t => {
+test('a lane folder deleted while idle is rebuilt on the next request', async t => {
+  const { url, dir } = await openAIProxy(t, { script: () => agentResult('{"content":"ok"}') });
+  assert.equal((await chat(url, { messages: [{ role: 'user', content: 'one' }] })).status, 200);
+  await rm(dir, { recursive: true, force: true });
+  assert.equal((await chat(url, { messages: [{ role: 'user', content: 'two' }] })).status, 200);
+  assert.ok(existsSync(join(dir, 'workspace')) && existsSync(join(dir, 'home', '.cursor', 'hooks.json')));
+});
+
+/** A proxy whose spawn fails with ENOENT, optionally after deleting the run's cwd (spawn reports both the same way). */
+async function enoentProxy(t, { removeCwd = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'teamcursor-openai-enoent-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const port = await freePort();
-  const manager = new AccountManager([cursorAccount('cursor-1')], 0.98, 0, 8);
-  const spawn = () => {
+  const spawn = (bin, args, options) => {
+    if (removeCwd) rmSync(options.cwd, { recursive: true, force: true });
     const child = new EventEmitter();
     Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), exitCode: null, signalCode: null, kill() {} });
-    setImmediate(() => child.emit('error', Object.assign(new Error('spawn /nope ENOENT'), { code: 'ENOENT' })));
+    setImmediate(() => child.emit('error', Object.assign(new Error(`spawn ${bin} ENOENT`), { code: 'ENOENT' })));
     return child;
   };
-  const proxy = createProxyServer(manager, { provider: 'cursor', proxy: { port }, cursorUsageRefresh: false, cursorOpenAI: { dir } },
+  const proxy = createProxyServer(new AccountManager([cursorAccount('cursor-1')], 0.98, 0, 8),
+    { provider: 'cursor', proxy: { port }, cursorUsageRefresh: false, cursorOpenAI: { dir } },
     { cursorOpenAISpawn: spawn, cursorOpenAIEnv: { HOME: dir, TEAMCURSOR_CURSOR_BIN: '/nope/cursor-agent' } });
   await listen(proxy, port);
   t.after(() => new Promise(resolve => proxy.close(resolve)));
   const res = await chat(`http://127.0.0.1:${port}`, { messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(res.status, 503);
-  const { error } = await res.json();
-  assert.equal(error.type, 'cursor_cli_not_found');
-  assert.match(error.message, /\/nope\/cursor-agent/);
+  return { status: res.status, error: (await res.json()).error };
+}
+
+test('a missing cursor-agent is 503 cursor_cli_not_found; a workspace gone under the run is 502, not that', async t => {
+  const missing = await enoentProxy(t);
+  assert.equal(missing.status, 503);
+  assert.equal(missing.error.type, 'cursor_cli_not_found');
+  assert.match(missing.error.message, /\/nope\/cursor-agent/);
+  const raced = await enoentProxy(t, { removeCwd: true });
+  assert.equal(raced.status, 502);
+  assert.equal(raced.error.type, 'upstream_error');
+  assert.match(raced.error.message, /lane folder/);
 });
 
 test('a client that hangs up kills its cursor-agent and frees the slot', async t => {

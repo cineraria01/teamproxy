@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cursorCliNotFoundMessage, resolveCursorBin } from './cursor.js';
 
@@ -27,6 +27,9 @@ export const CURSOR_LANE_FLAGS = ['--disable-codebase-ref', '--disable-indexing'
 // Read and Grep returned a file outside the workspace), and a prompt carries text the app took from the web, so
 // a prompt injection could ask for ~/.config/teamcursor.json. No reads, no writes, no shell (empty allowlist).
 export const CURSOR_LANE_PERMISSIONS = Object.freeze({ allow: Object.freeze([]), deny: Object.freeze(['Read(**)', 'Write(**)']) });
+const CURSOR_LANE_CONFIG = Object.freeze({ permissions: CURSOR_LANE_PERMISSIONS, approvalMode: 'allowlist', autoAcceptWebSearch: false });
+// No matcher = every tool cursor-agent runs locally; exit code 2 = block (failClosed: a hook that cannot run blocks too).
+export const CURSOR_LANE_HOOKS = Object.freeze({ version: 1, hooks: { preToolUse: [{ command: 'exit 2', failClosed: true }] } });
 // First in /models (an OpenAI client takes the first model as its default): Cursor's own model answered text and
 // tool calls in 4–7 s; `auto` may route to a model that refuses the JSON framing (measured with Claude Sonnet).
 export const CURSOR_OPENAI_DEFAULT_MODEL = 'composer-2.5';
@@ -148,26 +151,35 @@ export function buildCursorPrompt(body) {
   return lines.join('\n');
 }
 
-/** Every top-level `{…}` in text, in order (string-aware brace matching). */
-function jsonObjects(text) {
-  const found = [];
-  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    let depth = 0;
-    let inString = false;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (inString) {
-        if (ch === '\\') i++;
-        else if (ch === '"') inString = false;
-      } else if (ch === '"') inString = true;
-      else if (ch === '{') depth++;
-      else if (ch === '}' && --depth === 0) {
-        try { found.push(JSON.parse(text.slice(start, i + 1))); } catch { /* not JSON */ }
-        break;
-      }
-    }
+// At most this many balanced `{…}` spans are tried with JSON.parse (each try is linear in the span).
+const JSON_CANDIDATES = 64;
+
+/**
+ * The JSON objects among text's balanced `{…}` spans, outermost first, in start order (lazily). One pass:
+ * quotes count only inside braces, so a stray `"` in a header outside them changes nothing. Linear in the text
+ * plus at most JSON_CANDIDATES parses — the per-`{` rescan this replaces was quadratic (80 000 `{` took 5 s and
+ * held the worker's event loop).
+ */
+function* jsonObjects(text) {
+  const spans = [];
+  const open = [];
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '{') open.push(i);
+    else if (!open.length) continue;
+    else if (ch === '"') inString = true;
+    else if (ch === '}') spans.push([open.pop(), i + 1]);
   }
-  return found;
+  spans.sort((a, b) => a[0] - b[0]);
+  for (const [start, end] of spans.slice(0, JSON_CANDIDATES)) {
+    let value;
+    try { value = JSON.parse(text.slice(start, end)); } catch { continue; /* not JSON */ }
+    yield value;
+  }
 }
 
 /**
@@ -265,7 +277,8 @@ export function prepareLaneHome(dir) {
   for (const path of [home, workspace, join(home, '.config'), join(home, '.cache'), join(home, '.local', 'share'), join(home, '.local', 'state')]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
-  writeFileSync(join(dir, 'README.txt'), 'teamcursor OpenAI lane: cursor-agent home for /openai/v1 requests. Safe to delete while the proxy is idle.\n');
+  const readme = join(dir, 'README.txt');
+  if (!existsSync(readme)) writeFileSync(readme, 'teamcursor OpenAI lane: cursor-agent home for /openai/v1 requests. Safe to delete while the proxy is idle (the next request rebuilds it).\n');
   return { home, workspace };
 }
 
@@ -289,28 +302,55 @@ export function pruneLaneChats(home, now = Date.now(), keepMs = CHAT_KEEP_MS) {
   }
 }
 
-/** Keep CURSOR_LANE_PERMISSIONS in the lane's cli-config.json; cursor-agent keeps a list it finds there (measured). */
-export function enforceLanePermissions(home) {
-  const dir = join(home, '.config', 'cursor');
-  const path = join(dir, 'cli-config.json');
-  let config = {};
-  try { config = JSON.parse(readFileSync(path, 'utf8')); } catch { /* none yet, or mid-write: ours is enough */ }
-  if (JSON.stringify(config?.permissions) === JSON.stringify(CURSOR_LANE_PERMISSIONS)) return;
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+function writeIfChanged(path, text) {
+  try { if (readFileSync(path, 'utf8') === text) return; } catch { /* missing */ }
   const temp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ version: 1, ...config, permissions: CURSOR_LANE_PERMISSIONS }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(temp, text, { mode: 0o600 });
   renameSync(temp, path);
 }
 
+/**
+ * Keep the lane's tool fence in place before every run (cursor-agent keeps what it finds there, measured):
+ * - `cli-config.json`: CURSOR_LANE_PERMISSIONS, `approvalMode: allowlist`, `autoAcceptWebSearch: false` — print mode
+ *   cannot approve, so web fetch/search answer "User Rejected" (measured; the fetch never left the machine);
+ * - `~/.cursor/hooks.json`: a preToolUse hook that blocks every local tool (exit 2). The lane needs none, and it
+ *   covers what permissions do not list — the local Fetch executor runs `fetch(url)` with no permission check.
+ */
+export function enforceLaneConfig(home) {
+  const configDir = join(home, '.config', 'cursor');
+  const configPath = join(configDir, 'cli-config.json');
+  let config = {};
+  try { config = JSON.parse(readFileSync(configPath, 'utf8')); } catch { /* none yet, or mid-write: ours is enough */ }
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  writeIfChanged(configPath, `${JSON.stringify({ version: 1, ...config, ...CURSOR_LANE_CONFIG }, null, 2)}\n`);
+  mkdirSync(join(home, '.cursor'), { recursive: true, mode: 0o700 });
+  writeIfChanged(join(home, '.cursor', 'hooks.json'), `${JSON.stringify(CURSOR_LANE_HOOKS, null, 2)}\n`);
+}
+
+// Parent variables a lane child keeps (case-insensitive; LC_* by prefix); everything else is dropped. cursor-agent
+// reads 100+ CURSOR_* / AGENT_CLI_* / EXEC_DAEMON_* switches, and CURSOR_CONFIG_DIR / CURSOR_DATA_DIR win over
+// HOME and XDG (cursor-config/dist/paths.js): inherited, they would move the lane's config and fence elsewhere.
+const LANE_ENV_KEEP = new Set([
+  'path', 'tmpdir', 'tmp', 'temp', 'lang', 'language', 'tz', 'user', 'logname', 'shell',
+  'http_proxy', 'https_proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'ssl_cert_file', 'ssl_cert_dir',
+  'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'programdata', 'programfiles', 'programfiles(x86)',
+  'programw6432', 'number_of_processors', 'processor_architecture', 'os', 'username', 'computername',
+]);
+
 export function laneEnv(env, { port, home, apiKey, platform = process.platform }) {
-  const child = { ...env };
-  for (const key of ['TEAMCLAUDE_PROVIDER', 'TEAMCLAUDE_CONFIG', 'TEAMCLAUDE_SESSION_SUPERVISED', 'TEAMCLAUDE_HUD', 'CURSOR_API_BASE_URL', 'CURSOR_WEBSITE_URL', 'CURSOR_AUTH_TOKEN', 'TMUX', 'TMUX_PANE']) delete child[key];
+  const child = {};
+  for (const [key, value] of Object.entries(env)) {
+    const lower = key.toLowerCase();
+    if (LANE_ENV_KEEP.has(lower) || lower.startsWith('lc_')) child[key] = value;
+  }
   Object.assign(child, {
     HOME: home,
     XDG_CONFIG_HOME: join(home, '.config'),
     XDG_CACHE_HOME: join(home, '.cache'),
     XDG_DATA_HOME: join(home, '.local', 'share'),
     XDG_STATE_HOME: join(home, '.local', 'state'),
+    CURSOR_CONFIG_DIR: join(home, '.config', 'cursor'),
+    CURSOR_DATA_DIR: join(home, '.cursor'),
     CURSOR_API_ENDPOINT: `http://localhost:${port}${CURSOR_LANE_PREFIX}`,
     CURSOR_API_KEY: apiKey,
     // Keep the exchanged lane token in memory. The default store on macOS runs `/usr/bin/security
@@ -405,7 +445,6 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
   const bin = resolveCursorBin({ env });
   // Per process: only this proxy's children hold it, and only the lane's exchange answers to it.
   const apiKey = `key_${randomBytes(24).toString('hex')}`;
-  let paths = null;
   let inflight = 0;
   let models = null;
   let modelsPending = null;
@@ -413,8 +452,6 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
   const poolProblem = () => cursorPoolProblem(accountManager?.accounts, now());
   const sendProblem = (res, problem) => sendError(res, problem.status, problem.type, problem.message,
     problem.retryAfter ? { 'retry-after': String(problem.retryAfter) } : undefined);
-  const lanePaths = () => (paths ||= prepareLaneHome(dir));
-  const childEnv = () => laneEnv(env, { port, home: lanePaths().home, apiKey });
 
   /** Lane-only answers: the API-key exchange and the emptied RPCs. Returns true when it answered. */
   function answerLane(req, res) {
@@ -440,15 +477,27 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
   }
 
   async function run(args, input, signal) {
-    const { workspace, home } = lanePaths();
-    enforceLanePermissions(home);
-    const result = await runCursorAgent({ bin, args: [...CURSOR_LANE_FLAGS, ...args, '--workspace', workspace], env: childEnv(), cwd: workspace, input, timeoutMs, signal, spawn });
+    let lane;
+    try {
+      lane = prepareLaneHome(dir); // every run: the folder may have been deleted while the proxy was idle
+      enforceLaneConfig(lane.home);
+    } catch (error) {
+      return { code: null, stdout: '', stderr: '', error, lane: true };
+    }
+    const { home, workspace } = lane;
+    const result = await runCursorAgent({
+      bin, args: [...CURSOR_LANE_FLAGS, ...args, '--workspace', workspace], env: laneEnv(env, { port, home, apiKey }),
+      cwd: workspace, input, timeoutMs, signal, spawn,
+    });
+    // spawn reports a missing cwd as ENOENT too: only with the workspace present is ENOENT the binary's.
+    if (result.error?.code === 'ENOENT' && !existsSync(workspace)) result.lane = true;
     pruneLaneChats(home, now());
     return result;
   }
 
   function failure(res, result) {
-    if (result.error?.code === 'ENOENT') return sendError(res, 503, 'cursor_cli_not_found', cursorCliNotFoundMessage(bin, env));
+    if (result.error?.code === 'ENOENT' && !result.lane) return sendError(res, 503, 'cursor_cli_not_found', cursorCliNotFoundMessage(bin, env));
+    if (result.lane) return sendError(res, 502, 'upstream_error', `TeamCursor: the lane folder ${dir} is not usable: ${result.error.message}`);
     if (result.error) return sendError(res, 502, 'upstream_error', `cursor-agent could not start: ${result.error.message}`);
     if (result.timedOut) return sendError(res, 504, 'timeout_error', `cursor-agent did not answer within ${Math.round(timeoutMs / 1000)} s`);
     // The run may have parked or throttled the last account: the pool says why better than the CLI's text.

@@ -404,7 +404,8 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
   명세 [`docs/specs/2026-10-25-cursor-openai.md`](docs/specs/2026-10-25-cursor-openai.md). Cursor에는 공개 추론 API가 없어서
   완성 한 번마다 `cursor-agent -p --mode ask`를 풀 전용 HOME(`~/.config/teamcursor.openai`)에서 한 번 돌려 답을 OpenAI 모양으로 바꾼다
   (도구 호출은 프롬프트로 JSON을 받아 되돌림, 그림은 빼고 알림 줄, `stream`은 끝난 뒤 한꺼번에). 모델 목록 맨 앞은 `composer-2.5`.
-  그 cursor-agent는 파일 읽기·쓰기·셸이 막혀 있고(레인 `cli-config.json` 권한), 자격은 메모리에만 둔다(키체인 창 없음).
+  그 cursor-agent는 로컬 도구를 하나도 못 쓰고(레인 `cli-config.json` 권한 + 모든 도구를 막는 `hooks.json`), 환경 변수는 허용 목록만
+  물려받으며, 자격은 메모리에만 둔다(키체인 창 없음). 레인 폴더는 프록시가 쉬는 동안 지워도 다음 요청이 다시 만든다.
   오류는 401(로그인 없음·만료)·429(`insufficient_quota` 소진, `rate_limit_error` 동시 4개 초과)·502·503(cursor-agent 없음)·504.
   따뜻할 때 한 번에 4~6초.
 - 범위 밖: API 키 모드(`--api-key`/`CURSOR_API_KEY`), Cursor 데스크톱 편집기, HTTP/1.1 에이전트 전송(`useHttp1ForAgent`)의 스트리밍(경로는 에이전트 상류로 넘기지만 다 받은 뒤 전달), 스트림 복구,
