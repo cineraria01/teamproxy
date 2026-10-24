@@ -1,4 +1,4 @@
-# teamclaude · teamcodex · teamagy · teamgrok · 상태라인 2종 — 새 머신 설치 프롬프트
+# teamclaude · teamcodex · teamagy · teamgrok · teamcursor · 상태라인 2종 — 새 머신 설치 프롬프트
 
 새 머신의 Claude Code(또는 Codex)에 이 문서 전체를 붙여 넣거나, 한 줄로 이렇게 시킨다:
 
@@ -6,7 +6,7 @@
 
 ---
 
-당신은 이 머신에 Claude·Codex·Antigravity(agy) 다계정 프록시와 상태라인 두 개를 설치한다(teamagy·teamgrok은 선택). **모든 소스는
+당신은 이 머신에 Claude·Codex·Antigravity(agy) 다계정 프록시와 상태라인 두 개를 설치한다(teamagy·teamgrok·teamcursor는 선택). **모든 소스는
 GitHub `cineraria01` 계정의 포크에서만 가져온다.** `sangrokjung/teamclaude`,
 `jung-wan-kim/teamclaude`, npm의 `@karpeleslab/teamclaude`는 **절대 설치하지 말 것**
 (같은 이름의 원본이지만 우리 수정이 없다). 다른 머신의 `~/.config/teamclaude.json`·
@@ -31,6 +31,7 @@ node -v; npm -v; git --version; tmux -V; python3 --version   # node 20+, python 
 command -v claude; command -v codex   # Claude Code·Codex CLI가 먼저 설치돼 있어야 한다
 command -v agy                        # teamagy를 쓸 때만: Antigravity CLI, agy에서 한 번 로그인해 둔다
 ls ~/.grok/bin/grok                   # teamgrok을 쓸 때만: Grok Build CLI, grok에서 한 번 로그인해 둔다
+ls ~/.local/bin/cursor-agent          # teamcursor를 쓸 때만: Cursor CLI, cursor-agent login으로 한 번 로그인해 둔다
 echo "$PATH" | tr ':' '\n' | grep -x "$HOME/.local/bin" || echo 'PATH에 ~/.local/bin 추가 필요'
 ```
 
@@ -142,6 +143,31 @@ chmod 755 ~/.local/bin/teamgrok
 teamgrok --help | head -3
 ```
 
+### 1-5. Cursor 풀 래퍼 `~/.local/bin/teamcursor` 만들기 (선택)
+
+Cursor CLI(`cursor-agent`)의 Cursor 계정 풀이다(:3460). cursor-agent에서 한 번 로그인해 두어야 한다(어느 계정이든;
+프록시가 요청의 인증을 풀 계정 것으로 바꾼다). 추론은 HTTP/2(h2c)로 오므로 프록시는 `localhost`(IPv4·IPv6 루프백)에서 받는다.
+
+```sh
+rsync -a ~/.local/share/teamcodex-global/ ~/.local/share/teamcursor-global/
+cat > ~/.local/bin/teamcursor <<EOF
+#!/bin/sh
+# Cursor pool (:3460). Own install (~/.local/share/teamcursor-global), cineraria01/teamproxy fork.
+if [ "\${1-}" = cursor ]; then shift; fi
+PKG=\$HOME/.local/share/teamcursor-global/lib/node_modules/teamcodex
+# No args or cursor-agent flags open cursor-agent with the account footer (src/hud/launcher.py --cursor runs
+# teamcursor run -- …; print mode and non-terminal runs skip the footer). A cursor-agent subcommand goes after --.
+case "\${1-}" in
+  -h|--help) ;;
+  --) shift; set -- run -- "\$@" ;;
+  ''|-*) exec python3 "\$PKG/src/hud/launcher.py" --cursor "\$@" ;;
+esac
+exec env -u TEAMCLAUDE_SESSION_SUPERVISED TEAMCLAUDE_PROVIDER=cursor TEAMCLAUDE_CONFIG=\$HOME/.config/teamcursor.json TEAMCURSOR_CURSOR_BIN=\$HOME/.local/bin/cursor-agent $(command -v node) "\$PKG/src/index.js" cursor "\$@"
+EOF
+chmod 755 ~/.local/bin/teamcursor
+teamcursor --help | head -3
+```
+
 ## 2. 계정 로그인
 
 각 계정을 **도구당 한 번만** 로그인한다(재로그인은 세션을 하나씩 누적시키므로 일시 오류에
@@ -155,6 +181,8 @@ teamagy login --name pro-2          # (teamagy) 다른 계정은 브라우저 �
 teamagy accounts
 teamgrok login --name grok-1        # (teamgrok) 브라우저에서 기기 코드를 확인해 xAI 로그인, grok 로그인은 그대로
 teamgrok accounts
+teamcursor login --name cursor-1    # (teamcursor) 브라우저에서 Cursor 로그인, cursor-agent 로그인은 그대로
+teamcursor accounts                 # 토큰은 60일 뒤 만료(갱신 없음) — 만료 전에 같은 이름으로 다시 login
 ```
 
 teamagy의 OAuth 클라이언트 비밀값은 저장소에 없다. 처음 가져올 때 agy 바이너리에서 찾아
@@ -228,7 +256,7 @@ patch('~/.config/teamcodex.json', {
 PY
 ```
 
-포트는 기본값(Claude 3456 · Codex 3457 · agy 3458 · grok 3459)을 그대로 쓴다. `teamgrok.json`도 `"provider": "grok"`로 같은 규칙이다. `teamagy.json`에는 `"provider": "agy"`가 들어가며,
+포트는 기본값(Claude 3456 · Codex 3457 · agy 3458 · grok 3459 · cursor 3460)을 그대로 쓴다. `teamgrok.json`·`teamcursor.json`도 `"provider": "grok"`·`"provider": "cursor"`로 같은 규칙이다. `teamagy.json`에는 `"provider": "agy"`가 들어가며,
 다른 풀의 설정 파일로는 teamagy가 실행되지 않는다. Claude 쪽 `proxy.apiKey`는 로그인이
 만든 값을 유지한다(상태라인이 이 키로 status를 읽는다).
 
@@ -238,8 +266,8 @@ PY
 
 ```sh
 TMUX_BIN=$(command -v tmux)
-for pool in teamclaude teamcodex teamagy teamgrok; do
-[ -x ~/.local/bin/$pool ] || continue   # teamagy·teamgrok은 §1-3·§1-4를 했을 때만
+for pool in teamclaude teamcodex teamagy teamgrok teamcursor; do
+[ -x ~/.local/bin/$pool ] || continue   # teamagy·teamgrok·teamcursor는 §1-3·§1-4·§1-5를 했을 때만
 cat > ~/.local/bin/$pool-tmux-server <<EOF
 #!/bin/sh
 # Run the $pool proxy inside a detached tmux session so its TUI can be viewed:
@@ -260,7 +288,7 @@ EOF
 chmod 755 ~/.local/bin/$pool-tmux-server
 done
 
-mkdir -p ~/.local/state/teamcodex ~/.local/state/teamagy ~/.local/state/teamgrok ~/Library/Logs
+mkdir -p ~/.local/state/teamcodex ~/.local/state/teamagy ~/.local/state/teamgrok ~/.local/state/teamcursor ~/Library/Logs
 python3 - <<'PY'
 import os, plistlib
 from pathlib import Path
@@ -272,6 +300,7 @@ for label, wrapper, out in [
     ('com.local.teamcodex',  'teamcodex-tmux-server',  home/'.local/state/teamcodex/server.log'),
     ('com.local.teamagy',    'teamagy-tmux-server',    home/'.local/state/teamagy/server.log'),
     ('com.local.teamgrok',   'teamgrok-tmux-server',   home/'.local/state/teamgrok/server.log'),
+    ('com.local.teamcursor', 'teamcursor-tmux-server', home/'.local/state/teamcursor/server.log'),
 ]:
     if not (home/'.local/bin'/wrapper).exists():
         continue
@@ -291,11 +320,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamclaude.pli
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamcodex.plist
 [ -f ~/Library/LaunchAgents/com.local.teamagy.plist ] && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamagy.plist
 [ -f ~/Library/LaunchAgents/com.local.teamgrok.plist ] && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamgrok.plist
+[ -f ~/Library/LaunchAgents/com.local.teamcursor.plist ] && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.teamcursor.plist
 sleep 3
 curl -s -o /dev/null -w 'claude %{http_code}\n' http://127.0.0.1:3456/teamclaude/status
 curl -s -o /dev/null -w 'codex  %{http_code}\n' http://127.0.0.1:3457/teamclaude/status
 curl -s -o /dev/null -w 'agy    %{http_code}\n' http://127.0.0.1:3458/teamclaude/status   # teamagy를 했을 때
 curl -s -o /dev/null -w 'grok   %{http_code}\n' http://127.0.0.1:3459/teamclaude/status   # teamgrok을 했을 때
+curl -s -o /dev/null -w 'cursor %{http_code}\n' http://127.0.0.1:3460/teamclaude/status   # teamcursor를 했을 때
 teamclaude status; teamcodex status; teamagy status
 ```
 
@@ -361,6 +392,14 @@ teamgrok -p "Reply with exactly: OK"                                 # 프록시
 cd ~/some-project && teamgrok                                        # grok 화면 + 하단 계정 줄(RL 사용률, 등급)
 ```
 
+teamcursor를 설치했다면:
+
+```sh
+teamcursor -p "Reply with exactly: OK" --trust                       # 프록시를 거친 cursor-agent 응답
+teamcursor --list-models | head -3                                   # 모델 목록도 프록시를 거친다
+cd ~/some-project && teamcursor                                      # cursor-agent 화면 + 하단 계정 줄(Use 사용량, 요금제)
+```
+
 ## 7. 최종 점검표
 
 - [ ] `grep -c isOverloadEvent ~/.local/share/teamcodex-global/lib/node_modules/teamcodex/src/server.js` ≥ 1 — 포크에만 있는 수정이 들어 있다(원본이면 0). `npm ls -g --prefix ~/.local/share/teamcodex-global`은 `teamcodex@1.5.0`
@@ -371,7 +410,8 @@ cd ~/some-project && teamgrok                                        # grok 화�
 - [ ] `teamcodex` 실행 시 하단 상태줄 표시
 - [ ] `teamagy status`에 계정이 보이고 `teamagy -p …`가 응답(teamagy를 했을 때)
 - [ ] `teamgrok status`에 계정이 보이고 `teamgrok -p …`가 응답(teamgrok을 했을 때)
-- [ ] `~/.config/teamclaude.json`·`teamcodex.json`·`teamagy.json`·`teamgrok.json`이 0600이고 어떤 git 저장소에도 없음
+- [ ] `teamcursor status`에 계정이 보이고 `teamcursor -p …`가 응답(teamcursor를 했을 때)
+- [ ] `~/.config/teamclaude.json`·`teamcodex.json`·`teamagy.json`·`teamgrok.json`·`teamcursor.json`이 0600이고 어떤 git 저장소에도 없음
 
 ## 8. 최신판으로 갱신 — `<풀> update`
 
@@ -417,7 +457,7 @@ teamagy update --ref <브랜치|태그|커밋> --wait 900 --json
 7. 다시 띄우기와 확인: 새 서버 pid가 뜰 때까지(최대 120초) 기다린 뒤 `<풀> status --json`이 `ok`·`running`,
    계정 이름·활성 상태가 설정 파일과 같은지, 모델 목록이 200인지 본다. 모델 목록은 갱신 **전에도** 200이던 풀만 요구한다.
    - Claude `GET /v1/models` + `anthropic-version: 2023-06-01`, Codex `GET /codex/models?client_version=<codex --version>`,
-     agy `POST /v1internal:fetchAvailableModels`, grok `GET /v1/models`
+     agy `POST /v1internal:fetchAvailableModels`, grok `GET /v1/models`, cursor `POST /aiserver.v1.DashboardService/GetMe`(Connect JSON)
 8. 확인이 실패하면 새 판을 `src.failed-…`·`package.json.failed-…`로 옮기고 백업을 제자리로 돌린 뒤, 이미 재시작한 풀만 다시 띄운다
    (`restored`, 종료 코드 1). 되돌리기도 실패하면 `restore_failed`와 설치본 상태(`state`)를 낸다. 파일은 그대로이고 재시작만 실패했으면 `restart_failed`.
 9. 백업(`src.pre-*`·`package.json.pre-*`·`*.failed-*`)은 종류마다 최근 2개만 남긴다.

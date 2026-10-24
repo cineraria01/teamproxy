@@ -1,4 +1,4 @@
-# teamclaude · teamcodex · teamagy · teamgrok 하단 줄
+# teamclaude · teamcodex · teamagy · teamgrok · teamcursor 하단 줄
 
 2026-10-10부터 프록시 포크 `cineraria01/teamproxy`의 `src/hud/`에 들어 있습니다(옛 `cineraria01/teamcodex`, 그 전 `tcodex` 저장소를 합침).
 프록시 설치본마다 함께 들어가므로 따로 설치하지 않습니다. Claude Code 상태줄은 같은 포크의 [`statusline/`](../../statusline/README.md)입니다.
@@ -54,7 +54,7 @@ tmux 소켓은 `teamclaude-hud`입니다.
 
 `teamclaude --yolo`·`claude --yolo`·`teamcodex --yolo`·`teamagy --yolo`는 승인 없이 실행합니다(2026-10-10 사용자 요청 "--yolo 로 하자 3개모두").
 실행기가 Claude Code·agy에는 `--dangerously-skip-permissions`, Codex에는 `--dangerously-bypass-approvals-and-sandbox`로 바꿔 넘깁니다.
-`teamgrok --yolo`는 grok의 `--always-approve`가 됩니다(2026-10-15).
+`teamgrok --yolo`는 grok의 `--always-approve`가 됩니다(2026-10-15). `teamcursor --yolo`는 cursor-agent의 `--yolo` 그대로입니다(2026-10-24).
 인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. `--keep-alive`도 이제 인자 어디에 두어도 됩니다.
 
 ### Claude 대화 세션의 추론 단계
@@ -65,7 +65,7 @@ tmux 소켓은 `teamclaude-hud`입니다.
 
 하단 줄 tmux 서버는 [`src/hud/tmux.conf`](../../src/hud/tmux.conf)로 뜹니다(평소 tmux 설정과 무관). Esc가 바로 CLI에 가고
 (`escape-time 0`), 스크롤 기록은 5만 줄입니다. Shift+Enter는 tmux가 CLI 쪽 방식 그대로 넘기지 못해 풀마다 그 CLI가 줄바꿈으로 읽는
-키로 바꿔 보냅니다(Claude Code·agy·grok은 Alt+Enter, Codex는 Ctrl+J). 바깥 터미널이 Shift+Enter를 따로 보내야(확장 키) 동작합니다.
+키로 바꿔 보냅니다(Claude Code·agy·grok은 Alt+Enter, Codex·cursor-agent는 Ctrl+J). 바깥 터미널이 Shift+Enter를 따로 보내야(확장 키) 동작합니다.
 마우스로 글자를 고를 때는 option(macOS)이나 shift를 누른 채 끕니다.
 
 ### teamagy (Antigravity agy 풀)
@@ -92,6 +92,20 @@ TeamAgy | 1 accounts | switch 98% | 5h 7d Gemini, 3p Claude/GPT | > selected, * 
 ```text
 TeamGrok | 1 accounts | switch 98% | RL rate limit | > selected, * busy
 > 1.grok-1         SuperGr ready      RL [    1%       ]
+```
+
+### teamcursor (Cursor 풀, 2026-10-24)
+
+`teamcursor`도 같은 실행기를 씁니다(래퍼가 `launcher.py --cursor`로 부름). 막대는 하나(`Use`)로, 이번 결제 주기의 포함 사용량
+(`GetCurrentPeriodUsage`의 지출/한도와 Auto·API 사용률 중 가장 찬 값)이고 초기화 시각은 주기 끝입니다. 플랜 칸은 요금제(`Ultra` 등),
+`End` 칸은 없습니다. 인쇄·버전 옵션(`-p`·`--print`·`--list-models`·`-v`·`--version`)과 설정·관리 하위 명령(`status`·`models`·`mcp`·
+`login`·`logout`·`about` 등), 터미널이 아닌 실행은 하단 줄 없이 `teamcursor run -- …`으로 바로 넘어갑니다. 대화 명령(`agent`·`ls`·
+`resume`)은 하단 줄이 붙습니다. Shift+Enter는 Ctrl+J(cursor-agent가 어느 터미널에서나 줄바꿈으로 읽는 키)로 보냅니다.
+탭 제목은 `Cursor`, tmux 소켓은 `teamcursor-hud`입니다.
+
+```text
+TeamCursor | 1 accounts | switch 98% | Use included usage | > selected, * busy
+> 1.cursor-1      Ultra   ready      Use [   0% 23d1h  ]
 ```
 
 ## 사용
