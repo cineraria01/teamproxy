@@ -69,7 +69,7 @@ beforeEach(async () => {
   writeFileSync(join(nodeRoot, 'lib/node_modules/npm/bin/npm-cli.js'), FAKE_NPM);
   writeFileSync(join(bin, 'launchctl'), FAKE_LAUNCHCTL);
   chmodSync(join(bin, 'launchctl'), 0o755);
-  const ports = { claude: await freePort(), codex: await freePort(), agy: await freePort(), grok: await freePort() };
+  const ports = { claude: await freePort(), codex: await freePort(), agy: await freePort(), grok: await freePort(), cursor: await freePort() };
   t = {
     dir, home, ports, node: join(nodeRoot, 'bin/node'), launchd: join(dir, 'launchd'), npmLog: join(dir, 'npm.log'),
     env: {
@@ -102,8 +102,8 @@ const untouched = () => {
 test('--app installs wrappers, config, launchd agents and nothing else', () => {
   const { steps, done } = app(['--app']);
   assert.equal(done.done && done.ok, true);
-  assert.deepEqual(Object.keys(done.pools).sort(), ['agy', 'claude', 'codex', 'grok']);
-  for (const [pool, cmd] of [['claude', 'teamclaude'], ['codex', 'teamcodex'], ['agy', 'teamagy'], ['grok', 'teamgrok']]) {
+  assert.deepEqual(Object.keys(done.pools).sort(), ['agy', 'claude', 'codex', 'cursor', 'grok']);
+  for (const [pool, cmd] of [['claude', 'teamclaude'], ['codex', 'teamcodex'], ['agy', 'teamagy'], ['grok', 'teamgrok'], ['cursor', 'teamcursor']]) {
     assert.deepEqual(done.pools[pool], { port: t.ports[pool], label: labelOf(pool), installed: true, running: false, config: 'created' });
     const wrapper = join(t.home, '.local/bin', cmd);
     accessSync(wrapper, constants.X_OK);
@@ -243,7 +243,7 @@ test('--uninstall keeps the config, --purge removes it, and foreign files stay',
   app(['--app']);
   const config = join(t.home, '.config/teamcodex.json');
   const { done } = app(['--uninstall']);
-  assert.deepEqual([done.ok, done.removed.sort()], [true, ['agy', 'claude', 'codex', 'grok']]);
+  assert.deepEqual([done.ok, done.removed.sort()], [true, ['agy', 'claude', 'codex', 'cursor', 'grok']]);
   assert.equal(existsSync(join(t.home, '.local/bin/teamcodex')), false);
   assert.equal(existsSync(join(t.home, 'Library/LaunchAgents', `${labelOf('codex')}.plist`)), false);
   assert.equal(existsSync(join(t.launchd, labelOf('codex'))), false);
@@ -323,6 +323,22 @@ test('the grok pool: teamgrok wrapper, port, launchd label, and its login comman
   assert.ok(plistOf('grok').includes(`<string>${join(t.home, '.local/bin/teamgrok')}</string>\n    <string>server</string>`));
   const login = app(['--login-command', 'grok']).done;
   assert.deepEqual(login, { done: true, ok: true, pool: 'grok', account: 'grok-1', argv: [join(t.home, '.local/bin/teamgrok'), 'login', '--name', 'grok-1'] });
+});
+
+test('the cursor pool: teamcursor wrapper, port, launchd label, and its login command', () => {
+  const { done } = app(['--app', '--pools', 'cursor']);
+  assert.deepEqual(done.pools.cursor, { port: t.ports.cursor, label: labelOf('cursor'), installed: true, running: false, config: 'created' });
+  const text = readFileSync(join(t.home, '.local/bin/teamcursor'), 'utf8');
+  assert.match(text, /-u TEAMCLAUDE_SESSION_SUPERVISED TEAMCLAUDE_PROVIDER=cursor/);
+  assert.match(text, /TEAMCLAUDE_CONFIG="\$HOME\/\.config\/teamcursor\.json"/);
+  assert.match(text, /src\/index\.js' cursor "\$@"/);
+  const config = JSON.parse(readFileSync(join(t.home, '.config/teamcursor.json'), 'utf8'));
+  assert.equal(config.provider, 'cursor');
+  assert.equal(config.upstream, 'https://api2.cursor.sh');
+  assert.equal(config.proxy.host, '127.0.0.1');
+  assert.ok(plistOf('cursor').includes(`<string>${join(t.home, '.local/bin/teamcursor')}</string>\n    <string>server</string>`));
+  const login = app(['--login-command', 'cursor']).done;
+  assert.deepEqual(login, { done: true, ok: true, pool: 'cursor', account: 'cursor-1', argv: [join(t.home, '.local/bin/teamcursor'), 'login', '--name', 'cursor-1'] });
 });
 
 test('the bundle builder is deterministic', () => {

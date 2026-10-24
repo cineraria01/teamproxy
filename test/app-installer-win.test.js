@@ -26,7 +26,7 @@ beforeEach(async () => {
   const home = join(dir, 'home');
   const local = join(dir, 'local');
   mkdirSync(home);
-  const ports = { claude: await freePort(), codex: await freePort(), agy: await freePort(), grok: await freePort() };
+  const ports = { claude: await freePort(), codex: await freePort(), agy: await freePort(), grok: await freePort(), cursor: await freePort() };
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('TEAMCLAUDE_') && !k.startsWith('TEAMPROXY_')));
   Object.assign(env, {
     HOME: home, USERPROFILE: home, LOCALAPPDATA: local, TEAMPROXY_APP_PLATFORM: 'win32',
@@ -56,12 +56,12 @@ async function app(args, expect = 0) {
   return { steps: lines.slice(0, -1), done: lines.at(-1) };
 }
 
-const configOf = pool => join(t.home, '.config', `${{ claude: 'teamclaude', codex: 'teamcodex', agy: 'teamagy', grok: 'teamgrok' }[pool]}.json`);
+const configOf = pool => join(t.home, '.config', `${{ claude: 'teamclaude', codex: 'teamcodex', agy: 'teamagy', grok: 'teamgrok', cursor: 'teamcursor' }[pool]}.json`);
 
 test('--app on Windows writes configs and a manifest, registers nothing, and returns run specs', async () => {
   const { steps, done } = await app(['--app', '--node', process.execPath]);
   assert.equal(done.ok, true, JSON.stringify(done));
-  for (const [pool, script, provider] of [['claude', 'teamclaude.js', null], ['codex', 'index.js', 'codex'], ['agy', 'index.js', 'agy'], ['grok', 'index.js', 'grok']]) {
+  for (const [pool, script, provider] of [['claude', 'teamclaude.js', null], ['codex', 'index.js', 'codex'], ['agy', 'index.js', 'agy'], ['grok', 'index.js', 'grok'], ['cursor', 'index.js', 'cursor']]) {
     const p = done.pools[pool];
     const cli = [process.execPath, join(ROOT, 'src', script), ...(provider ? [provider] : [])];
     const env = { TEAMCLAUDE_CONFIG: configOf(pool), ...(provider && { TEAMCLAUDE_PROVIDER: provider }) };
@@ -75,7 +75,7 @@ test('--app on Windows writes configs and a manifest, registers nothing, and ret
     assert.ok(config.proxy.apiKey);
   }
   const manifest = JSON.parse(readFileSync(join(t.root, 'manifest.json'), 'utf8'));
-  assert.deepEqual([manifest.node, manifest.source, Object.keys(manifest.pools).sort()], [process.execPath, ROOT, ['agy', 'claude', 'codex', 'grok']]);
+  assert.deepEqual([manifest.node, manifest.source, Object.keys(manifest.pools).sort()], [process.execPath, ROOT, ['agy', 'claude', 'codex', 'cursor', 'grok']]);
   assert.equal(existsSync(join(t.root, 'logs')), true);
   // no wrapper, no launchd, no npm copy
   assert.deepEqual(readdirSync(t.home), ['.config']);

@@ -213,6 +213,15 @@ def check():
     assert "> 1.grok-1" in lines[1] and " RL [" in lines[1] and "25%" in lines[1], lines[1]
     assert all(" 7d " not in line and "End" not in line for line in lines), lines
     assert render({"accounts": []}, grok=True)[1] == "No accounts. Run: teamgrok login --name grok-1"
+    # cursor: one Use bar (included usage, reset = billing cycle end), plan name, no 7d or End column.
+    cursor = {"switchThreshold": 0.98, "currentAccountUuid": "c1", "accounts": [
+        {"name": "cursor-1", "accountUuid": "c1", "provider": "cursor", "planType": "Ultra", "usable": True,
+         "quota": {"unified5h": 0.4, "unified5hReset": (now + 86400) * 1000}}]}
+    lines = render(cursor, now=now, cursor=True)
+    assert lines[0].startswith("TeamCursor | 1 accounts") and "Use included usage" in lines[0], lines[0]
+    assert "> 1.cursor-1" in lines[1] and " Use [" in lines[1] and "40%" in lines[1], lines[1]
+    assert all(" 7d " not in line and "End" not in line for line in lines), lines
+    assert render({"accounts": []}, cursor=True)[1] == "No accounts. Run: teamcursor login --name cursor-1"
     # TeamClaude rows come from the installed Claude Code status line, told it is not under the footer.
     with tempfile.TemporaryDirectory() as home:
         renderer = Path(home) / ".claude/statusline-teamclaude.py"

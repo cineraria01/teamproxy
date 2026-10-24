@@ -47,6 +47,10 @@ def check():
         assert oneshot(flags, modes["grok"][2]), flags
     assert not oneshot(["--model", "grok-4.7"], modes["grok"][2])
     assert modes["grok"][1] == "Grok" and modes["grok"][3] == "M-Enter" and modes["grok"][4] == "--always-approve"
+    for flags in (["-p", "hi"], ["--print"], ["--list-models"], ["-v"], ["--version"]):
+        assert oneshot(flags, modes["cursor"][2]), flags
+    assert not oneshot(["--model", "gpt-5"], modes["cursor"][2]) and not oneshot(["--resume", "x"], modes["cursor"][2])
+    assert modes["cursor"][1] == "Cursor" and modes["cursor"][3] == "C-j" and modes["cursor"][4] == "--yolo"
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         fake = Path(directory) / "teamagy"
         fake.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
@@ -57,7 +61,7 @@ def check():
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             assert json.loads(result.stdout) == ["run", "--", *arguments], (arguments, result.stdout, result.stderr)
         # --yolo becomes each CLI's own skip-all-approvals flag; --keep-alive is ours wherever it sits.
-        for name in ("teamclaude", "teamcodex", "teamgrok"):
+        for name in ("teamclaude", "teamcodex", "teamgrok", "teamcursor"):
             (Path(directory) / name).write_text(fake.read_text())
             (Path(directory) / name).chmod(0o755)
         for pool, arguments, expected in (
@@ -65,6 +69,9 @@ def check():
                 ("--claude", ["-p", "hi", "--yolo"], ["-p", "hi", "--dangerously-skip-permissions"]),
                 ("--grok", ["--yolo", "-p", "hi"], ["--always-approve", "-p", "hi"]),
                 ("--grok", ["--", "models"], ["models"]),
+                ("--cursor", ["--yolo", "-p", "hi"], ["--yolo", "-p", "hi"]),
+                ("--cursor", ["--list-models"], ["--list-models"]),
+                ("--cursor", ["--", "status"], ["status"]),
                 (None, ["--yolo", "--keep-alive", "--version"], ["--dangerously-bypass-approvals-and-sandbox", "--version"])):
             result = subprocess.run([sys.executable, str(HUD / "launcher.py"), *([pool] if pool else []), *arguments],
                                     env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)

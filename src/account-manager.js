@@ -158,7 +158,7 @@ export class AccountManager {
       planType: acct.planType || null,
       expiresAt: acct.expiresAt || null,
       ...(provider === 'agy' ? { projectId: acct.projectId || null } : {}),
-      ...(provider === 'grok' ? { email: acct.email || null, teamId: acct.teamId || null } : {}),
+      ...(provider === 'grok' || provider === 'cursor' ? { email: acct.email || null, teamId: acct.teamId || null } : {}),
       status: organizationDisabled || subscriptionEnded ? 'error' : 'active',
       subscriptionDisabled: organizationDisabled ? true : undefined,
       subscriptionCancellation: subscriptionCancellation || undefined,
@@ -833,8 +833,8 @@ export class AccountManager {
     // agy: quota comes from the summary poll, never from response headers, and
     // the account carries server-side session state — so no warm-up hopping,
     // no unmeasured rebalance; affinity applies from the first request. grok
-    // keeps server-side session state too.
-    if (account.provider === 'agy' || account.provider === 'grok') return true;
+    // keeps server-side session state too, and so does cursor (per-chat blobs).
+    if (['agy', 'grok', 'cursor'].includes(account.provider)) return true;
     const q = account.quota;
     return q.unified5h != null || q.unified7d != null
       || q.tokensLimit != null || q.requestsLimit != null;
@@ -1105,6 +1105,9 @@ export class AccountManager {
     // grok: the x-ratelimit meter has no reset time, so a gate on it could never
     // lift; only an inference 429 (markRateLimited) takes the account out.
     if (account.provider === 'grok') return false;
+    // cursor: the usage meter is display-only (Cursor keeps serving past the
+    // included usage); only an exhaustion answer takes the account out.
+    if (account.provider === 'cursor') return false;
 
     if (this._isModelNearQuota(account, model, now)) return true;
 
@@ -1232,6 +1235,12 @@ export class AccountManager {
         account.quota.grokRateLimit = { ...account.quota.grokRateLimit, ...meter, at: Date.now() };
         if (meter.utilization != null) account.quota.unified5h = meter.utilization;
       }
+      account.usage.totalRequests++;
+      account.usage.lastUsed = new Date().toISOString();
+      return;
+    }
+    // cursor: no quota headers at all — the meter comes from the usage poll.
+    if (account.provider === 'cursor') {
       account.usage.totalRequests++;
       account.usage.lastUsed = new Date().toISOString();
       return;
@@ -1461,6 +1470,17 @@ export class AccountManager {
     return true;
   }
 
+  /** cursor usage poll (`parseCursorUsage`) → `quota.cursorUsage`; the meter mirrors into `unified5h` for display. */
+  updateCursorUsage(accountIndex, usage) {
+    const account = this._resolve(accountIndex);
+    if (!account || !usage) return false;
+    account.quota.cursorUsage = { ...usage, at: Date.now() };
+    account.quota.unified5h = usage.utilization;
+    account.quota.unified5hReset = usage.cycleEnd;
+    if (usage.planName) account.planType = usage.planName;
+    return true;
+  }
+
   /** agy exhaustion 429: keep (account, group) out of selection for `ms`. Other groups stay routable. */
   blockAgyGroup(accountIndex, group, ms) {
     const account = this._resolve(accountIndex);
@@ -1560,6 +1580,15 @@ export class AccountManager {
   async ensureTokenFresh(accountIndex, force = false) {
     const account = this._resolve(accountIndex);
     if (!account || account.type !== 'oauth' || !account.refreshToken) return;
+
+    // cursor: a session JWT (60 days) that nothing can refresh — cursor-agent
+    // itself signs in again. Past `exp` the account waits for a re-login.
+    if (account.provider === 'cursor') {
+      if (account.status !== 'error' && account.expiresAt && Date.now() >= normalizeExpiresAt(account.expiresAt)) {
+        this.markAuthenticationError(account, 'refresh-failed');
+      }
+      return;
+    }
 
     if (!force && !isTokenExpiringSoon(account.expiresAt)) return;
 
@@ -2005,7 +2034,7 @@ export class AccountManager {
       planType: acctData.planType || null,
       expiresAt: acctData.expiresAt || null,
       ...(provider === 'agy' ? { projectId: acctData.projectId || null } : {}),
-      ...(provider === 'grok' ? { email: acctData.email || null, teamId: acctData.teamId || null } : {}),
+      ...(provider === 'grok' || provider === 'cursor' ? { email: acctData.email || null, teamId: acctData.teamId || null } : {}),
       status: organizationDisabled || subscriptionEnded ? 'error' : 'active',
       subscriptionDisabled: organizationDisabled ? true : undefined,
       subscriptionCancellation: subscriptionCancellation || undefined,
@@ -2255,6 +2284,7 @@ export class AccountManager {
           Object.entries(a.quota.modelWeekly).map(([k, w]) => [k, { ...w }])),
         ...(a.quota.agyGroups ? { agyGroups: structuredClone(a.quota.agyGroups) } : {}),
         ...(a.quota.grokRateLimit ? { grokRateLimit: { ...a.quota.grokRateLimit } } : {}),
+        ...(a.quota.cursorUsage ? { cursorUsage: { ...a.quota.cursorUsage } } : {}),
       },
       usage: { ...a.usage },
       inflight: a.inflight,
