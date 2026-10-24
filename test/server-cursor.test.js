@@ -526,3 +526,28 @@ test('every attempt ended without a byte: the dead end says the upstream answere
     await closeAll(proxy.cursorH2, proxy, agent.server);
   }
 });
+
+// Found while adding the OpenAI surface (2026-10-25): with every login expired or parked before the request,
+// both dead ends answered resource_exhausted ("pool exhausted"), so cursor-agent told the user to wait for usage
+// instead of signing in again.
+test('every login expired or parked before the request: both dead ends say unauthenticated, not out of usage', async () => {
+  const agent = await agentUpstream();
+  const api = await apiUpstream((call, res) => { res.writeHead(200); res.end(); });
+  const { manager, proxy, h2, url } = await cursorProxy([
+    cursorAccount('old', { expiresAt: Date.now() - 1000 }), cursorAccount('parked'),
+  ], { agent: agent.url, api: api.url });
+  manager.markAuthenticationError(manager.accounts[1], 'auth-revoked');
+  try {
+    const stream = await runStream(h2);
+    assert.equal(stream.body[0], 2);
+    assert.equal(JSON.parse(stream.body.subarray(5).toString()).error.code, 'unauthenticated');
+    const unary = await fetch(`${url}/aiserver.v1.DashboardService/GetMe`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'local-proxy-key' }, body: '{}',
+    });
+    assert.equal(unary.status, 401);
+    assert.equal((await unary.json()).code, 'unauthenticated');
+    assert.equal(agent.calls.length + api.calls.length, 0);
+  } finally {
+    await closeAll(proxy.cursorH2, proxy, agent.server, api.server);
+  }
+});

@@ -110,6 +110,7 @@ import {
   readCursorLocalLogin,
   resolveCursorBin,
 } from './cursor.js';
+import { isCursorLanePath } from './cursor-openai.js';
 
 const SUPERVISED_WORKER_ENV = 'TEAMCLAUDE_SUPERVISED_WORKER';
 const SUPERVISOR_PID_ENV = 'TEAMCLAUDE_SUPERVISOR_PID';
@@ -640,6 +641,15 @@ async function superviseServerCommand() {
       rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
         type: 'error',
         error: { type: 'permission_error', message: 'Account sync is local-only.' },
+      });
+      return;
+    }
+    // Same for the Cursor OpenAI lane (its cursor-agent children dial localhost);
+    // meaningless in other modes, so it is fenced whatever the provider.
+    if (isCursorLanePath(req.url) && !isLocal) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'The TeamCursor lane is local-only.' },
       });
       return;
     }
