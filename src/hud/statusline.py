@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only TeamCodex/TeamAgy/TeamGrok quota HUD. Rendering adapted from the Claude status line (../../statusline)."""
+"""Read-only TeamCodex/TeamAgy/TeamGrok/TeamCursor quota HUD. Rendering adapted from the Claude status line (../../statusline)."""
 
 import argparse
 import base64
@@ -279,9 +279,11 @@ def cache_row(usage):
 
 
 # agy (Antigravity) pools Google accounts with two quota groups: Gemini (5h/7d bars) and Claude/GPT (3p).
-# grok has one meter (x-ratelimit requests/tokens, no reset) shown as the RL bar.
+# grok has one meter (x-ratelimit requests/tokens, no reset) shown as the RL bar; cursor one too (included usage
+# of the billing cycle, reset = cycle end) shown as the Use bar.
 NAMES = {"codex": ("TeamCodex", "teamcodex login --name codex-1"), "agy": ("TeamAgy", "teamagy import --name pro-1"),
-         "grok": ("TeamGrok", "teamgrok login --name grok-1")}
+         "grok": ("TeamGrok", "teamgrok login --name grok-1"),
+         "cursor": ("TeamCursor", "teamcursor login --name cursor-1")}
 
 
 def claude_rows(color=True):
@@ -302,13 +304,14 @@ def claude_rows(color=True):
     return result.stdout.decode(errors="replace").rstrip("\n").split("\n")
 
 
-def render(data, now=None, color=False, width=100, agy=False, grok=False):
+def render(data, now=None, color=False, width=100, agy=False, grok=False, cursor=False):
     now = time.time() if now is None else now
     accounts = data["accounts"]
     threshold = number(data.get("switchThreshold"))
     threshold_label = f"{threshold * 100:.0f}%" if threshold is not None else "-"
-    title, add_account = NAMES["agy" if agy else "grok" if grok else "codex"]
-    legend = " | 5h 7d Gemini, 3p Claude/GPT" if agy else " | RL rate limit" if grok else ""
+    title, add_account = NAMES["agy" if agy else "grok" if grok else "cursor" if cursor else "codex"]
+    legend = (" | 5h 7d Gemini, 3p Claude/GPT" if agy else " | RL rate limit" if grok
+              else " | Use included usage" if cursor else "")
     rows = [paint(f"{title} | {len(accounts)} accounts | switch {threshold_label}{legend} | > selected, * busy"[:width], "1;36", color)]
     if not accounts:
         return rows + ["No accounts. Run: " + add_account]
@@ -323,8 +326,9 @@ def render(data, now=None, color=False, width=100, agy=False, grok=False):
         prefix = f"{marker} {clean(label, name_width):<{name_width}} {clean(plan, plan_width):<{plan_width}} {state:<{state_width}}"
         bg = 235 if len(rows) % 2 else 239
         track = f"48;5;{bg + 3}"
-        rendered = (paint(prefix, accent, color) + (" RL " if grok else " 5h ") + bar(*five, now, color, bar_width, track)
-                + ("" if grok else " 7d " + bar(*week, now, color, bar_width, track))
+        rendered = (paint(prefix, accent, color) + (" RL " if grok else " Use " if cursor else " 5h ")
+                + bar(*five, now, color, bar_width, track)
+                + ("" if grok or cursor else " 7d " + bar(*week, now, color, bar_width, track))
                 + (" 3p " + bar(*third, now, color, bar_width, track) if third is not None else "")
                 + (" End " + subscription_bar(subscription, now, color, end_width) if subscription is not None else ""))
         if color:
@@ -356,8 +360,8 @@ def render(data, now=None, color=False, width=100, agy=False, grok=False):
                         (quota.get("unified5h"), quota.get("unified5hReset")),
                         (quota.get("unified7d"), quota.get("unified7dReset")),
                         "31" if state == "error" else ("36", "32", "33", "35")[index % 4],
-                        # agy and grok have no subscription end date; agy's third bar is the Claude/GPT group.
-                        None if agy or grok else account.get("subscription") or {},
+                        # agy, grok and cursor have no subscription end date; agy's third bar is the Claude/GPT group.
+                        None if agy or grok or cursor else account.get("subscription") or {},
                         window(quota, "3p") if agy else None))
     return rows
 
@@ -366,17 +370,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agy", action="store_true", help="TeamAgy (Antigravity) pool instead of TeamCodex")
     parser.add_argument("--grok", action="store_true", help="TeamGrok pool instead of TeamCodex")
+    parser.add_argument("--cursor", action="store_true", help="TeamCursor pool instead of TeamCodex")
     parser.add_argument("--claude", action="store_true", help="TeamClaude pool, rows from the Claude Code status line")
     parser.add_argument("--config", type=Path,
-                        help="default: ~/.config/teamcodex.json, teamagy.json with --agy, teamgrok.json with --grok")
+                        help="default: ~/.config/teamcodex.json, teamagy.json with --agy, teamgrok.json with --grok, "
+                             "teamcursor.json with --cursor")
     parser.add_argument("--watch", action="store_true", help="refresh every two seconds")
     parser.add_argument("--plain", action="store_true", help="disable ANSI colors")
     parser.add_argument("--codex-pane", help="tmux pane whose latest request cache usage is shown")
     args = parser.parse_args()
-    command = "teamclaude" if args.claude else "teamagy" if args.agy else "teamgrok" if args.grok else "teamcodex"
+    command = ("teamclaude" if args.claude else "teamagy" if args.agy else "teamgrok" if args.grok
+               else "teamcursor" if args.cursor else "teamcodex")
     config = args.config or Path.home() / f".config/{command}.json"
     title, add_account = (("TeamClaude", "teamclaude login") if args.claude
-                          else NAMES["agy" if args.agy else "grok" if args.grok else "codex"])
+                          else NAMES["agy" if args.agy else "grok" if args.grok else "cursor" if args.cursor else "codex"])
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and not args.plain
     watching = args.watch and sys.stdout.isatty()
     # In the tmux footer the pane height follows the row count, so adding or removing an account resizes it.
@@ -394,7 +401,7 @@ def main():
             try:
                 rows = (claude_rows(color) if args.claude else
                         render(read_status(config), color=color, width=shutil.get_terminal_size().columns,
-                               agy=args.agy, grok=args.grok))
+                               agy=args.agy, grok=args.grok, cursor=args.cursor))
                 # The Claude status line prints one "TC down"/"not installed" row instead of raising. The account
                 # count is unknown then, so the footer keeps its height (a proxy restart must not resize the CLI).
                 failed = args.claude and len(rows) == 1 and re.sub(r"\033\[[0-9;]*m", "", rows[0]).endswith(

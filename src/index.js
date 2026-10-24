@@ -4,6 +4,7 @@ import { fork, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync, realpathSync, unlinkSync } from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -96,6 +97,19 @@ import {
   refreshGrokAccessToken,
   resolveGrokBin,
 } from './grok.js';
+import {
+  CURSOR_DEFAULT_AGENT_UPSTREAM,
+  CURSOR_DEFAULT_UPSTREAM,
+  buildCursorRunEnv,
+  cursorCliNotFoundMessage,
+  fetchCursorMe,
+  fetchCursorUsage,
+  h2cFrontServer,
+  h2cSniffer,
+  loginCursorBrowser,
+  readCursorLocalLogin,
+  resolveCursorBin,
+} from './cursor.js';
 
 const SUPERVISED_WORKER_ENV = 'TEAMCLAUDE_SUPERVISED_WORKER';
 const SUPERVISOR_PID_ENV = 'TEAMCLAUDE_SUPERVISOR_PID';
@@ -195,7 +209,7 @@ function publicRequestCapacity(config, accounts = config.accounts || []) {
 }
 
 const args = process.argv.slice(2);
-const cliProvider = ['codex', 'agy', 'grok'].includes(args[0]) ? args[0] : 'anthropic';
+const cliProvider = ['codex', 'agy', 'grok', 'cursor'].includes(args[0]) ? args[0] : 'anthropic';
 if (cliProvider !== 'anthropic') {
   args.shift();
   process.env.TEAMCLAUDE_PROVIDER = cliProvider;
@@ -208,13 +222,16 @@ const MACHINE_COMMANDS = new Set(['accounts', 'status', 'enable', 'disable', 'pr
 const AGY_MODE = process.env.TEAMCLAUDE_PROVIDER === 'agy';
 // grok mode, same two legs (`grok` prefix or TEAMCLAUDE_PROVIDER=grok).
 const GROK_MODE = process.env.TEAMCLAUDE_PROVIDER === 'grok';
+// cursor mode, same two legs (`cursor` prefix or TEAMCLAUDE_PROVIDER=cursor).
+const CURSOR_MODE = process.env.TEAMCLAUDE_PROVIDER === 'cursor';
 // Pools that own their config file outright (see poolConfigMismatch).
-const DEDICATED_MODE = AGY_MODE ? 'agy' : GROK_MODE ? 'grok' : null;
+const DEDICATED_MODE = AGY_MODE ? 'agy' : GROK_MODE ? 'grok' : CURSOR_MODE ? 'cursor' : null;
 const POOL_LABELS = {
   agy: { tag: 'TeamAgy', name: 'Antigravity (agy)', a: 'an', file: 'teamagy.json', cli: 'teamagy' },
   grok: { tag: 'TeamGrok', name: 'Grok', a: 'a', file: 'teamgrok.json', cli: 'teamgrok' },
+  cursor: { tag: 'TeamCursor', name: 'Cursor', a: 'a', file: 'teamcursor.json', cli: 'teamcursor' },
 };
-// Claude/Codex-only commands are not offered for the Antigravity or Grok pool.
+// Claude/Codex-only commands are not offered for the Antigravity, Grok or Cursor pool.
 const AGY_UNSUPPORTED_COMMANDS = new Set([
   'reauth', 'subscription', 'api', 'install-claude-wrapper', 'uninstall-claude-wrapper',
 ]);
@@ -401,7 +418,7 @@ async function superviseServerCommand() {
   // destroyed client socket ("Connection closed mid-response" in Claude Code,
   // which does NOT auto-retry a raw connection loss).
   const streamRecovery = !isCodexMode(config) && !isAgyMode(config) && !isGrokMode(config)
-    && config.streamRecovery !== false;
+    && !isCursorMode(config) && config.streamRecovery !== false;
   const streamIdleTimeoutMs = Number.isFinite(config.streamIdleTimeoutMs)
       && config.streamIdleTimeoutMs > 0
     ? Math.floor(config.streamIdleTimeoutMs)
@@ -446,6 +463,12 @@ async function superviseServerCommand() {
   let deploymentDraining = false;
   let deploymentDrainTimer = null;
   let activePublicRequests = 0;
+  // cursor: h2 agent streams the worker relays (tunnelled, so invisible here) — reported over IPC.
+  let workerH2Streams = 0;
+  const activeRequests = () => activePublicRequests + workerH2Streams;
+  const tellWorkerDraining = () => {
+    try { if (worker?.connected) worker.send({ type: 'teamcodex:draining', draining: deploymentDraining }); } catch { /* replaced worker */ }
+  };
   let activeBufferedRequestBytes = 0;
   let restartCount = 0;
   let restartTimer = null;
@@ -543,12 +566,14 @@ async function superviseServerCommand() {
       deploymentDrainTimer = setTimeout(() => {
         deploymentDraining = false;
         deploymentDrainTimer = null;
+        tellWorkerDraining();
       }, deploymentDrainLeaseMs);
       deploymentDrainTimer.unref?.();
     }
+    tellWorkerDraining();
     rejectPublicRequest(req, res, 200, { 'content-type': 'application/json' }, {
       draining: deploymentDraining,
-      activeRequests: activePublicRequests,
+      activeRequests: activeRequests(),
     });
     return true;
   }
@@ -622,7 +647,7 @@ async function superviseServerCommand() {
       return;
     }
     if (req.method === 'GET' && req.url === '/teamclaude/status') {
-      res.setHeader('x-teamcodex-active-requests', String(activePublicRequests));
+      res.setHeader('x-teamcodex-active-requests', String(activeRequests()));
       res.setHeader('x-teamcodex-source-hash', RUNTIME_SOURCE_HASH);
       res.setHeader('x-teamcodex-deployment-draining', deploymentDraining ? '1' : '0');
     }
@@ -803,12 +828,27 @@ async function superviseServerCommand() {
     }
   }
 
+  // cursor mode: the public port also takes cursor-agent's h2c agent stream,
+  // tunnelled to the worker's h2c listener (h2cSniffer); HTTP/1.1 still lands on
+  // `listener`. Elsewhere the public server IS `listener`.
+  let workerH2Port = null;
+  const cursorSniffer = isCursorMode(config)
+    ? h2cSniffer(listener, () => (workerReady && worker ? workerH2Port : null))
+    : null;
+  const publicServer = cursorSniffer ? h2cFrontServer(listener, cursorSniffer) : listener;
+  let publicServerV6 = null;
+
   function closePublicListener(force = false) {
-    try { listener.close(); } catch {}
+    try { publicServer.close(); } catch {}
+    if (publicServer !== listener) try { listener.close(); } catch {} // stops its connection-tracking interval
+    try { publicServerV6?.close(); } catch {}
     workerReady = false;
     workerPort = null;
     wakeWorkerWaiters();
-    if (force) listener.closeAllConnections?.();
+    if (force) {
+      listener.closeAllConnections?.();
+      cursorSniffer?.destroyTunnels();
+    }
   }
 
   async function handlePublicRequest(req, res, reserveRequestBytes) {
@@ -1126,7 +1166,7 @@ async function superviseServerCommand() {
     // The `agy`/`grok` prefix keeps the worker in that mode even under an entry
     // point that clears TEAMCLAUDE_PROVIDER (src/teamclaude.js).
     const child = fork(process.argv[1], isAgyMode(config) ? ['agy', 'server']
-      : isGrokMode(config) ? ['grok', 'server'] : ['server'], {
+      : isGrokMode(config) ? ['grok', 'server'] : isCursorMode(config) ? ['cursor', 'server'] : ['server'], {
       env: childEnv,
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     });
@@ -1145,6 +1185,10 @@ async function superviseServerCommand() {
         requestShutdown({ workerWillExit: true });
         return;
       }
+      if (message?.type === 'teamcodex:h2-streams' && Number.isFinite(message.count)) {
+        workerH2Streams = Math.max(0, Math.floor(message.count));
+        return;
+      }
       if (message?.type === 'teamcodex:capacity'
           && Number.isFinite(message.maxPublicRequests)) {
         maxPublicRequests = Math.max(0, Math.floor(message.maxPublicRequests));
@@ -1157,6 +1201,9 @@ async function superviseServerCommand() {
       becameReady = true;
       workerReady = true;
       workerPort = message.internalPort;
+      workerH2Port = message.internalH2Port ?? null;
+      workerH2Streams = 0; // a new worker starts with none
+      if (deploymentDraining) tellWorkerDraining();
       hasBeenReady = true;
       healthFailures = 0;
       writeServerState({
@@ -1403,16 +1450,31 @@ async function superviseServerCommand() {
     const onListenError = err => {
       handleServerListenError(err, port);
     };
-    listener.once('error', onListenError);
+    publicServer.once('error', onListenError);
     // proxy.host pins the bind address (app installs use 127.0.0.1); unset keeps all interfaces.
     const host = typeof config?.proxy?.host === 'string' ? config.proxy.host.trim() : '';
-    listener.listen(...(host ? [port, host] : [port]), () => {
-      listener.removeListener('error', onListenError);
-      listener.on('error', err => {
+    // cursor: `localhost` binds both loopbacks explicitly (cursor-agent tries ::1 first).
+    const bindHost = cursorSniffer && host === 'localhost' ? '127.0.0.1' : host;
+    if (cursorSniffer && (host === '0.0.0.0' || host === '::')) {
+      console.error(`[TeamCursor] proxy.host ${host} exposes the pool beyond this machine; cursor-agent only needs localhost.`);
+    }
+    publicServer.listen(...(bindHost ? [port, bindHost] : [port]), () => {
+      publicServer.removeListener('error', onListenError);
+      publicServer.on('error', err => {
         console.error(
           `[TeamClaude] Public listener runtime error${err.code ? ` (${err.code})` : ''}: ${err.message}`,
         );
       });
+      // cursor-agent reaches `localhost` over ::1 first and its h2 agent stream
+      // never falls back to IPv4, so a loopback-pinned cursor pool listens there too.
+      if (cursorSniffer && (host === '127.0.0.1' || host === 'localhost')) {
+        publicServerV6 = net.createServer(cursorSniffer);
+        publicServerV6.on('error', err => {
+          console.error(`[TeamCursor] Could not also listen on [::1]:${port} (${err.code || err.message}); `
+            + 'cursor-agent may not reach the proxy over localhost.');
+        });
+        publicServerV6.listen(port, '::1');
+      }
       launchWorker();
       healthTimer = setInterval(checkWorkerHealth, workerHealthIntervalMs);
       healthTimer.unref?.();
@@ -1434,10 +1496,12 @@ async function proxyWorkerCommand() {
   if (!config.provider && isCodexMode(config)) config.provider = 'codex';
   if (!config.provider && isAgyMode(config)) config.provider = 'agy';
   if (!config.provider && isGrokMode(config)) config.provider = 'grok';
+  if (!config.provider && isCursorMode(config)) config.provider = 'cursor';
   const codexMode = isCodexMode(config);
   const agyMode = config.provider === 'agy';
   const grokMode = config.provider === 'grok';
-  const dedicatedMode = agyMode ? 'agy' : grokMode ? 'grok' : null;
+  const cursorMode = config.provider === 'cursor';
+  const dedicatedMode = agyMode ? 'agy' : grokMode ? 'grok' : cursorMode ? 'cursor' : null;
 
   // --log-to <dir>
   const logTo = argValue('--log-to');
@@ -1457,6 +1521,9 @@ async function proxyWorkerCommand() {
     } else if (grokMode) {
       console.error('  teamgrok login             xAI sign-in (device code) for an account');
       console.error('  teamgrok import            Import the local grok login (~/.grok/auth.json)');
+    } else if (cursorMode) {
+      console.error('  teamcursor login           Cursor sign-in (browser) for an account');
+      console.error('  teamcursor import          Import the local cursor-agent login');
     } else {
       console.error('  teamcodex import           Import from Claude Code');
       console.error('  teamcodex login            OAuth login via browser');
@@ -1481,7 +1548,7 @@ async function proxyWorkerCommand() {
   // when it cannot serve the request's quota group.
   const reevalIntervalMs = Number.isFinite(config.reevalIntervalMs)
     ? config.reevalIntervalMs
-    : agyMode || grokMode ? 0 : 5 * 60 * 1000;
+    : agyMode || grokMode || cursorMode ? 0 : 5 * 60 * 1000;
   // Default per-account concurrency cap (max simultaneous in-flight requests an
   // account handles before load spreads to the next account). A per-account
   // `maxConcurrent` overrides this. Must be a positive number, else default 3.
@@ -1689,6 +1756,9 @@ async function proxyWorkerCommand() {
   // is 60 s apart and the exit handler never runs on SIGKILL, so without this
   // a crash right after the backend consumed a credit would forget the
   // cooldown and let a restart redeem the same account again.
+  hooks.onCursorStreams = count => {
+    try { if (process.connected) process.send({ type: 'teamcodex:h2-streams', count }); } catch { /* supervisor gone */ }
+  };
   hooks.onResetCreditLedger = () => {
     try {
       saveQuotaSnapshot();
@@ -1747,6 +1817,14 @@ async function proxyWorkerCommand() {
   // listen failure and exit the whole proxy.
   const onListenError = err => handleServerListenError(err, port);
   server.once('error', onListenError);
+  // cursor-agent's agent stream is h2c: the supervisor tunnels those
+  // connections to this loopback listener (see h2cSniffer).
+  const internalH2Port = server.cursorH2
+    ? await new Promise((resolve, reject) => {
+      server.cursorH2.once('error', reject);
+      server.cursorH2.listen(0, '127.0.0.1', () => resolve(server.cursorH2.address().port));
+    })
+    : null;
 
   server.listen(0, '127.0.0.1', () => {
     server.removeListener('error', onListenError);
@@ -1756,6 +1834,7 @@ async function proxyWorkerCommand() {
         type: 'teamcodex:ready',
         port,
         internalPort: address.port,
+        ...(internalH2Port ? { internalH2Port } : {}),
         maxPublicRequests: publicRequestCapacity(config, accountManager.accounts),
       });
     }
@@ -1779,7 +1858,8 @@ async function proxyWorkerCommand() {
       const sep = '='.repeat(60);
       console.log('');
       console.log(sep);
-      console.log(codexMode ? '  TeamCodex Proxy' : agyMode ? '  TeamAgy Proxy' : grokMode ? '  TeamGrok Proxy' : '  TeamClaude Proxy');
+      console.log(codexMode ? '  TeamCodex Proxy' : agyMode ? '  TeamAgy Proxy' : grokMode ? '  TeamGrok Proxy'
+        : cursorMode ? '  TeamCursor Proxy' : '  TeamClaude Proxy');
       console.log(sep);
       console.log(`  Port:       ${port}`);
       console.log(`  Accounts:   ${accounts.length}`);
@@ -1788,6 +1868,7 @@ async function proxyWorkerCommand() {
       console.log(`  Upstream:   ${agyMode
         ? config.agyUpstream || config.upstream || AGY_DEFAULT_UPSTREAM
         : grokMode ? grokUpstreamOf(config)
+        : cursorMode ? `${cursorUpstreamOf(config)} (agent ${config.cursorAgentUpstream || CURSOR_DEFAULT_AGENT_UPSTREAM})`
         : config.upstream || (codexMode ? 'https://chatgpt.com/backend-api/codex' : 'https://api.anthropic.com')}`);
       console.log('');
       accounts.forEach((a, i) => {
@@ -1800,14 +1881,18 @@ async function proxyWorkerCommand() {
           ? '  Run agy through proxy:     teamagy run   (or: node src/index.js agy run)'
           : grokMode
             ? '  Run grok through proxy:    teamgrok run  (or: node src/index.js grok run)'
-            : '  Run Claude through proxy:  teamcodex run');
+            : cursorMode
+              ? '  Run cursor-agent through:  teamcursor run  (or: node src/index.js cursor run)'
+              : '  Run Claude through proxy:  teamcodex run');
       console.log(codexMode
         ? '  Show env vars:             teamcodex codex env'
         : agyMode
           ? '  Show env vars:             teamagy env   (or: node src/index.js agy env)'
           : grokMode
             ? '  Show env vars:             teamgrok env  (or: node src/index.js grok env)'
-            : '  Show env vars:             teamcodex env');
+            : cursorMode
+              ? '  Show env vars:             teamcursor env  (or: node src/index.js cursor env)'
+              : '  Show env vars:             teamcodex env');
       console.log(sep);
       console.log('');
     }
@@ -1837,6 +1922,10 @@ async function proxyWorkerCommand() {
   // event loop is running, which its HTTP probe cannot tell apart from a
   // starved host — and it costs no listener, no request path, no allocation.
   process.on('message', message => {
+    if (message?.type === 'teamcodex:draining') {
+      server.setDraining?.(message.draining === true);
+      return;
+    }
     if (message?.type !== 'teamcodex:ping' || !process.connected) return;
     try {
       process.send({ type: 'teamcodex:pong', id: message.id });
@@ -2277,6 +2366,10 @@ async function importCommand() {
     await agyImportCommand(config);
     return;
   }
+  if (isCursorMode(config)) {
+    await cursorImportCommand(config);
+    return;
+  }
   if (isGrokMode(config)) {
     await grokImportCommand(config);
     return;
@@ -2353,6 +2446,14 @@ async function loginCommand() {
       process.exit(1);
     }
     await grokLoginCommand(config);
+    return;
+  }
+  if (isCursorMode(config)) {
+    if (args.includes('--api')) {
+      console.error('The Cursor pool supports Cursor sign-in accounts only (API keys are out of scope).');
+      process.exit(1);
+    }
+    await cursorLoginCommand(config);
     return;
   }
   if (!config.provider && cliProvider === 'codex') config.provider = 'codex';
@@ -2679,6 +2780,8 @@ async function loginMachineCommand(config) {
       account = await upsertAgyAccount(config, argValue('--name'), creds, 'login');
     } else if (isGrokMode(config)) {
       account = await upsertGrokAccount(config, argValue('--name'), await grokDeviceLogin(config), 'login');
+    } else if (isCursorMode(config)) {
+      account = await upsertCursorAccount(config, argValue('--name'), await cursorBrowserLogin(config), 'login');
     } else if (isCodexMode(config) || (!config.provider && cliProvider === 'codex')) {
       const creds = await loginCodexCredentials({ deviceAuth: args.includes('--device-auth') });
       account = await upsertCodexAccount(argValue('--name'), creds, 'login');
@@ -2706,6 +2809,12 @@ async function envCommand() {
   if (isGrokMode(config)) {
     const running = await findRunningServer(config);
     console.log(`export GROK_CLI_CHAT_PROXY_BASE_URL=http://127.0.0.1:${running?.port || config.proxy.port}/v1`);
+    return;
+  }
+  if (isCursorMode(config)) {
+    // `localhost`, not an IP: cursor-agent sends inference to the endpoint only when its name says localhost.
+    const running = await findRunningServer(config);
+    console.log(`export CURSOR_API_ENDPOINT=http://localhost:${running?.port || config.proxy.port}`);
     return;
   }
   if (isCodexMode(config)) {
@@ -3008,6 +3117,7 @@ async function codexResumeCommand() {
 async function runCommand(clientArgsOverride = null) {
   if (isAgyMode(null)) return agyRunCommand();
   if (isGrokMode(null)) return grokRunCommand();
+  if (isCursorMode(null)) return cursorRunCommand();
   if (cliProvider !== 'codex' && process.env.TEAMCLAUDE_SESSION_SUPERVISED === '1') {
     console.error(
       '[TeamClaude] Refusing nested supervised Claude launch: TEAMCLAUDE_CLAUDE_BIN must point to the native Claude vendor binary.',
@@ -3286,6 +3396,8 @@ async function statusCommand() {
         // grok: one meter (the fuller of x-ratelimit requests/tokens), no windows.
         let line = acct.provider === 'grok'
           ? `    Rate limit used: ${ses}`
+          : acct.provider === 'cursor'
+            ? `    Usage:    ${ses} of included usage${q.unified5hReset ? `    cycle ends ${new Date(q.unified5hReset).toISOString()}` : ''}`
           : `    Session:  ${ses} used    Weekly: ${wk} used`;
         // Model-scoped weekly windows (7d_oi = the Fable weekly limit). Guarded
         // with ?. so a status from an older running server (no modelWeekly
@@ -3400,7 +3512,7 @@ async function accountsCommand() {
     config = await atomicConfigUpdate(async cfg => {
       await Promise.all(cfg.accounts.map(async account => {
         if (account.type !== 'oauth' || !account.refreshToken || account.provider === 'agy'
-          || !isTokenExpiringSoon(account.expiresAt)) return;
+          || account.provider === 'cursor' || !isTokenExpiringSoon(account.expiresAt)) return;
         try {
           const newTokens = account.provider === 'codex'
             ? await refreshCodexAccessToken(account.refreshToken)
@@ -3428,7 +3540,7 @@ async function accountsCommand() {
           provider: 'codex',
         };
       }
-      if (a.provider === 'agy' || a.provider === 'grok') {
+      if (['agy', 'grok', 'cursor'].includes(a.provider)) {
         return { accountUuid: a.accountUuid || null, email: a.email || null, provider: a.provider };
       }
       // The running worker owns token rotation. Sending an already-expired token
@@ -3449,7 +3561,7 @@ async function accountsCommand() {
       accessToken: account.accessToken,
       refreshToken: account.refreshToken,
       accountUuid: profile.accountUuid,
-      name: !['codex', 'agy', 'grok'].includes(account.provider) && profile.email
+      name: !['codex', 'agy', 'grok', 'cursor'].includes(account.provider) && profile.email
         ? profile.email
         : account.name,
     }];
@@ -3471,7 +3583,7 @@ async function accountsCommand() {
         // Update stored UUID and name from profile
         if (profiles[i] && !profiles[i].error) {
           a.accountUuid = profiles[i].accountUuid;
-          if (!['codex', 'agy', 'grok'].includes(a.provider) && profiles[i].email) a.name = profiles[i].email;
+          if (!['codex', 'agy', 'grok', 'cursor'].includes(a.provider) && profiles[i].email) a.name = profiles[i].email;
         }
       }
     }
@@ -3520,6 +3632,14 @@ async function accountsCommand() {
       console.log(`  [${i + 1}] ${a.name} (Grok ${a.planType || 'tier unknown'}${src})`);
       if (a.email && a.email !== a.name) console.log(`       Email: ${a.email}`);
       if (verbose && a.expiresAt) printTokenExpiry(a.expiresAt);
+      continue;
+    }
+    if (a.provider === 'cursor') {
+      const src = a.source ? `, ${a.source}` : '';
+      console.log(`  [${i + 1}] ${a.name} (Cursor ${a.planType || 'plan unknown'}${src})`);
+      if (a.email && a.email !== a.name) console.log(`       Email: ${a.email}`);
+      // No refresh exists: the expiry is when this account needs `teamcursor login` again.
+      if (a.expiresAt) printTokenExpiry(a.expiresAt);
       continue;
     }
     if (a.provider === 'agy') {
@@ -3924,6 +4044,44 @@ Options:
   --name NAME         Set account name (login/import; default grok-1, grok-2, …)
   --file PATH         grok auth.json to import (import)
   --log-to DIR        Log full requests/responses to DIR
+
+Config: ${getConfigPath()}
+`);
+    return;
+  }
+  if (CURSOR_MODE) {
+    console.log(`TeamCursor - Multi-account Cursor (cursor-agent) proxy
+
+Usage: teamcursor [command] [options]
+       node src/index.js cursor [command] [options]
+
+Commands:
+  server              Start the Cursor proxy server (default port 3460)
+  stop                Stop the running proxy
+  restart             Restart the proxy
+  login               Add an account: Cursor sign-in in the browser
+  import              Import cursor-agent's own login (macOS keychain; shares its token)
+  import --file PATH  Import a {accessToken, refreshToken} JSON file instead
+  run [-- args...]    Run cursor-agent through the proxy (starts the proxy if needed)
+  env                 Print the CURSOR_API_ENDPOINT to use with cursor-agent
+  status              Show proxy & account status
+  reload              Re-read every account's usage and plan now, then show status
+  accounts            List configured accounts (with token expiry)
+  remove <name>       Remove an account (its Cursor session is not revoked)
+  disable <name>      Disable an account
+  enable <name>       Re-enable an account
+  priority <name> <n> Set selection priority ("auto" clears it)
+  update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  help                Show this help
+
+cursor-agent itself must be signed in once (cursor-agent login, any account); the
+proxy replaces its credentials with the pool account's on every call. Cursor
+tokens last 60 days and are not refreshed: sign in again when one expires.
+
+Options:
+  --name NAME         Set account name (login/import; default cursor-1, cursor-2, …)
+  --file PATH         auth.json to import (import)
+  --log-to DIR        Log full HTTP/1.1 requests/responses to DIR
 
 Config: ${getConfigPath()}
 `);
@@ -4485,6 +4643,157 @@ async function upsertGrokAccount(config, explicitName, creds, source) {
   return name;
 }
 
+// ── Cursor (cursor-agent) ───────────────────────────────────
+
+function assertCursorConfig(cfg) {
+  if (cfg.provider !== 'cursor') {
+    throw new Error(`${getConfigPath()} is not a Cursor config (provider: ${cfg.provider ? `"${cfg.provider}"` : 'unset'}) — not writing to it.`);
+  }
+}
+
+function cursorUpstreamOf(config) {
+  return config?.cursorUpstream || config?.upstream || CURSOR_DEFAULT_UPSTREAM;
+}
+
+function cursorBrowserLogin(config) {
+  return loginCursorBrowser({
+    apiUrl: cursorUpstreamOf(config),
+    websiteUrl: config.cursorWebsiteUrl || undefined,
+  });
+}
+
+async function cursorLoginCommand(config) {
+  try {
+    await upsertCursorAccount(config, argValue('--name'), await cursorBrowserLogin(config), 'login');
+  } catch (err) {
+    console.error(`[TeamCursor] ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function cursorImportCommand(config) {
+  let creds;
+  try {
+    creds = readCursorLocalLogin({ file: argValue('--file') });
+  } catch (err) {
+    console.error(`[TeamCursor] Import failed: ${err.message}`);
+    process.exit(1);
+  }
+  const expires = creds.expiresAt ? new Date(creds.expiresAt).toISOString() : 'an unknown date';
+  console.error(`Warning: the pool now uses the local cursor-agent login's token. Cursor tokens are not refreshed; this one `
+    + `stops working on ${expires}. Prefer \`teamcursor login\` (its own sign-in).`);
+  try {
+    await upsertCursorAccount(config, argValue('--name'), creds, 'import');
+  } catch (err) {
+    console.error(`[TeamCursor] Import failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function cursorRunCommand(config = null) {
+  config ??= await loadOrCreateConfig();
+  if (!Array.isArray(config.accounts) || config.accounts.length === 0) {
+    console.error('[TeamCursor] No accounts configured. Add one first: teamcursor login (generic: node src/index.js cursor login).');
+    process.exit(1);
+  }
+  let running;
+  try {
+    // The `cursor` prefix survives an entry point that clears TEAMCLAUDE_PROVIDER.
+    running = await ensureProxyRunning(config, 15_000, ['cursor', 'server']);
+  } catch (err) {
+    console.error(`[TeamCursor] ${err.message}`);
+    process.exit(1);
+  }
+  const clientArgs = args.slice(1);
+  if (clientArgs[0] === '--') clientArgs.shift();
+  const cursorBin = resolveCursorBin();
+  const result = spawnSync(cursorBin, clientArgs, {
+    stdio: 'inherit',
+    env: buildCursorRunEnv(process.env, running.port),
+  });
+  if (result.error) {
+    console.error(result.error.code === 'ENOENT'
+      ? cursorCliNotFoundMessage(cursorBin)
+      : `Failed to start cursor-agent: ${result.error.message}`);
+    process.exit(1);
+  }
+  return propagateChildExit(result);
+}
+
+/**
+ * Add or update a Cursor account. Identity is GetMe `userId` (else the JWT `sub`): a re-login of the same
+ * user updates it in place (routing settings kept). Tokens are never revoked.
+ */
+async function upsertCursorAccount(config, explicitName, creds, source) {
+  if (creds.expiresAt && Date.now() >= creds.expiresAt) {
+    throw new Error('this Cursor login has expired; sign in again (teamcursor login)');
+  }
+  const upstream = cursorUpstreamOf(config);
+  let me = null;
+  try {
+    me = await fetchCursorMe(creds.accessToken, { upstream });
+  } catch (err) {
+    console.error(`Warning: ${err.message} — identity from the token only`);
+  }
+  let usage = null;
+  try {
+    usage = await fetchCursorUsage(creds.accessToken, { upstream });
+  } catch (err) {
+    console.error(`Warning: ${err.message} — plan unknown`);
+  }
+  const userId = me?.userId || creds.accountUuid;
+  if (!userId) throw new Error('Could not tell which Cursor user this login belongs to (no userId).');
+  let name = explicitName || null;
+  let action = 'Added';
+  const savedConfig = await atomicConfigUpdate(cfg => {
+    assertCursorConfig(cfg);
+    assertNameFree(cfg, explicitName);
+    // Same user = same GetMe userId, or the same JWT sub (GetMe may have failed on one of the logins).
+    const sub = creds.accountUuid || null;
+    const same = a => a.provider === 'cursor' && (a.accountUuid === userId || (sub && (a.cursorSub === sub || a.accountUuid === sub)));
+    let idx = cfg.accounts.findIndex(same);
+    if (idx < 0 && name) idx = cfg.accounts.findIndex(a => a.name === name);
+    const previous = idx >= 0 ? cfg.accounts[idx] : null;
+    const sameIdentity = previous ? same(previous) : false;
+    if (!name) name = sameIdentity ? previous.name : null;
+    if (!name) {
+      let n = 1;
+      do { name = `cursor-${n++}`; } while (cfg.accounts.some(a => a.name === name));
+    }
+    const account = {
+      name,
+      provider: 'cursor',
+      type: 'oauth',
+      source,
+      // Keep a known GetMe userId when this login only had the token's sub.
+      accountUuid: me?.userId || (sameIdentity && previous.accountUuid) || userId,
+      ...(sub ? { cursorSub: sub } : {}),
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      expiresAt: creds.expiresAt,
+      email: me?.email || (sameIdentity ? previous.email : null) || null,
+    };
+    // A name match may be another Cursor user: inherit its plan only for the same identity.
+    const planType = usage?.planName || (sameIdentity ? previous.planType : null);
+    if (planType) account.planType = planType;
+    if (previous) {
+      action = 'Updated';
+      if (previous.enabled !== undefined) account.enabled = previous.enabled;
+      if (previous.priority !== undefined) account.priority = previous.priority;
+      if (previous.maxConcurrent !== undefined) account.maxConcurrent = previous.maxConcurrent;
+      cfg.accounts[idx] = account;
+    } else {
+      cfg.accounts.push(account);
+    }
+    cfg.provider = 'cursor';
+  });
+  console.log(`${action} Cursor account "${name}"${usage?.planName ? ` (${usage.planName})` : ''}`);
+  console.log(`Saved to ${getConfigPath()}`);
+  machine.saved = name; // on disk now: a cancel during the live apply below still ends ok
+  await noteRunningServerReload(savedConfig);
+  return name;
+}
+
 async function upsertCodexAccount(name, creds, source = 'unknown') {
   const requested = name;
   if (!name) name = creds.email;
@@ -4629,7 +4938,7 @@ async function syncAccountsFromDisk(diskConfig, memConfig, accountManager) {
         mgr.planType = diskAcct.planType;
       }
       if (mgr.provider === 'agy') mgr.projectId = diskAcct.projectId || null;
-      if (mgr.provider === 'grok') {
+      if (mgr.provider === 'grok' || mgr.provider === 'cursor') {
         mgr.email = diskAcct.email || null;
         mgr.teamId = diskAcct.teamId || null;
       }
@@ -4731,7 +5040,7 @@ function isCodexMode(config) {
 function poolConfigMismatch(configuredProvider, dedicatedMode, configExists) {
   return dedicatedMode
     ? configExists && configuredProvider !== dedicatedMode
-    : configuredProvider === 'agy' || configuredProvider === 'grok';
+    : ['agy', 'grok', 'cursor'].includes(configuredProvider);
 }
 
 function isAgyMode(config) {
@@ -4746,10 +5055,16 @@ function isGrokMode(config) {
     || process.env.TEAMCLAUDE_PROVIDER === 'grok';
 }
 
+function isCursorMode(config) {
+  return config?.provider === 'cursor' || cliProvider === 'cursor'
+    || process.env.TEAMCLAUDE_PROVIDER === 'cursor';
+}
+
 /** The wrapper command of this pool, for "run this next" hints. */
 function cliName(config) {
   if (isAgyMode(config)) return 'teamagy';
   if (isGrokMode(config)) return 'teamgrok';
+  if (isCursorMode(config)) return 'teamcursor';
   return isCodexMode(config) ? 'teamcodex' : 'teamclaude';
 }
 

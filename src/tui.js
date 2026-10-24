@@ -470,7 +470,7 @@ export class TUI {
 
   _keyAdd(k) {
     if (k === 'i') { this._doImport(); this.mode = 'normal'; }
-    else if (k === 'k' && !['codex', 'agy', 'grok'].includes(this.config.provider)) {
+    else if (k === 'k' && !['codex', 'agy', 'grok', 'cursor'].includes(this.config.provider)) {
       this.mode = 'input';
       this.inputPrompt = 'API key';
       this.inputBuf = '';
@@ -548,6 +548,10 @@ export class TUI {
     }
     if (this.config.provider === 'grok') {
       this._addLog('Add Grok accounts from a terminal: teamgrok login (or node src/index.js grok login), then R');
+      return;
+    }
+    if (this.config.provider === 'cursor') {
+      this._addLog('Add Cursor accounts from a terminal: teamcursor login (or node src/index.js cursor login), then R');
       return;
     }
     try {
@@ -891,9 +895,10 @@ export class TUI {
     // ── Header
     const left = bold(this.config.provider === 'codex' ? ' TeamCodex'
       : this.config.provider === 'agy' ? ' TeamAgy'
-        : this.config.provider === 'grok' ? ' TeamGrok' : ' TeamClaude');
+        : this.config.provider === 'grok' ? ' TeamGrok'
+          : this.config.provider === 'cursor' ? ' TeamCursor' : ' TeamClaude');
     const port = this.config.proxy?.port
-      || ({ codex: 3457, agy: 3458, grok: 3459 }[this.config.provider] ?? 3456);
+      || ({ codex: 3457, agy: 3458, grok: 3459, cursor: 3460 }[this.config.provider] ?? 3456);
     // Host CPU/RAM at a glance (render loop ticks often enough for live CPU%).
     // Thresholds mirror the quota bars: calm → green-ish default, 70%+ warns,
     // 90%+ screams — this box dying from overload is a real failure mode.
@@ -1048,6 +1053,11 @@ export class TUI {
       l2 = 'Tok';
       r1 = rl.requestsLimit > 0 && rl.requestsRemaining != null ? 1 - rl.requestsRemaining / rl.requestsLimit : null;
       r2 = rl.tokensLimit > 0 && rl.tokensRemaining != null ? 1 - rl.tokensRemaining / rl.tokensLimit : null;
+    } else if (a.provider === 'cursor') {
+      // cursor: one meter (included usage this billing cycle), reset = cycle end.
+      l1 = 'Use';
+      r1 = q.unified5h;
+      t1 = q.unified5hReset;
     } else if (a.type === 'oauth') {
       r1 = q.unified5h;
       r2 = q.unified7d;
@@ -1128,7 +1138,9 @@ export class TUI {
             ? ` ${bold('i')} how to add (teamagy import / login)  ${bold('Esc')} cancel`
             : this.config.provider === 'grok'
               ? ` ${bold('i')} how to add (teamgrok login)  ${bold('Esc')} cancel`
-              : ` ${bold('i')}mport Claude Code  ${bold('k')} API key  ${bold('Esc')} cancel`;
+              : this.config.provider === 'cursor'
+                ? ` ${bold('i')} how to add (teamcursor login)  ${bold('Esc')} cancel`
+                : ` ${bold('i')}mport Claude Code  ${bold('k')} API key  ${bold('Esc')} cancel`;
       case 'input':
         return ` ${this.inputPrompt}: ${this.inputBuf}█`;
       default:

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import http2 from 'node:http2';
 import https from 'node:https';
 import { mkdir, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -71,6 +72,18 @@ import {
   isGrokInferencePath,
   rewriteGrokIdentityHeaders,
 } from './grok.js';
+import {
+  CURSOR_DEFAULT_AGENT_UPSTREAM,
+  CURSOR_DEFAULT_UPSTREAM,
+  CURSOR_EXHAUSTED_FALLBACK_MS,
+  classifyCursorFailure,
+  connectErrorFrame,
+  cursorAffinityKey,
+  cursorExhaustedMessage,
+  fetchCursorUsage,
+  isCursorAgentPath,
+  peekConnectFrame,
+} from './cursor.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -373,13 +386,14 @@ export function keyMatches(given, expected) {
 }
 
 export function createProxyServer(accountManager, config, hooks = {}) {
-  const provider = ['codex', 'agy', 'grok'].includes(config.provider)
+  const provider = ['codex', 'agy', 'grok', 'cursor'].includes(config.provider)
     ? config.provider
     : 'anthropic';
   accountManager.singleActiveAccount = provider === 'codex';
   const upstream = provider === 'agy'
     ? config.agyUpstream || config.upstream || AGY_DEFAULT_UPSTREAM
     : provider === 'grok' ? config.grokUpstream || config.upstream || GROK_DEFAULT_UPSTREAM
+    : provider === 'cursor' ? config.cursorUpstream || config.upstream || CURSOR_DEFAULT_UPSTREAM
     : config.upstream || (provider === 'codex'
       ? 'https://chatgpt.com/backend-api/codex'
       : 'https://api.anthropic.com');
@@ -544,7 +558,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // proxy-originated traffic low by default.
   const warmupIntervalMs = Number.isFinite(config.warmupIntervalMs)
     ? Math.max(0, config.warmupIntervalMs)
-    : provider === 'agy' ? 10 * 60 * 1000 : 5 * 60 * 1000;
+    : provider === 'agy' || provider === 'cursor' ? 10 * 60 * 1000 : 5 * 60 * 1000;
   // A structured organization-access 403 is authoritative for that moment,
   // but external billing/policy changes can restore the account later. Keep it
   // out of client rotation while periodically rechecking with the known-good
@@ -999,6 +1013,384 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     return { targets: targets.length, measured: outcomes.filter(Boolean).length };
   }
 
+  // ── Cursor ──────────────────────────────────────────────────────────────────
+  // No quota headers: each account's GetCurrentPeriodUsage (+ GetPlanInfo) is
+  // polled at startup, every warmupIntervalMs, after a completed agent stream
+  // once older than cursorUsageActiveMs, and on reload. Display only.
+  const cursorUsageRefresh = provider === 'cursor' && config.cursorUsageRefresh !== false;
+  const cursorUsageActiveMs = Number.isFinite(config.cursorUsageActiveMs)
+    ? Math.max(0, config.cursorUsageActiveMs)
+    : 120_000;
+  const cursorAgentUpstream = config.cursorAgentUpstream || CURSOR_DEFAULT_AGENT_UPSTREAM;
+  let cursorRefreshPromise = null;
+
+  async function refreshCursorAccount(account) {
+    if (warmupClosed || !account.credential) return false;
+    const probe = probeSignal();
+    try {
+      const usage = await fetchCursorUsage(account.credential, { upstream, signal: probe.signal });
+      if (accountManager.accounts[account.index] !== account) return false;
+      return accountManager.updateCursorUsage(account, usage);
+    } catch {
+      return false; // network / auth / unparseable: data stays as it was
+    } finally {
+      probe.cleanup();
+    }
+  }
+
+  async function refreshCursorUsageAll() {
+    if (!cursorUsageRefresh || warmupClosed) return -1;
+    if (cursorRefreshPromise) return cursorRefreshPromise;
+    cursorRefreshPromise = (async () => {
+      const targets = accountManager.accounts.filter(a => a.provider === 'cursor' && a.credential
+        && a.enabled !== false && a.status !== 'error');
+      const outcomes = await Promise.all(targets.map(a => refreshCursorAccount(a)));
+      return { targets: targets.length, measured: outcomes.filter(Boolean).length };
+    })();
+    try {
+      return await cursorRefreshPromise;
+    } finally {
+      cursorRefreshPromise = null;
+    }
+  }
+
+  function maybeRefreshCursorUsage(account) {
+    if (!cursorUsageRefresh || warmupClosed || account._usageRefreshing) return;
+    if (Date.now() - (account.quota?.cursorUsage?.at ?? 0) < cursorUsageActiveMs) return;
+    account._usageRefreshing = true;
+    refreshCursorAccount(account)
+      .catch(() => { /* best-effort */ })
+      .finally(() => { account._usageRefreshing = false; });
+  }
+
+  // cursor-agent's agent stream (POST /agent.v1.AgentService/Run) is a Connect
+  // bidi stream over h2c; the supervisor tunnels those connections here. Each
+  // stream is relayed to the upstream over HTTP/2 with the account's bearer,
+  // bodies untouched both ways. Until the first response frame is known the
+  // request bytes are kept, so an exhausted / unauthenticated answer can be
+  // replayed on another account (the client has seen nothing yet).
+  const cursorSessions = new Map();
+  const cursorStreams = new Set();
+  // Deployment drain (`update`): the supervisor cannot see h2 streams, so the
+  // worker reports their count (hooks.onCursorStreams) and refuses new ones
+  // while the supervisor says it is draining (server.setDraining).
+  let cursorDraining = false;
+  const reportCursorStreams = () => hooks.onCursorStreams?.(cursorStreams.size);
+
+  function cursorSession(origin) {
+    let session = cursorSessions.get(origin);
+    if (session && !session.closed && !session.destroyed) return session;
+    session = http2.connect(origin);
+    session.on('error', () => { /* surfaces on its streams */ });
+    const forget = () => { if (cursorSessions.get(origin) === session) cursorSessions.delete(origin); };
+    session.once('close', forget);
+    session.once('goaway', forget);
+    cursorSessions.set(origin, session);
+    return session;
+  }
+
+  function closeCursorH2() {
+    for (const stream of cursorStreams) stream.close(http2.constants.NGHTTP2_CANCEL);
+    for (const session of cursorSessions.values()) session.destroy();
+    cursorSessions.clear();
+    server.cursorH2.close();
+  }
+
+  function handleCursorStream(stream, headers) {
+    const path = headers[':path'] || '/';
+    const agent = isCursorAgentPath(path);
+    const origin = agent ? cursorAgentUpstream : upstream;
+    const streaming = String(headers['content-type'] || '').startsWith('application/connect+');
+    const chatKey = cursorAffinityKey(headers);
+    const affinityKey = !sessionAffinity ? null : chatKey ? agyAffinityObject(chatKey) : stream.session;
+    if (cursorDraining) {
+      // Same answer as the supervisor's HTTP/1.1 drain 503, in Connect's shape.
+      const message = 'Proxy is draining for a verified deployment';
+      if (streaming) {
+        stream.respond({ ':status': 200, 'content-type': headers['content-type'], 'retry-after': '1' });
+        stream.end(connectErrorFrame('unavailable', message));
+      } else {
+        stream.respond({ ':status': 503, 'content-type': 'application/json', 'retry-after': '1' });
+        stream.end(JSON.stringify({ code: 'unavailable', message }));
+      }
+      return;
+    }
+    const reqId = ++requestCounter;
+    hooks.onRequestStart?.(reqId, { method: headers[':method'], path });
+    cursorStreams.add(stream);
+    reportCursorStreams();
+
+    // Request bytes kept for a replay; dropped once committed or past the body cap.
+    let kept = [];
+    let keptBytes = 0;
+    let requestEnded = false;
+    let upstreamStream = null;
+    let committed = false;
+    let finished = false;
+    const tried = new Set();
+    // 401 cascade guard, same rule as the HTTP/1.1 path: a second account
+    // refusing the same request blames the request — undo this request's park.
+    const authRefused = new Set();
+    const authParks = [];
+    let authCascade = false;
+    // Exhaustion failovers per request are bounded by rateLimitFailovers (at
+    // least one), so one odd request cannot bench the whole pool.
+    let exhaustedFailovers = 0;
+    let networkFailures = 0;
+    let trailers = null; // of the committed attempt
+    const abort = new AbortController();
+    stream.on('wantTrailers', () => {
+      const extra = {};
+      for (const [key, value] of Object.entries(trailers ?? {})) if (!key.startsWith(':')) extra[key] = value;
+      stream.sendTrailers(extra);
+    });
+    stream.on('data', chunk => {
+      if (kept) {
+        kept.push(chunk);
+        keptBytes += chunk.length;
+        if (keptBytes > maxBodyBytes) {
+          kept = null; // ponytail: no replay past the body cap
+          // Between attempts nothing carries these bytes upstream: dropping them would corrupt the stream.
+          if (!upstreamStream) {
+            stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+            return;
+          }
+        }
+      }
+      upstreamStream?.write(chunk);
+    });
+    stream.on('end', () => {
+      requestEnded = true;
+      upstreamStream?.end();
+    });
+    stream.on('error', () => { /* handled by close */ });
+    const finish = (account, status) => {
+      if (finished) return;
+      finished = true;
+      hooks.onRequestEnd?.(reqId, { method: headers[':method'], path, account: account?.name ?? null, status });
+    };
+    stream.on('close', () => {
+      cursorStreams.delete(stream);
+      reportCursorStreams();
+      abort.abort();
+      if (upstreamStream && !upstreamStream.closed) upstreamStream.close(http2.constants.NGHTTP2_CANCEL);
+      finish(null, 499); // the client went away first (no-op when the stream already finished)
+    });
+
+    // No account (left): the proxy's own answer, in Connect's shape.
+    const deadEnd = (code, message, retryAfter) => {
+      if (stream.destroyed || stream.headersSent) return;
+      const status = code === 'unauthenticated' ? 401 : code === 'unavailable' ? 503 : 429;
+      if (streaming) {
+        stream.respond({ ':status': 200, 'content-type': headers['content-type'], 'retry-after': String(retryAfter) });
+        stream.end(connectErrorFrame(code, message));
+      } else {
+        stream.respond({ ':status': status, 'content-type': 'application/json', 'retry-after': String(retryAfter) });
+        stream.end(JSON.stringify({ code, message }));
+      }
+      finish(null, status);
+    };
+
+    const attempt = async () => {
+      const account = await accountManager.acquireAccount(tried, queueTimeoutMs, abort.signal, affinityKey);
+      if (stream.destroyed) {
+        if (account) accountManager.releaseAccount(account);
+        return;
+      }
+      if (!account) {
+        if (authParks.length && !accountManager.anyUsable() && !accountManager.anyCapped()) {
+          return deadEnd('unauthenticated', 'TeamCursor: every account failed authentication. Sign in again (teamcursor login).', 60);
+        }
+        const now = Date.now();
+        const throttles = accountManager.accounts
+          .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
+          .map(a => a.rateLimitedUntil - now);
+        if (networkFailures && !throttles.length) {
+          return deadEnd('unavailable', `TeamCursor: could not reach ${origin}.`, 5);
+        }
+        const waitMs = accountManager.anyCapped(tried) ? 1000 : throttles.length ? Math.min(...throttles) : 60_000;
+        const retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
+        return deadEnd('resource_exhausted', cursorExhaustedMessage(retryAfter), retryAfter);
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        accountManager.releaseAccount(account);
+      };
+      await accountManager.ensureTokenFresh(account);
+      if (account.status === 'error') {
+        release();
+        tried.add(account);
+        return attempt();
+      }
+      const out = {};
+      for (const [key, value] of Object.entries(headers)) {
+        if (key.startsWith(':') || HOP_BY_HOP_HEADERS.has(key)) continue;
+        if (key === 'authorization' || key === 'x-api-key' || key === 'cookie') continue;
+        out[key] = value;
+      }
+      out[':method'] = headers[':method'];
+      out[':path'] = path;
+      out.authorization = `Bearer ${account.credential}`;
+      let up;
+      try {
+        up = cursorSession(origin).request(out);
+      } catch {
+        cursorSessions.delete(origin); // a session that just got GOAWAY: the next attempt opens a new one
+        release();
+        if (kept === null) return stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR); // nothing left to replay
+        networkFailures++;
+        tried.add(account);
+        return attempt();
+      }
+      upstreamStream = up;
+      for (const chunk of kept ?? []) up.write(chunk);
+      if (requestEnded) up.end();
+
+      let responseHeaders = null;
+      let held = [];
+      let heldBytes = 0;
+
+      const commit = () => {
+        if (committed || stream.destroyed) return;
+        committed = true;
+        kept = null;
+        const headersOut = { ':status': responseHeaders[':status'] };
+        for (const [key, value] of Object.entries(responseHeaders)) {
+          if (!key.startsWith(':') && !HOP_BY_HOP_HEADERS.has(key)) headersOut[key] = value;
+        }
+        stream.respond(headersOut, { waitForTrailers: true });
+        for (const chunk of held) stream.write(chunk);
+        held = null;
+      };
+
+      // Move to another account (this one is spent or refused) while the client has seen nothing.
+      const failOver = () => {
+        for (const event of ['data', 'end', 'error', 'close', 'trailers']) up.removeAllListeners(event);
+        up.on('error', () => {});
+        up.close(http2.constants.NGHTTP2_CANCEL);
+        upstreamStream = null;
+        release();
+        tried.add(account);
+        attempt().catch(() => stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR));
+      };
+
+      // The upstream stream ended or broke with nothing committed to the client.
+      const upstreamLost = () => {
+        release();
+        if (upstreamStream !== up) return; // already handled (failover, client gone)
+        upstreamStream = null;
+        if (!committed && !stream.destroyed && kept !== null) {
+          // Before anything reached the client: another account (no account state).
+          networkFailures++;
+          tried.add(account);
+          attempt().catch(() => stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR));
+          return;
+        }
+        finish(account, 502);
+        if (!stream.destroyed) stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+      };
+
+      // Decide once the status (and, for a 200 stream, the first frame) is known.
+      const decide = endStreamCode => {
+        if (!responseHeaders) return upstreamLost();
+        const status = Number(responseHeaders[':status']);
+        const failure = agent ? classifyCursorFailure(status, endStreamCode) : null;
+        const canReplay = kept !== null && !stream.destroyed;
+        if (failure === 'exhausted') {
+          const waitMs = parseRetryAfterMs(responseHeaders['retry-after']) || CURSOR_EXHAUSTED_FALLBACK_MS;
+          accountManager.markRateLimited(account, Math.max(1, Math.ceil(waitMs / 1000)));
+          const others = new Set([...tried, account]);
+          if (canReplay && exhaustedFailovers < Math.max(1, rateLimitFailovers)
+              && (accountManager.anyUsable(others) || accountManager.anyCapped(others))) {
+            exhaustedFailovers++;
+            console.log(`[TeamCursor] "${account.name}" is out of usage — switching account`);
+            return failOver();
+          }
+          console.log(`[TeamCursor] "${account.name}" is out of usage — passing it through`);
+        } else if (failure === 'auth' && !authCascade) {
+          if (account.status !== 'error') authRefused.add(account);
+          if (authRefused.size >= AUTH_401_CASCADE_THRESHOLD) {
+            authCascade = true;
+            const restored = [];
+            for (const parked of authParks.splice(0)) {
+              const target = parked.account;
+              if (target._authParkSeq !== parked.seq || target.status !== 'error'
+                  || target.errorReason !== 'auth-revoked' || target._errorFromRefresh !== false) continue;
+              target.status = parked.status;
+              if (parked.errorReason == null) delete target.errorReason;
+              else target.errorReason = parked.errorReason;
+              if (parked.errorFromRefresh === undefined) delete target._errorFromRefresh;
+              else target._errorFromRefresh = parked.errorFromRefresh;
+              if (parked.errorFromUsagePoll !== undefined) target._errorFromUsagePoll = parked.errorFromUsagePoll;
+              delete target._authParkSeq;
+              restored.push(target.name);
+            }
+            console.log(`[TeamCursor] ${authRefused.size} accounts refused one request — request-scoped, not parking accounts`
+              + `${restored.length ? ` (restored ${restored.join(', ')})` : ''}`);
+          } else if (account.status !== 'error') {
+            const before = {
+              status: account.status,
+              errorReason: account.errorReason ?? null,
+              errorFromRefresh: account._errorFromRefresh,
+              errorFromUsagePoll: account._errorFromUsagePoll,
+            };
+            accountManager.markAuthenticationError(account, 'auth-revoked');
+            if (account.status === 'error' && account.errorReason === 'auth-revoked') {
+              const seq = ++authParkSeq;
+              account._authParkSeq = seq; // ownership stamp for the rollback above
+              authParks.push({ account, seq, ...before });
+            }
+            if (canReplay) {
+              console.log(`[TeamCursor] "${account.name}" was refused (unauthenticated) — switching account`);
+              return failOver();
+            }
+          }
+        }
+        commit();
+      };
+
+      up.on('response', responseHeadersIn => {
+        responseHeaders = responseHeadersIn;
+        const status = Number(responseHeaders[':status']);
+        // A non-200 or a unary answer is decided by its status alone.
+        if (status !== 200 || !streaming || !agent) decide(null);
+      });
+      up.on('data', chunk => {
+        if (committed) {
+          stream.write(chunk);
+          return;
+        }
+        held.push(chunk);
+        heldBytes += chunk.length;
+        const frame = peekConnectFrame(Buffer.concat(held, heldBytes), responseHeaders?.['connect-content-encoding']);
+        if (frame) decide(frame.endStream ? frame.code : null);
+        else if (heldBytes > 4 * 1024 * 1024) decide(null); // a huge first frame: just pass it on
+      });
+      up.on('trailers', t => { if (committed) trailers = t; });
+      up.on('end', () => {
+        if (!committed) decide(null); // no headers yet → upstreamLost
+        if (!committed || upstreamStream !== up) return; // replaying elsewhere, or handled
+        stream.end();
+        release();
+        accountManager.updateQuota(account, {});
+        finish(account, Number(responseHeaders?.[':status']) || 0);
+        if (agent) maybeRefreshCursorUsage(account);
+      });
+      up.on('error', upstreamLost);
+      up.on('close', () => {
+        release(); // also when the client went away first (its close cancels this stream)
+        if (upstreamStream === up && !stream.destroyed && !stream.writableEnded) upstreamLost();
+      });
+    };
+
+    attempt().catch(err => {
+      console.error(`[TeamCursor] Stream error: ${err.message}`);
+      if (!stream.destroyed) stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+    });
+  }
+
   // Codex reset credits. One redemption attempt per account at a time; the
   // outcome is folded into the account at once (a "reset" makes it routable
   // again immediately) and an authoritative wham/usage refresh follows shortly
@@ -1346,6 +1738,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (provider === 'codex') return refreshCodexQuotaAll();
     if (provider === 'agy') return refreshAgyQuotaAll();
     if (provider === 'grok') return refreshGrokTierAll();
+    if (provider === 'cursor') return refreshCursorUsageAll();
     if (!activeWarmup || warmupClosed || (!probeTemplate && !anthropicUsageUrl)) return -1;
     const targets = accountManager.accounts.filter(a =>
       (a.status !== 'error' || a.errorReason === 'subscription-disabled')
@@ -1495,6 +1888,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (warmupIntervalMs > 0) {
       codexUsageTimer = setInterval(() => { refreshCodexQuotaAll(); }, warmupIntervalMs);
       codexUsageTimer.unref();
+    }
+  }
+  let cursorUsageTimer = null;
+  if (cursorUsageRefresh) {
+    setImmediate(() => { refreshCursorUsageAll(); });
+    if (warmupIntervalMs > 0) {
+      cursorUsageTimer = setInterval(() => { refreshCursorUsageAll(); }, warmupIntervalMs);
+      cursorUsageTimer.unref();
     }
   }
   let agyQuotaTimer = null;
@@ -2106,6 +2507,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // guard input + per-request exclusion); authParked = what THIS request parked,
         // kept so a cascade can put it back.
         const ctx = { account: null, status: null, model: null, provider, authRetried: new Set(), auth401: new Set(), authParked: [], authCascade: false, tried429: new Set(), tried5xx: new Set(), triedCapacity: new Set(), overloadRetries: 0, capacityWaits: 0, held: null, queueTimeoutMs, abortSignal: null, affinityKey: sessionAffinity ? (agySessionKey ? agyAffinityObject(agySessionKey) : req.socket) : null, preferredAccountUuid: recoveryAccountUuid, sawModelWeekly: false, byok: byokMatch != null, continuity, continuityDeadlineAt: null, failedFast: false, last429: null, modelFallbacks: config.modelFallbacks || null, fallbackQueue: undefined, streamRecovery, maxResponseBytes, reserveResponseBytes, releaseReservedResponseBytes, reserveAuxiliaryResponseBytes, releaseAuxiliaryResponseBytes, reserveLogResponseBytes, releaseLogResponseBytes, registerIdleLogReservation, upstreamResponseTimeoutMs, streamIdleTimeoutMs, streamTotalTimeoutMs, subscriptionRecheckIntervalMs, resetCredits: resetCreditController, resetCreditAttempts: 0, resetCreditRetried: new Set(), resetCreditBackstopYielded: false, agyExhausted, allowNoAccounts: config.proxy?.allowNoAccounts === true };
+        if (provider === 'cursor') ctx.cursorAgentUpstream = cursorAgentUpstream;
         try {
           if (isStatusRequest) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2219,9 +2621,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (subscriptionRecheckTimer) clearInterval(subscriptionRecheckTimer);
     if (codexUsageTimer) clearInterval(codexUsageTimer);
     if (agyQuotaTimer) clearInterval(agyQuotaTimer);
+    if (cursorUsageTimer) clearInterval(cursorUsageTimer);
   };
   const closeServer = server.close.bind(server);
-  server.close = (cb) => { shutdownWarmup(); return closeServer(cb); };
+  server.close = (cb) => {
+    shutdownWarmup();
+    if (server.cursorH2) closeCursorH2();
+    return closeServer(cb);
+  };
   server.on('close', shutdownWarmup);
   if (anthropicUsageUrl) server.once('listening', () => { refreshAnthropicQuotaAll(); });
 
@@ -2230,6 +2637,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // so only a deliberate local action should trigger it.
   server.refreshQuotaAll = refreshQuotaAll;
   server.refreshAnthropicQuotaAll = refreshAnthropicQuotaAll;
+  // cursor: the worker's h2c listener (index.js listens on it and hands its
+  // port to the supervisor, which tunnels cursor-agent's h2 connections here).
+  if (provider === 'cursor') {
+    server.setDraining = draining => { cursorDraining = draining === true; };
+    server.cursorH2 = http2.createServer();
+    server.cursorH2.on('stream', handleCursorStream);
+    server.cursorH2.on('sessionError', () => { /* a broken client session only ends its own streams */ });
+  }
 
   // Probe-template persistence (wired into the quota snapshot by index.js).
   // The template is the only known-accepted request shape — without persisting
@@ -2618,7 +3033,7 @@ const CODEX_LOG_HEADER_ALLOWLIST = new Set([
 
 function formatHeaders(headers, metadataOnly = false) {
   const entries = headers.entries ? [...headers.entries()] : Object.entries(headers);
-  const sensitive = /^(?:authorization|proxy-authorization|x-api-key|x-goog-api-key|chatgpt-account-id|cookie|set-cookie|(?:x-|openai-)?request-id)$/i;
+  const sensitive = /^(?:authorization|proxy-authorization|x-api-key|x-goog-api-key|chatgpt-account-id|cookie|set-cookie|x-blob-encryption-key|(?:x-|openai-)?request-id)$/i;
   return entries
     .filter(([key]) => !sensitive.test(key)
       && (!metadataOnly || CODEX_LOG_HEADER_ALLOWLIST.has(key.toLowerCase())))
@@ -2814,6 +3229,7 @@ function startContinuityDeadline(ctx) {
 // Proxy-made 401 in the client's own error shape: Google RPC for agy.
 function authFailureBody(ctx, message) {
   if (ctx.provider === 'grok') return { error: message };
+  if (ctx.provider === 'cursor') return { code: 'unauthenticated', message }; // Connect unary error
   return ctx.provider === 'agy'
     ? { error: { code: 401, message, status: 'UNAUTHENTICATED' } }
     : { type: 'error', error: { type: 'authentication_error', message } };
@@ -3124,7 +3540,8 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     }
     // grok: same — this request's own upstream 429 (grok renders it), else
     // xAI's `{"error": …}` shape with the soonest throttle as retry-after.
-    if (ctx.provider === 'grok') {
+    // cursor: the same, in the Connect unary error shape.
+    if (ctx.provider === 'grok' || ctx.provider === 'cursor') {
       if (sendSaved429(res, ctx)) return;
       ctx.status = 429;
       const now = Date.now();
@@ -3134,7 +3551,9 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
       const waitMs = hasCapped(null) ? 1000 : throttles.length ? Math.min(...throttles) : 60_000;
       const retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
       res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': String(retryAfter) });
-      res.end(JSON.stringify(grokExhaustedBody(retryAfter)));
+      res.end(JSON.stringify(ctx.provider === 'cursor'
+        ? { code: 'resource_exhausted', message: cursorExhaustedMessage(retryAfter) }
+        : grokExhaustedBody(retryAfter)));
       return;
     }
     const deadlineExpired = ctx.continuity.maxWaitMs > 0
@@ -3263,7 +3682,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     if (lk === CODEX_INVOCATION_HEADER) continue;
     if (lk === CODEX_ACTOR_AUTHORIZATION_HEADER) continue;
     if (ctx.provider === 'agy' && (lk === 'x-goog-api-key' || lk === 'x-goog-user-project')) continue;
-    if (ctx.provider === 'grok' && lk === 'cookie') continue;
+    if ((ctx.provider === 'grok' || ctx.provider === 'cursor') && lk === 'cookie') continue;
     // Strip accept-encoding: Node fetch auto-decompresses, which would
     // mismatch the Content-Encoding header we forward to the client
     if (lk === 'accept-encoding') continue;
@@ -3286,9 +3705,11 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
   const hasDuplicatedCodexPrefix = ctx.provider === 'codex'
     && /\/codex\/?$/.test(new URL(upstream).pathname)
     && req.url.startsWith('/codex/');
+  // cursor: an agent RPC over HTTP/1.1 (cursor-agent's useHttp1ForAgent) goes to the agent backend too.
+  const base = ctx.cursorAgentUpstream && isCursorAgentPath(req.url) ? ctx.cursorAgentUpstream : upstream;
   const upstreamUrl = hasDuplicatedCodexPrefix
     ? `${upstream.replace(/\/$/, '')}${req.url.slice('/codex'.length)}`
-    : `${upstream}${req.url}`;
+    : `${base}${req.url}`;
   const method = req.method;
   const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
   const metadataOnlyLog = ctx.provider === 'codex';
@@ -3701,7 +4122,9 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // throttle it until retry-after (seconds or HTTP date, else 5 min) and fail
     // over at once. Elsewhere, or with no account left, the upstream body
     // passes through unchanged (grok renders its own message).
-    if (ctx.provider === 'grok' && upstreamRes.status === 429) {
+    // cursor: the agent stream is h2 (handleCursorStream); an HTTP/1.1 429 is
+    // passed through like grok's non-inference one (no account state).
+    if ((ctx.provider === 'grok' || ctx.provider === 'cursor') && upstreamRes.status === 429) {
       const responseBody = await readBodyBounded(
         upstreamRes.body,
         ctx.maxResponseBytes,
@@ -3724,7 +4147,8 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
         responseHeaders[key] = value;
       }
       ctx.last429 = { body: responseBody, headers: responseHeaders };
-      const exhausted = isGrokInferencePath(req.url);
+      const exhausted = ctx.provider === 'grok' && isGrokInferencePath(req.url);
+      const tag = ctx.provider === 'cursor' ? 'TeamCursor' : 'TeamGrok';
       if (exhausted) {
         const waitMs = parseRetryAfterMs(upstreamRes.headers.get('retry-after')) || GROK_EXHAUSTED_FALLBACK_MS;
         accountManager.markRateLimited(account, Math.max(1, Math.ceil(waitMs / 1000)));
@@ -3733,7 +4157,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
       const canFailOver = exhausted && !res.destroyed && retryCount < maxRetries
         && (hasUsable(ctx.tried429) || hasCapped(ctx.tried429));
       if (canFailOver) {
-        console.log(`[TeamGrok] 429 on "${account.name}" — throttled, switching account`);
+        console.log(`[${tag}] 429 on "${account.name}" — throttled, switching account`);
         if (logDir) {
           appendLogSection(`=== RESPONSE 429 — throttled, switching ===\n${formatHeaders(upstreamRes.headers, metadataOnlyLog)}`);
           flushRequestLog(logDir, reqId, logSections, hooks);
@@ -3741,7 +4165,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
         releaseHeld();
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir);
       }
-      console.log(`[TeamGrok] 429 on "${account.name}"${exhausted ? ' — no other account can serve this' : ''}, passing it through`);
+      console.log(`[${tag}] 429 on "${account.name}"${exhausted ? ' — no other account can serve this' : ''}, passing it through`);
       if (logDir) {
         appendLogSection(`=== RESPONSE 429 — passed through ===\n${formatHeaders(upstreamRes.headers, metadataOnlyLog)}`);
         if (!metadataOnlyLog) appendLogSection(formatLogBody('=== RESPONSE BODY', responseBody));

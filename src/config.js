@@ -295,7 +295,8 @@ export function getConfigPath() {
   const fileName = provider === 'codex' ? 'teamcodex.json'
     : provider === 'agy' ? 'teamagy.json'
       : provider === 'grok' ? 'teamgrok.json'
-        : 'teamclaude.json';
+        : provider === 'cursor' ? 'teamcursor.json'
+          : 'teamclaude.json';
   return join(configDir, fileName);
 }
 
@@ -396,17 +397,18 @@ export function removeQuotaTempFilesSync() {
 
 export function createDefaultConfig() {
   const envProvider = process.env.TEAMCLAUDE_PROVIDER;
-  const provider = ['codex', 'agy', 'grok'].includes(envProvider) ? envProvider : 'anthropic';
+  const provider = ['codex', 'agy', 'grok', 'cursor'].includes(envProvider) ? envProvider : 'anthropic';
   return {
     provider,
     proxy: {
-      port: { codex: 3457, agy: 3458, grok: 3459 }[provider] ?? 3456,
+      port: { codex: 3457, agy: 3458, grok: 3459, cursor: 3460 }[provider] ?? 3456,
       apiKey: 'tc-' + randomBytes(24).toString('base64url'),
     },
     upstream: provider === 'codex' ? 'https://chatgpt.com/backend-api/codex'
       : provider === 'agy' ? 'https://daily-cloudcode-pa.googleapis.com'
         : provider === 'grok' ? 'https://cli-chat-proxy.grok.com'
-          : 'https://api.anthropic.com',
+          : provider === 'cursor' ? 'https://api2.cursor.sh'
+            : 'https://api.anthropic.com',
     switchThreshold: 0.98,
     tokenRefreshIntervalMs: DEFAULT_TOKEN_REFRESH_INTERVAL_MS,
     // Max simultaneous in-flight requests per account before load spreads to the
@@ -415,8 +417,9 @@ export function createDefaultConfig() {
     // agy fires several control calls (ACL writes, analytics, model lists)
     // beside each stream; a cap of 3 would spill them onto another account and
     // scatter one session's server-side state across the pool. grok does the
-    // same (storage, traces, session signals beside each response).
-    maxConcurrentPerAccount: provider === 'agy' || provider === 'grok' ? 8 : 3,
+    // same (storage, traces, session signals beside each response), and so does
+    // cursor-agent (dashboard/analytics calls beside each agent stream).
+    maxConcurrentPerAccount: ['agy', 'grok', 'cursor'].includes(provider) ? 8 : 3,
     // Keep one client connection's sequential requests on the same account so
     // Anthropic's per-account prompt cache stays warm (a session's turns reuse
     // the keep-alive socket). Soft: concurrent overflow still spreads to other

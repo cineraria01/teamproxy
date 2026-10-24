@@ -21,6 +21,7 @@ const POOLS = {
   teamcodex: { prefix: ['codex'], file: 'teamcodex.json', probe: () => ({ path: `/codex/models?client_version=${codexClientVersion()}` }) },
   teamagy: { prefix: ['agy'], file: 'teamagy.json', probe: () => ({ method: 'POST', path: '/v1internal:fetchAvailableModels', body: '{}', headers: { 'content-type': 'application/json' } }) },
   teamgrok: { prefix: ['grok'], file: 'teamgrok.json', probe: () => ({ path: '/v1/models' }) },
+  teamcursor: { prefix: ['cursor'], file: 'teamcursor.json', probe: () => ({ method: 'POST', path: '/aiserver.v1.DashboardService/GetMe', body: '{}', headers: { 'content-type': 'application/json', 'connect-protocol-version': '1' } }) },
 };
 const RESTART_TIMEOUT_MS = 120_000; // a cold tmux shell has taken ~90 s to come up
 const SELF_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
