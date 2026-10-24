@@ -540,12 +540,16 @@ test('every login expired or parked before the request: both dead ends say unaut
   try {
     const stream = await runStream(h2);
     assert.equal(stream.body[0], 2);
-    assert.equal(JSON.parse(stream.body.subarray(5).toString()).error.code, 'unauthenticated');
+    const streamEnd = JSON.parse(stream.body.subarray(5).toString()).error;
+    assert.equal(streamEnd.code, 'unauthenticated');
+    assert.match(streamEnd.message, /^No TeamCursor account is signed in/, 'one TeamCursor, not "TeamCursor: TeamCursor"');
     const unary = await fetch(`${url}/aiserver.v1.DashboardService/GetMe`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'local-proxy-key' }, body: '{}',
     });
     assert.equal(unary.status, 401);
-    assert.equal((await unary.json()).code, 'unauthenticated');
+    const unaryBody = await unary.json();
+    assert.equal(unaryBody.code, 'unauthenticated');
+    assert.doesNotMatch(unaryBody.message, /TeamCursor: TeamCursor/);
     assert.equal(agent.calls.length + api.calls.length, 0);
   } finally {
     await closeAll(proxy.cursorH2, proxy, agent.server, api.server);

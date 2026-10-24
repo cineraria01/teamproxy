@@ -1219,7 +1219,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         if (authParks.length && !accountManager.anyUsable() && !accountManager.anyCapped()) {
           return deadEnd('unauthenticated', 'TeamCursor: every account failed authentication. Sign in again (teamcursor login).', 60);
         }
-        if (poolAuth?.status === 401) return deadEnd('unauthenticated', `TeamCursor: ${poolAuth.message}`, 60);
+        if (poolAuth?.status === 401) return deadEnd('unauthenticated', poolAuth.message, 60); // names TeamCursor itself
         const now = Date.now();
         const throttles = accountManager.accounts
           .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
@@ -3593,7 +3593,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
       if (poolAuth?.status === 401) {
         ctx.status = 401;
         res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(authFailureBody(ctx, `TeamCursor: ${poolAuth.message}`)));
+        res.end(JSON.stringify(authFailureBody(ctx, poolAuth.message))); // names TeamCursor itself
         return;
       }
       ctx.status = 429;

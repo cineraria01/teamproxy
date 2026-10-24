@@ -155,24 +155,15 @@ export function buildCursorPrompt(body) {
   return lines.join('\n');
 }
 
-// JSON with `<` as < (the same value): text in the conversation cannot close or open a prompt tag.
+// JSON with `<` as \u003c (the same value): text in the conversation cannot close or open a prompt tag.
 const promptJson = value => JSON.stringify(value).replace(/</g, '\\u003c');
 
-// At most this many balanced `{…}` spans are tried with JSON.parse (each try is linear in the span).
-const JSON_CANDIDATES = 64;
-
-/**
- * The JSON objects among text's top-level balanced `{…}` spans, last first (lazily). One pass: quotes count only
- * inside braces, so a stray `"` in a header outside them changes nothing; a span inside another closed span is not
- * top level (an unclosed `{` encloses nothing). Last first: the model's own answer follows anything it quoted. Linear
- * in the text plus at most JSON_CANDIDATES parses — the per-`{` rescan this replaces was quadratic (80 000 `{` took
- * 5 s and held the worker's event loop).
- */
-function* jsonObjects(text) {
+/** One scan from `from`: balanced `{…}` spans, quotes counted only inside braces; `open` = starts never closed. */
+function braceSpans(text, from) {
   const spans = [];
   const open = [];
   let inString = false;
-  for (let i = 0; i < text.length; i++) {
+  for (let i = from; i < text.length; i++) {
     const ch = text[i];
     if (inString) {
       if (ch === '\\') i++;
@@ -182,15 +173,40 @@ function* jsonObjects(text) {
     else if (ch === '"') inString = true;
     else if (ch === '}') spans.push([open.pop(), i + 1]);
   }
-  spans.sort((a, b) => a[0] - b[0]);
+  return { spans, open };
+}
+
+/** The spans not inside another span of the list (they are disjoint). */
+function topLevel(spans) {
   const top = [];
   let coveredTo = -1;
-  for (const span of spans) {
+  for (const span of spans.sort((a, b) => a[0] - b[0])) {
     if (span[0] < coveredTo) continue;
     top.push(span);
     coveredTo = span[1];
   }
-  for (const [start, end] of top.slice(-JSON_CANDIDATES).reverse()) {
+  return top;
+}
+
+/**
+ * The JSON objects among text's top-level balanced `{…}` spans, last first (lazily). A stray `"` outside braces
+ * changes nothing; a span inside another closed span is not top level. An unclosed `{` (with an odd `"` after it)
+ * can swallow the answer, so when one is left the text after the first of them is scanned once more. Last first is
+ * a heuristic: the model's own answer usually follows anything it quoted. Linear: two scans at most, and the
+ * top-level spans of a scan are disjoint, so every parse together reads the text at most twice — the per-`{`
+ * rescan this replaces was quadratic (80 000 `{` took 5 s and held the worker's event loop).
+ */
+function* jsonObjects(text) {
+  const first = braceSpans(text, 0);
+  const candidates = topLevel(first.spans);
+  if (first.open.length) {
+    const seen = new Set(candidates.map(([start, end]) => `${start}:${end}`));
+    for (const span of topLevel(braceSpans(text, first.open[0] + 1).spans)) {
+      if (!seen.has(`${span[0]}:${span[1]}`)) candidates.push(span);
+    }
+  }
+  candidates.sort((a, b) => b[0] - a[0]);
+  for (const [start, end] of candidates) {
     let value;
     try { value = JSON.parse(text.slice(start, end)); } catch { continue; /* not JSON */ }
     yield value;
@@ -349,9 +365,12 @@ export function enforceLaneConfig(home) {
 // Parent variables a lane child keeps (case-insensitive; LC_* by prefix); everything else is dropped. cursor-agent
 // reads 100+ CURSOR_* / AGENT_CLI_* / EXEC_DAEMON_* switches, and CURSOR_CONFIG_DIR / CURSOR_DATA_DIR win over
 // HOME and XDG (cursor-config/dist/paths.js): inherited, they would move the lane's config and fence elsewhere.
+// No *_proxy: everything the lane needs is the localhost endpoint, and cursor-agent sends it through an
+// HTTP(S)_PROXY even when NO_PROXY lists localhost (measured: CONNECT localhost:<port> through a logging proxy) —
+// plain-text prompts through a proxy, or nowhere when the proxy is remote. Its direct hosts are telemetry only.
 const LANE_ENV_KEEP = new Set([
   'path', 'tmpdir', 'tmp', 'temp', 'lang', 'language', 'tz', 'user', 'logname', 'shell',
-  'http_proxy', 'https_proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'ssl_cert_file', 'ssl_cert_dir',
+  'node_extra_ca_certs', 'ssl_cert_file', 'ssl_cert_dir',
   'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'programdata', 'programfiles', 'programfiles(x86)',
   'programw6432', 'number_of_processors', 'processor_architecture', 'os', 'username', 'computername',
 ]);
@@ -384,25 +403,42 @@ export function laneEnv(env, { port, home, apiKey, platform = process.platform }
   return child;
 }
 
-// Every cursor-agent this process started and that has not closed yet. A worker that exits (restart, crash) kills
-// them: otherwise they would run on unseen, spend the pool, and sit outside the next worker's concurrency cap.
-// ponytail: a worker killed with SIGKILL runs no exit handler; its children finish (or time out) on their own.
+// Every cursor-agent this process started and that has not closed yet. A worker that goes away (stop, restart,
+// health recycle, crash) kills them: otherwise they would run on unseen, spend the pool, and sit outside the next
+// worker's concurrency cap. ponytail: a worker killed with SIGKILL runs no handler; its children end on their own.
 const liveChildren = new Set();
-let exitHookArmed = false;
+let exitHooksArmed = false;
 
-/** SIGKILL every cursor-agent still running (the worker's exit hook). */
+/** SIGKILL every cursor-agent still running (the worker's exit and signal hooks). */
 export function killLiveCursorAgents() {
   for (const live of liveChildren) {
     try { live.kill('SIGKILL'); } catch { /* already gone */ }
   }
 }
 
+/**
+ * SIGTERM always means the worker is going (stop, restart, the supervisor's recycle, which SIGKILLs it
+ * workerRecycleGraceMs later): kill the runs at once, not at 'exit'. SIGHUP / SIGINT end the process only when
+ * nothing else listens (the worker's SIGHUP reloads accounts): then too. A worker in TUI mode has no SIGTERM handler
+ * and so no 'exit' event; when this listener is the only one, the signal is raised again so the process still ends
+ * the default way.
+ */
+function onEndingSignal(signal) {
+  const alone = process.listenerCount(signal) === 1;
+  if (signal !== 'SIGTERM' && !alone) return;
+  killLiveCursorAgents();
+  if (!alone) return;
+  process.removeListener(signal, onEndingSignal);
+  try { process.kill(process.pid, signal); } catch { process.exit(1); }
+}
+
 function trackChild(child) {
   liveChildren.add(child);
   child.once('close', () => liveChildren.delete(child));
-  if (exitHookArmed) return;
-  exitHookArmed = true;
+  if (exitHooksArmed) return;
+  exitHooksArmed = true;
   process.once('exit', killLiveCursorAgents);
+  for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(signal, onEndingSignal);
 }
 
 /**
@@ -568,7 +604,8 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
     if (problem) return sendProblem(res, problem);
     const message = stripAnsi(result.stderr || result.stdout).trim().slice(0, 2000) || `cursor-agent exited with code ${result.code}`;
     const { status, type } = classifyCursorRunFailure(message);
-    return sendError(res, status, type, `TeamCursor: ${message}`);
+    // The lane's own dead ends already say "TeamCursor …"; prefix only cursor-agent's own words.
+    return sendError(res, status, type, /^TeamCursor\b/.test(message) ? message : `TeamCursor: ${message}`);
   }
 
   async function listModels(res) {

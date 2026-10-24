@@ -75,10 +75,16 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
 3. `cursor-agent --disable-codebase-ref --disable-indexing --disable-auto-update --disable-project-configs -p
    --output-format json --mode ask --trust [--model <id>] --workspace <dir>/workspace`, prompt on stdin. The env is
    **an allowlist** of the proxy's own (`PATH`, `TMPDIR`/`TMP`/`TEMP`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `USER`,
-   `LOGNAME`, `SHELL`, the `*_proxy` variables, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`/`_DIR`, and the Windows system
+   `LOGNAME`, `SHELL`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`/`_DIR`, and the Windows system
    variables; case-insensitive), plus `HOME`/`XDG_*` = lane home, `CURSOR_CONFIG_DIR=<home>/.config/cursor`,
    `CURSOR_DATA_DIR=<home>/.cursor`, `CURSOR_API_ENDPOINT=http://localhost:<public port>/teamcursor-lane`,
    `CURSOR_API_KEY=<per-process random key>`, `AGENT_CLI_CREDENTIAL_STORE=memory`, `DIRENV_DISABLE=1`, `NO_COLOR=1`.
+   **No proxy variables** (`HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY`): everything the lane needs is the localhost
+   endpoint, and cursor-agent sends it through an `HTTP(S)_PROXY` even when `NO_PROXY` lists `localhost` — measured
+   with a logging CONNECT proxy in the parent env: 4× `CONNECT localhost:3470` with `NO_PROXY=localhost,127.0.0.1,::1`,
+   0 requests with the variables dropped (completions fine). Through a real proxy that would be plain-text prompts
+   to the proxy, or a dead lane when the proxy is remote; a dead proxy makes cursor-agent refuse to start ("Failed to
+   reach the Cursor API. Check that your proxy … is reachable"). Its direct hosts (telemetry) go without a proxy.
    Why an allowlist: the bundle reads 100+ `CURSOR_*` / `AGENT_CLI_*` / `EXEC_DAEMON_*` switches, and
    `CURSOR_CONFIG_DIR` / `CURSOR_DATA_DIR` win over `XDG_CONFIG_HOME` / `HOME` (`cursor-config/dist/paths.js`), so an
    inherited one would have moved the lane's config — and the fence — to the user's `~/.cursor` (2026-10-25 audit).
@@ -102,21 +108,34 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
    `{"content":"…"}` (a non-string `content` is returned as JSON text), found in the text (Cursor user rules
    prepend a header such as `현재 사용 모델: …`); no usable JSON → the text itself. One pass finds the balanced `{…}`
    spans (quotes count only inside braces); only **top-level** spans count (not inside another closed span) and the
-   **last** is tried first — the model's own answer follows anything it quoted from the prompt, so a
-   `{"tool_calls":…}` copied from web text does not win. At most 64 are tried with `JSON.parse` — linear time. The
-   first draft rescanned from every `{` (quadratic: 80 000 `{` took 5.4 s on the worker's event loop, enough for a
-   reply provoked by web text to stall every other stream); four 80 000-character floods now parse in 62 ms together
-   (test). In the prompt, the JSON blocks (`<actions>`, `<conversation>`, the schema) carry `<` as `<` (same
-   JSON value), so message text cannot close or open a prompt tag. `<instructions>` (the app's own system text) is
-   raw.
+   **last** is tried first. When a `{` is left unclosed (with an odd `"` after it, it can swallow the answer), the
+   text after the first such `{` is scanned once more. Every top-level span may be parsed (a scan's top-level spans
+   are disjoint, so all parses together read the text at most twice): linear time, and trailing `{}`s cannot crowd
+   out the answer. The first draft rescanned from every `{` (quadratic: 80 000 `{` took 5.4 s on the worker's event
+   loop, enough for a reply provoked by web text to stall every other stream); four 80 000-character floods now parse
+   in well under a second together (test). **Last first is a heuristic**: the model's own answer usually follows
+   anything it quoted, so a `{"tool_calls":…}` copied from web text before the answer does not win — one quoted
+   *after* the answer would. In the prompt, the JSON blocks (`<actions>`, `<conversation>`, the schema) carry `<` as
+   `\u003c` (same JSON value), so message text cannot close or open a prompt tag. `<instructions>` (the app's own
+   system text) is raw.
 6. Chats (`home/.config/cursor/chats/<hash>/<id>`) and transcripts (`home/.cursor/projects/<ws>/agent-transcripts/<id>`)
    older than 1 h are deleted after each run and every 10 min while the worker runs (an unref'd timer started by the
    first run), so idle hours do not keep prompts.
 7. The client hanging up aborts the run: SIGTERM, SIGKILL after 5 s (the watch starts before the body is read).
    `cursor-agent` is a bash script that `exec`s node, so the signal reaches the process itself; no grandchildren
-   were seen in ask mode (measured). Output past 16 MiB (stdout + stderr) stops the run → 502. When the worker exits
-   (restart, crash) its `exit` handler SIGKILLs every cursor-agent still running; a worker killed with SIGKILL runs
-   no handler, and its children end on their own (finish or time out).
+   were seen in ask mode (measured). Output past 16 MiB (stdout + stderr) stops the run → 502.
+   When the worker goes away, the runs go with it (`killLiveCursorAgents`, SIGKILL):
+   - **SIGTERM** (stop, restart, the supervisor's health recycle, `disconnect`): at once, in the signal handler. The
+     supervisor's recycle sends SIGTERM and SIGKILLs `workerRecycleGraceMs` (5 s) later, and a non-TUI worker's own
+     shutdown forces `process.exit` after 5 s — the two race, but the runs are already gone at SIGTERM. A worker in
+     TUI mode (the shipped tmux launch) registers no SIGTERM handler: when this handler is the only one it raises
+     SIGTERM again, so the worker still dies the default way; a non-TUI worker keeps its own graceful shutdown.
+   - **SIGHUP / SIGINT**: only when nothing else listens, i.e. when the signal would end the process (the worker's
+     SIGHUP reloads accounts and must not touch running completions); then the same as SIGTERM.
+   - **`exit`** (a crash, `process.exit`): the `exit` hook.
+   - A worker killed with **SIGKILL** directly (health checks failed and IPC is silent) runs no handler: its runs end
+     on their own (finish, or the 10 min timeout).
+   Test: a real child process with a live run, SIGTERM'd with and without its own SIGTERM handler.
 8. Model ids: `[A-Za-z0-9][\w.:[\]=,-]*`, the same set `/models` lists (so `_` is accepted).
 
 ## The macOS keychain dialog (root cause and fix)
