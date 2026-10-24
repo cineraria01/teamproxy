@@ -468,17 +468,21 @@ async function superviseServerCommand() {
   const activeRequests = () => activePublicRequests + workerH2Streams;
   // Resolves once the worker has applied the drain state (its ack carries its live h2 stream
   // count), so a drain reply never counts before the worker stopped taking new h2 streams.
-  let drainAck = null;
+  // Overlapping drain calls each wait for an ack of their own state (or their own 1 s timeout).
+  const drainWaiters = new Set();
+  const releaseDrainWaiters = draining => {
+    for (const waiter of drainWaiters) if (draining === undefined || waiter.draining === draining) waiter.done();
+  };
   const tellWorkerDraining = () => new Promise(resolve => {
-    const done = () => { clearTimeout(timer); if (drainAck === done) drainAck = null; resolve(); };
-    const timer = setTimeout(done, 1000); // no answer (no worker, old worker): count what we know
-    timer.unref?.();
-    drainAck?.();
-    drainAck = done;
+    const waiter = { draining: deploymentDraining };
+    waiter.done = () => { clearTimeout(waiter.timer); drainWaiters.delete(waiter); resolve(); };
+    waiter.timer = setTimeout(waiter.done, 1000); // no answer (no worker, old worker): count what we know
+    waiter.timer.unref?.();
+    drainWaiters.add(waiter);
     try {
       if (worker?.connected) worker.send({ type: 'teamcodex:draining', draining: deploymentDraining });
-      else done();
-    } catch { done(); }
+      else waiter.done();
+    } catch { waiter.done(); }
   });
   let activeBufferedRequestBytes = 0;
   let restartCount = 0;
@@ -1198,7 +1202,7 @@ async function superviseServerCommand() {
       if ((message?.type === 'teamcodex:h2-streams' || message?.type === 'teamcodex:draining-ack')
           && Number.isFinite(message.count)) {
         workerH2Streams = Math.max(0, Math.floor(message.count));
-        if (message.type === 'teamcodex:draining-ack') drainAck?.();
+        if (message.type === 'teamcodex:draining-ack') releaseDrainWaiters(message.draining);
         return;
       }
       if (message?.type === 'teamcodex:capacity'
@@ -1939,7 +1943,9 @@ async function proxyWorkerCommand() {
     if (message?.type === 'teamcodex:draining') {
       server.setDraining?.(message.draining === true);
       try {
-        if (process.connected) process.send({ type: 'teamcodex:draining-ack', count: server.cursorStreamCount?.() ?? 0 });
+        if (process.connected) {
+          process.send({ type: 'teamcodex:draining-ack', draining: message.draining === true, count: server.cursorStreamCount?.() ?? 0 });
+        }
       } catch { /* supervisor gone */ }
       return;
     }

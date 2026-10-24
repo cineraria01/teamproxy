@@ -378,7 +378,7 @@ test('the real server: the public port takes HTTP/1.1 and cursor-agent\'s h2c st
     assert.equal(seen, '1');
     // A drain reply comes after the worker stopped taking h2 streams, and counts the live one.
     const state = JSON.parse(await readFile(join(dir, 'teamcursor.server.json'), 'utf8'));
-    const drain = await new Promise((resolve, reject) => {
+    const postDrain = () => new Promise((resolve, reject) => {
       const req = http.request(`http://127.0.0.1:${port}/teamclaude/deployment/drain`, {
         method: 'POST', agent: false,
         headers: { 'x-api-key': 'proxy-key', 'x-teamcodex-lifecycle-id': state.lifecycle.id, 'content-length': '0' },
@@ -386,7 +386,9 @@ test('the real server: the public port takes HTTP/1.1 and cursor-agent\'s h2c st
       req.on('error', reject);
       req.end();
     });
-    assert.deepEqual(drain, { draining: true, activeRequests: 1 });
+    // Two overlapping drain calls: each answers after the worker's ack, with the live stream counted.
+    const drains = await Promise.all([postDrain(), postDrain()]);
+    assert.deepEqual(drains, [{ draining: true, activeRequests: 1 }, { draining: true, activeRequests: 1 }]);
     const refusedSession = http2.connect(`http://127.0.0.1:${port}`);
     const refused = await new Promise((resolve, reject) => {
       const req = refusedSession.request({ ':method': 'POST', ':path': '/agent.v1.AgentService/Run', 'content-type': 'application/connect+proto' });

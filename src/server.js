@@ -1137,6 +1137,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     // least one), so one odd request cannot bench the whole pool.
     let exhaustedFailovers = 0;
     let networkFailures = 0;
+    let emptyEnds = 0; // of those, upstream answers that ended without a byte (it was reached)
     let trailers = null; // of the committed attempt
     const abort = new AbortController();
     stream.on('wantTrailers', () => {
@@ -1206,7 +1207,9 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
           .map(a => a.rateLimitedUntil - now);
         if (networkFailures && !throttles.length) {
-          return deadEnd('unavailable', `TeamCursor: could not reach ${origin}.`, 5);
+          return deadEnd('unavailable', emptyEnds >= networkFailures
+            ? `TeamCursor: ${origin} ended every attempt without an answer.`
+            : `TeamCursor: could not reach ${origin}.`, 5);
         }
         const waitMs = accountManager.anyCapped(tried) ? 1000 : throttles.length ? Math.min(...throttles) : 60_000;
         const retryAfter = Math.max(1, Math.ceil(waitMs / 1000));
@@ -1372,7 +1375,10 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       up.on('end', () => {
         // Headers but not one byte before the end (an RST CANCEL/NO_ERROR): an empty 200 without an end
         // frame would leave cursor-agent hanging — treat it like a lost upstream.
-        if (!committed && responseHeaders && heldBytes === 0 && streaming && agent) return upstreamLost();
+        if (!committed && responseHeaders && heldBytes === 0 && streaming && agent) {
+          if (upstreamStream === up) emptyEnds++;
+          return upstreamLost();
+        }
         if (!committed) decide(null); // no headers yet → upstreamLost
         if (!committed || upstreamStream !== up) return; // replaying elsewhere, or handled
         stream.end();

@@ -509,3 +509,20 @@ test('headers but no byte before the upstream ends: not an empty 200 — the nex
     }
   }
 });
+
+test('every attempt ended without a byte: the dead end says the upstream answered empty, not "could not reach"', async () => {
+  const agent = await agentUpstream((call, stream) => {
+    stream.respond({ ':status': 200, 'content-type': 'application/connect+proto' });
+    setTimeout(() => stream.end(), 10);
+    return true;
+  });
+  const { proxy, h2 } = await cursorProxy([cursorAccount('a')], { agent: agent.url });
+  try {
+    const result = await runStream(h2);
+    const end = JSON.parse(result.body.subarray(5).toString());
+    assert.equal(end.error.code, 'unavailable');
+    assert.match(end.error.message, /ended every attempt without an answer/);
+  } finally {
+    await closeAll(proxy.cursorH2, proxy, agent.server);
+  }
+});
