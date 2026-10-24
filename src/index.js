@@ -680,7 +680,9 @@ async function superviseServerCommand() {
       && req.url === '/teamclaude/status'
       && (contentLength == null || contentLength === '0')
       && req.headers['transfer-encoding'] == null;
-    if (deploymentDraining && !bypassAdmission) {
+    // A Cursor lane call belongs to a completion already admitted (and still counted as active): refusing it
+    // would fail that completion instead of letting it finish before the swap.
+    if (deploymentDraining && !bypassAdmission && !(isLocal && isCursorLanePath(req.url))) {
       rejectPublicRequest(
         req,
         res,

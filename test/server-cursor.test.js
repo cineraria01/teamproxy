@@ -551,3 +551,27 @@ test('every login expired or parked before the request: both dead ends say unaut
     await closeAll(proxy.cursorH2, proxy, agent.server, api.server);
   }
 });
+
+// /openai/v1 completions run cursor-agent with CURSOR_API_ENDPOINT=http://localhost:<port>/teamcursor-lane, so its
+// inference stream arrives as /teamcursor-lane/agent.v1.AgentService/Run: the prefix must go before routing (else the
+// stream would go to the API upstream) and the bearer must still be swapped. During a deployment drain such a stream
+// belongs to an admitted completion and is served.
+test('lane h2 stream: prefix stripped, routed to the agent upstream, bearer swapped — also while draining', async () => {
+  const agent = await agentUpstream();
+  const { proxy, h2 } = await cursorProxy([cursorAccount('a')], { agent: agent.url, api: 'http://127.0.0.1:9' });
+  try {
+    const lane = await runStream(h2, { headers: { ':path': `/teamcursor-lane${RUN}`, authorization: 'Bearer lane-look-alike' } });
+    assert.equal(lane.headers[':status'], 200);
+    assert.equal(lane.headers['x-served-by'], 'a');
+    assert.equal(agent.calls[0].headers[':path'], RUN);
+    assert.equal(agent.calls[0].headers.authorization, 'Bearer tok-a');
+    proxy.setDraining(true);
+    const drained = await runStream(h2, { headers: { ':path': `/teamcursor-lane${RUN}` } });
+    assert.equal(drained.headers['x-served-by'], 'a', 'a lane stream is not refused by the drain');
+    const refused = await runStream(h2);
+    assert.equal(JSON.parse(refused.body.subarray(5).toString()).error.code, 'unavailable', 'a plain stream still is');
+    assert.equal(agent.calls.length, 2);
+  } finally {
+    await closeAll(proxy.cursorH2, proxy, agent.server);
+  }
+});

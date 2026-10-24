@@ -1110,13 +1110,15 @@ export function createProxyServer(accountManager, config, hooks = {}) {
 
   function handleCursorStream(stream, headers) {
     // The OpenAI lane's children carry its prefix; upstream gets the plain path.
-    const path = stripCursorLane(headers[':path'] || '/').path;
+    const { path, lane } = stripCursorLane(headers[':path'] || '/');
     const agent = isCursorAgentPath(path);
     const origin = agent ? cursorAgentUpstream : upstream;
     const streaming = String(headers['content-type'] || '').startsWith('application/connect+');
     const chatKey = cursorAffinityKey(headers);
     const affinityKey = !sessionAffinity ? null : chatKey ? agyAffinityObject(chatKey) : stream.session;
-    if (cursorDraining) {
+    // A lane stream belongs to an admitted /openai/v1 completion (h2 is loopback-only): let it finish, like the
+    // supervisor does for the lane's HTTP/1.1 calls.
+    if (cursorDraining && !lane) {
       // Same answer as the supervisor's HTTP/1.1 drain 503, in Connect's shape.
       const message = 'Proxy is draining for a verified deployment';
       if (streaming) {
@@ -1213,10 +1215,11 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       }
       if (!account) {
         // This request's own parks, or logins that were all expired/parked before it (not "out of usage").
-        if ((authParks.length && !accountManager.anyUsable() && !accountManager.anyCapped())
-            || cursorPoolProblem(accountManager.accounts)?.status === 401) {
+        const poolAuth = cursorPoolProblem(accountManager.accounts);
+        if (authParks.length && !accountManager.anyUsable() && !accountManager.anyCapped()) {
           return deadEnd('unauthenticated', 'TeamCursor: every account failed authentication. Sign in again (teamcursor login).', 60);
         }
+        if (poolAuth?.status === 401) return deadEnd('unauthenticated', `TeamCursor: ${poolAuth.message}`, 60);
         const now = Date.now();
         const throttles = accountManager.accounts
           .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
@@ -3586,10 +3589,11 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // cursor: the same, in the Connect unary error shape.
     if (ctx.provider === 'grok' || ctx.provider === 'cursor') {
       if (sendSaved429(res, ctx)) return;
-      if (ctx.provider === 'cursor' && cursorPoolProblem(accountManager.accounts)?.status === 401) {
+      const poolAuth = ctx.provider === 'cursor' ? cursorPoolProblem(accountManager.accounts) : null;
+      if (poolAuth?.status === 401) {
         ctx.status = 401;
         res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(authFailureBody(ctx, 'TeamCursor: no account is signed in and working. Sign in again (teamcursor login).')));
+        res.end(JSON.stringify(authFailureBody(ctx, `TeamCursor: ${poolAuth.message}`)));
         return;
       }
       ctx.status = 429;

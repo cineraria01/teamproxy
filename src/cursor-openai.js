@@ -14,11 +14,14 @@ export const CURSOR_OPENAI_PREFIX = '/openai/v1';
 // cursor-agent keeps the endpoint's path prefix, so the lane's own children are told apart by it.
 export const CURSOR_LANE_PREFIX = '/teamcursor-lane';
 // RPCs answered with an empty message on the lane: the account's plugins and skills would be downloaded
-// into the lane home (164 MB, 4 minutes on the first run) and their hooks and rules would ride every turn.
+// into the lane home (164 MB, 4 minutes on the first run) and their hooks and rules would ride every turn; a team
+// account's hooks and commands (`team-hooks-sync.ts`) would run their own commands in the lane with the prompt.
 export const CURSOR_LANE_EMPTY_RPCS = new Set([
   '/aiserver.v1.DashboardService/GetEffectiveUserPlugins',
   '/aiserver.v1.DashboardService/ListMarketplaces',
   '/aiserver.v1.DashboardService/GetManagedSkills',
+  '/aiserver.v1.DashboardService/GetTeamHooks',
+  '/aiserver.v1.DashboardService/GetTeamCommands',
 ]);
 // cursor-agent's hidden switches: no language server (an `npx typescript-language-server` per run, 5–50 s),
 // no indexing, no self-update, no workspace rules.
@@ -35,7 +38,8 @@ export const CURSOR_LANE_HOOKS = Object.freeze({ version: 1, hooks: { preToolUse
 export const CURSOR_OPENAI_DEFAULT_MODEL = 'composer-2.5';
 const MODELS_TTL_MS = 10 * 60 * 1000;
 const CHAT_KEEP_MS = 60 * 60 * 1000;
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:[\]=,-]*$/;
+// The same characters parseCursorModels lists (`\w` keeps `_`).
+const MODEL_ID = /^[A-Za-z0-9][\w.:[\]=,-]*$/;
 
 const stripAnsi = text => String(text || '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
@@ -143,22 +147,26 @@ export function buildCursorPrompt(body) {
     lines.push('Reply exactly {"content":"<text>"} with the assistant\'s next message.');
   }
   if (format?.type === 'json_object') lines.push('- the text in "content" must itself be a JSON object, as a string');
-  if (schema) lines.push(`- the text in "content" must itself be JSON matching this schema, as a string: ${JSON.stringify(schema)}`);
+  if (schema) lines.push(`- the text in "content" must itself be JSON matching this schema, as a string: ${promptJson(schema)}`);
   lines.push('');
   if (instructions.length) lines.push('<instructions>', instructions.join('\n\n'), '</instructions>', '');
-  if (tools.length) lines.push('<actions>', JSON.stringify(tools), '</actions>', '');
-  lines.push('<conversation>', JSON.stringify(conversation), '</conversation>', '', 'Your reply (JSON only):');
+  if (tools.length) lines.push('<actions>', promptJson(tools), '</actions>', '');
+  lines.push('<conversation>', promptJson(conversation), '</conversation>', '', 'Your reply (JSON only):');
   return lines.join('\n');
 }
+
+// JSON with `<` as < (the same value): text in the conversation cannot close or open a prompt tag.
+const promptJson = value => JSON.stringify(value).replace(/</g, '\\u003c');
 
 // At most this many balanced `{…}` spans are tried with JSON.parse (each try is linear in the span).
 const JSON_CANDIDATES = 64;
 
 /**
- * The JSON objects among text's balanced `{…}` spans, outermost first, in start order (lazily). One pass:
- * quotes count only inside braces, so a stray `"` in a header outside them changes nothing. Linear in the text
- * plus at most JSON_CANDIDATES parses — the per-`{` rescan this replaces was quadratic (80 000 `{` took 5 s and
- * held the worker's event loop).
+ * The JSON objects among text's top-level balanced `{…}` spans, last first (lazily). One pass: quotes count only
+ * inside braces, so a stray `"` in a header outside them changes nothing; a span inside another closed span is not
+ * top level (an unclosed `{` encloses nothing). Last first: the model's own answer follows anything it quoted. Linear
+ * in the text plus at most JSON_CANDIDATES parses — the per-`{` rescan this replaces was quadratic (80 000 `{` took
+ * 5 s and held the worker's event loop).
  */
 function* jsonObjects(text) {
   const spans = [];
@@ -175,7 +183,14 @@ function* jsonObjects(text) {
     else if (ch === '}') spans.push([open.pop(), i + 1]);
   }
   spans.sort((a, b) => a[0] - b[0]);
-  for (const [start, end] of spans.slice(0, JSON_CANDIDATES)) {
+  const top = [];
+  let coveredTo = -1;
+  for (const span of spans) {
+    if (span[0] < coveredTo) continue;
+    top.push(span);
+    coveredTo = span[1];
+  }
+  for (const [start, end] of top.slice(-JSON_CANDIDATES).reverse()) {
     let value;
     try { value = JSON.parse(text.slice(start, end)); } catch { continue; /* not JSON */ }
     yield value;
@@ -197,7 +212,11 @@ export function parseCursorReply(text, toolNames = []) {
         .map(call => ({ name: call.name, arguments: call.arguments ?? {} }));
       if (calls.length) return { toolCalls: calls };
     }
-    if (typeof value?.content === 'string' && Object.keys(value).length <= 2) return { content: value.content };
+    const content = value?.content;
+    if (Object.keys(value ?? {}).length <= 2 && (typeof content === 'string' || (content && typeof content === 'object'))) {
+      // A JSON answer the model put in as an object instead of a string still reaches the client as JSON text.
+      return { content: typeof content === 'string' ? content : JSON.stringify(content) };
+    }
   }
   return { content: raw };
 }
@@ -365,8 +384,32 @@ export function laneEnv(env, { port, home, apiKey, platform = process.platform }
   return child;
 }
 
-/** Run cursor-agent once: `{code, stdout, stderr, timedOut, error}`. Killed on timeout or abort. */
-export function runCursorAgent({ bin, args, env, cwd, input = '', timeoutMs, signal, spawn = nodeSpawn }) {
+// Every cursor-agent this process started and that has not closed yet. A worker that exits (restart, crash) kills
+// them: otherwise they would run on unseen, spend the pool, and sit outside the next worker's concurrency cap.
+// ponytail: a worker killed with SIGKILL runs no exit handler; its children finish (or time out) on their own.
+const liveChildren = new Set();
+let exitHookArmed = false;
+
+/** SIGKILL every cursor-agent still running (the worker's exit hook). */
+export function killLiveCursorAgents() {
+  for (const live of liveChildren) {
+    try { live.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+function trackChild(child) {
+  liveChildren.add(child);
+  child.once('close', () => liveChildren.delete(child));
+  if (exitHookArmed) return;
+  exitHookArmed = true;
+  process.once('exit', killLiveCursorAgents);
+}
+
+/**
+ * Run cursor-agent once: `{code, stdout, stderr, timedOut, tooLarge, error}`. Killed on timeout, abort, or when
+ * its output passes `maxOutputBytes` (stdout + stderr; a model answer is far smaller).
+ */
+export function runCursorAgent({ bin, args, env, cwd, input = '', timeoutMs, signal, spawn = nodeSpawn, maxOutputBytes = 16 * 1024 * 1024 }) {
   return new Promise(resolve => {
     let child;
     try {
@@ -375,8 +418,11 @@ export function runCursorAgent({ bin, args, env, cwd, input = '', timeoutMs, sig
       resolve({ code: null, stdout: '', stderr: '', error });
       return;
     }
+    trackChild(child);
     const stdout = [];
     const stderr = [];
+    let outputBytes = 0;
+    let tooLarge = false;
     let timedOut = false;
     let killTimer = null;
     const kill = () => {
@@ -389,19 +435,30 @@ export function runCursorAgent({ bin, args, env, cwd, input = '', timeoutMs, sig
     timer.unref?.();
     const onAbort = () => kill();
     signal?.addEventListener('abort', onAbort, { once: true });
-    child.stdout.on('data', chunk => stdout.push(chunk));
-    child.stderr.on('data', chunk => stderr.push(chunk));
+    const collect = into => chunk => {
+      if (tooLarge) return;
+      outputBytes += chunk.length;
+      if (outputBytes > maxOutputBytes) {
+        tooLarge = true;
+        kill();
+        return;
+      }
+      into.push(chunk);
+    };
+    child.stdout.on('data', collect(stdout));
+    child.stderr.on('data', collect(stderr));
     child.stdin.on('error', () => {});
     child.on('error', error => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      liveChildren.delete(child);
       resolve({ code: null, stdout: '', stderr: '', error });
     });
     child.on('close', code => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
-      resolve({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), timedOut });
+      resolve({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), timedOut, tooLarge });
     });
     child.stdin.end(input);
   });
@@ -430,6 +487,7 @@ function readBody(req, limit) {
       ? reject(Object.assign(new Error('Request body too large'), { status: 413 }))
       : resolve(Buffer.concat(chunks))));
     req.on('error', reject);
+    req.on('close', () => { if (!req.complete) reject(new Error('The client went away during the body')); });
   });
 }
 
@@ -448,6 +506,7 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
   let inflight = 0;
   let models = null;
   let modelsPending = null;
+  let pruneTimer = null;
 
   const poolProblem = () => cursorPoolProblem(accountManager?.accounts, now());
   const sendProblem = (res, problem) => sendError(res, problem.status, problem.type, problem.message,
@@ -485,6 +544,9 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
       return { code: null, stdout: '', stderr: '', error, lane: true };
     }
     const { home, workspace } = lane;
+    // Prompts in chats/transcripts must not outlive CHAT_KEEP_MS just because traffic stopped.
+    pruneTimer ||= setInterval(() => pruneLaneChats(home, now()), CHAT_KEEP_MS / 6);
+    pruneTimer.unref?.();
     const result = await runCursorAgent({
       bin, args: [...CURSOR_LANE_FLAGS, ...args, '--workspace', workspace], env: laneEnv(env, { port, home, apiKey }),
       cwd: workspace, input, timeoutMs, signal, spawn,
@@ -499,6 +561,7 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
     if (result.error?.code === 'ENOENT' && !result.lane) return sendError(res, 503, 'cursor_cli_not_found', cursorCliNotFoundMessage(bin, env));
     if (result.lane) return sendError(res, 502, 'upstream_error', `TeamCursor: the lane folder ${dir} is not usable: ${result.error.message}`);
     if (result.error) return sendError(res, 502, 'upstream_error', `cursor-agent could not start: ${result.error.message}`);
+    if (result.tooLarge) return sendError(res, 502, 'upstream_error', 'TeamCursor: cursor-agent printed more than 16 MiB; the run was stopped.');
     if (result.timedOut) return sendError(res, 504, 'timeout_error', `cursor-agent did not answer within ${Math.round(timeoutMs / 1000)} s`);
     // The run may have parked or throttled the last account: the pool says why better than the CLI's text.
     const problem = poolProblem();
@@ -522,6 +585,18 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
   }
 
   async function complete(req, res) {
+    // Watch for a hang-up from the start: one during the body read must not leave a run holding a slot.
+    const abort = new AbortController();
+    const onClose = () => { if (!res.writableEnded) abort.abort(); };
+    res.on('close', onClose);
+    try {
+      await completeWatched(req, res, abort.signal);
+    } finally {
+      res.off('close', onClose);
+    }
+  }
+
+  async function completeWatched(req, res, signal) {
     let body;
     try {
       body = JSON.parse((await readBody(req, maxRequestBytes)).toString('utf8') || '{}');
@@ -538,16 +613,14 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
     if (inflight >= maxConcurrent) {
       return sendError(res, 429, 'rate_limit_error', `TeamCursor: ${maxConcurrent} completions are already running.`, { 'retry-after': '5' });
     }
+    if (signal.aborted) return;
     inflight += 1;
-    const abort = new AbortController();
-    const onClose = () => { if (!res.writableEnded) abort.abort(); };
-    res.on('close', onClose);
     try {
       const args = ['-p', '--output-format', 'json', '--mode', 'ask', '--trust'];
       if (model !== 'auto') args.push('--model', model);
       const started = now();
-      const result = await run(args, buildCursorPrompt(body), abort.signal);
-      if (abort.signal.aborted) return;
+      const result = await run(args, buildCursorPrompt(body), signal);
+      if (signal.aborted) return;
       let parsed = null;
       try { parsed = JSON.parse(result.stdout); } catch { /* fall through to failure */ }
       if (result.code !== 0 || !parsed || parsed.is_error || typeof parsed.result !== 'string') {
@@ -568,7 +641,6 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
       }
     } finally {
       inflight -= 1;
-      res.off('close', onClose);
     }
   }
 

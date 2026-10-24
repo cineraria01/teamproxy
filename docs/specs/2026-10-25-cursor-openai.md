@@ -52,7 +52,7 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
   | 413 | `invalid_request_error` | body over `maxRequestBytes` | — |
   | 429 | `insufficient_quota` | every working account is throttled (out of usage) — checked before the run | soonest throttle end, s (60 when unknown) |
   | 429 | `rate_limit_error` | this pool already runs `cursorOpenAI.maxConcurrent` (4) completions | `5` |
-  | 502 | `upstream_error` | cursor-agent failed (its message after `TeamCursor: `) | — |
+  | 502 | `upstream_error` | cursor-agent failed (its message after `TeamCursor: `), printed more than 16 MiB, or the lane folder is unusable (e.g. deleted mid-run) | — |
   | 503 | `cursor_cli_not_found` | cursor-agent is not installed (`TEAMCURSOR_CURSOR_BIN` → `~/.local/bin/cursor-agent` → `PATH`) | — |
   | 504 | `timeout_error` | no answer within `cursorOpenAI.timeoutMs` (10 min); the child is killed | — |
 
@@ -91,18 +91,33 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
    come back through `/teamcursor-lane/…`: the worker strips the prefix and relays them exactly like `teamcursor run`
    traffic — `authorization` (the look-alike token) is dropped and the account bearer injected on both HTTP/1.1 and
    h2. The look-alike token never leaves the machine (test: only the account bearer reaches the fake upstream).
-   `DashboardService/GetEffectiveUserPlugins|ListMarketplaces|GetManagedSkills` are answered empty on the lane: the
-   account's plugins were 164 MB and 4 min on a fresh home, and their hooks/rules would ride every turn.
-5. Reply = cursor-agent's `result` text: the first JSON object `{"tool_calls":[…]}` with offered names, or
-   `{"content":"…"}`, found anywhere in the text (Cursor user rules prepend a header such as `현재 사용 모델: …`);
-   no usable JSON → the text itself. One pass finds the balanced `{…}` spans (quotes count only inside braces),
-   outermost first, and at most 64 are tried with `JSON.parse` — linear time. The first draft rescanned from every
-   `{` (quadratic: 80 000 `{` took 5.4 s on the worker's event loop, enough for a reply provoked by web text to stall
-   every other stream); four 80 000-character floods now parse in 62 ms together (test).
+   `DashboardService/GetEffectiveUserPlugins|ListMarketplaces|GetManagedSkills|GetTeamHooks|GetTeamCommands` are
+   answered empty on the lane: the account's plugins were 164 MB and 4 min on a fresh home, and their hooks/rules
+   would ride every turn; a team account's hooks (`team-hooks-sync.ts`) would run the team's commands in the lane with
+   the prompt on stdin. A device-wide `/Library/Application Support/Cursor/hooks.json` (MDM, outside the lane home)
+   is the machine owner's policy and still applies; this Mac has none.
+   During a deployment drain the lane's own calls (loopback, HTTP/1.1 at the supervisor and h2 at the worker) are
+   still served: they belong to a completion that was admitted and still counts as active, which the drain waits for.
+5. Reply = cursor-agent's `result` text: a JSON object `{"tool_calls":[…]}` with offered names, or
+   `{"content":"…"}` (a non-string `content` is returned as JSON text), found in the text (Cursor user rules
+   prepend a header such as `현재 사용 모델: …`); no usable JSON → the text itself. One pass finds the balanced `{…}`
+   spans (quotes count only inside braces); only **top-level** spans count (not inside another closed span) and the
+   **last** is tried first — the model's own answer follows anything it quoted from the prompt, so a
+   `{"tool_calls":…}` copied from web text does not win. At most 64 are tried with `JSON.parse` — linear time. The
+   first draft rescanned from every `{` (quadratic: 80 000 `{` took 5.4 s on the worker's event loop, enough for a
+   reply provoked by web text to stall every other stream); four 80 000-character floods now parse in 62 ms together
+   (test). In the prompt, the JSON blocks (`<actions>`, `<conversation>`, the schema) carry `<` as `<` (same
+   JSON value), so message text cannot close or open a prompt tag. `<instructions>` (the app's own system text) is
+   raw.
 6. Chats (`home/.config/cursor/chats/<hash>/<id>`) and transcripts (`home/.cursor/projects/<ws>/agent-transcripts/<id>`)
-   older than 1 h are deleted after each run (they hold the prompts).
-7. The client hanging up aborts the run: SIGTERM, SIGKILL after 5 s. `cursor-agent` is a bash script that `exec`s
-   node, so the signal reaches the process itself; no grandchildren were seen in ask mode (measured).
+   older than 1 h are deleted after each run and every 10 min while the worker runs (an unref'd timer started by the
+   first run), so idle hours do not keep prompts.
+7. The client hanging up aborts the run: SIGTERM, SIGKILL after 5 s (the watch starts before the body is read).
+   `cursor-agent` is a bash script that `exec`s node, so the signal reaches the process itself; no grandchildren
+   were seen in ask mode (measured). Output past 16 MiB (stdout + stderr) stops the run → 502. When the worker exits
+   (restart, crash) its `exit` handler SIGKILLs every cursor-agent still running; a worker killed with SIGKILL runs
+   no handler, and its children end on their own (finish or time out).
+8. Model ids: `[A-Za-z0-9][\w.:[\]=,-]*`, the same set `/models` lists (so `_` is accepted).
 
 ## The macOS keychain dialog (root cause and fix)
 
@@ -133,8 +148,10 @@ the lane test will not catch that, the run time (+30 s) and the dialog will.
 ## Security
 
 - **The lane is local-only.** `/teamcursor-lane/*` from a non-loopback peer is 403 at the supervisor (the worker only
-  ever sees loopback, so the fence must be on the public port; the worker keeps the same check). h2 from a
-  non-loopback peer was already closed. The lane key is per process and only the lane's exchange accepts it.
+  ever sees loopback, so the fence must be on the public port; the worker keeps the same check). Test
+  (`test/server-supervisor.test.js`): a real cursor-mode server answers the lane 403 to its own non-loopback IPv4 and
+  401 `invalid_api_key` (the worker's lane) to loopback; a remote `/openai/v1/models` without the proxy key is 401.
+  h2 from a non-loopback peer was already closed. The lane key is per process and only the lane's exchange accepts it.
 - **cursor-agent's tools are fenced.** Ask mode is "read-only", but it still reads any file on the machine: measured,
   a canary file outside the workspace came back through `Read` and through `Grep`. A Selvi prompt carries text taken
   from the web (titles, transcripts), so a prompt injection could have asked for `~/.config/teamcursor.json` (every
@@ -182,4 +199,5 @@ The earlier draft measured 26 s for a first run on a new home and 263 s before t
 - No real streaming (cursor-agent `--output-format stream-json` exists; add it when a client needs first-token latency).
 - One cursor-agent process per completion: ~2 s of start-up on top of the model time; at most `maxConcurrent` at once.
 - Tool calls are prompted, not native: a model can still answer in text when a call was required.
-- Windows lane paths (chat pruning) are not measured.
+- Windows is not measured: lane paths (chat pruning), and `resolveCursorBin` returns a bare `cursor-agent` that a
+  shell-less spawn may not resolve to `cursor-agent.cmd`. Measure on Windows before claiming it.

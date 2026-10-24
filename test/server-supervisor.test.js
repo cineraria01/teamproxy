@@ -1729,3 +1729,57 @@ test('supervisor fences the operator reset-credit route to loopback (codex mode)
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// The Cursor OpenAI lane is for this proxy's own cursor-agent children. The worker only ever sees loopback (this
+// supervisor re-dials it), so the fence must hold on the public listener. The remote half needs a non-loopback
+// IPv4 on this machine; the loopback half always runs.
+test('supervisor fences the Cursor lane to loopback; /openai/v1 keeps the proxy-key rule (cursor mode)', { timeout: 20000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'teamcursor-supervisor-lane-'));
+  const configPath = join(dir, 'config.json');
+  const port = await unusedPort();
+  await writeFile(configPath, JSON.stringify({
+    provider: 'cursor',
+    proxy: { port, apiKey: 'tc-remote-lane' },
+    cursorUpstream: 'http://127.0.0.1:9',
+    cursorAgentUpstream: 'http://127.0.0.1:9',
+    activeWarmup: false,
+    cursorUsageRefresh: false,
+    accounts: [{
+      name: 'cursor-1', provider: 'cursor', type: 'oauth', accountUuid: 'u-1',
+      accessToken: 'tok-1', refreshToken: 'tok-1', expiresAt: Date.now() + 3_600_000,
+    }],
+  }));
+  const child = spawn(process.execPath, [entry, 'cursor', 'server'], {
+    env: { ...process.env, TEAMCLAUDE_CONFIG: configPath, TEAMCLAUDE_PROVIDER: 'cursor' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+
+  try {
+    await waitUntil(() => status(port), 'proxy did not start').catch(error => {
+      error.message += ` (pid ${child.pid}, exit ${child.exitCode}, signal ${child.signalCode})\n${output}`;
+      throw error;
+    });
+    const exchange = '/teamcursor-lane/auth/exchange_user_api_key';
+    // Loopback reaches the worker's lane, which wants this process's own lane key.
+    const local = await request({ port, path: exchange, method: 'POST', headers: { authorization: 'Bearer key_guess', 'content-length': '0' } });
+    assert.equal(local.status, 401, local.body);
+    assert.equal(JSON.parse(local.body).error, 'invalid_api_key');
+
+    const host = externalIPv4();
+    if (!host) {
+      t.diagnostic('no non-loopback IPv4 on this machine: the remote half was not exercised');
+      return;
+    }
+    const remote = await request({ host, port, path: exchange, method: 'POST', headers: { 'x-api-key': 'tc-remote-lane', 'content-length': '0' } });
+    assert.equal(remote.status, 403, remote.body);
+    assert.equal(JSON.parse(remote.body).error.type, 'permission_error');
+    const keyless = await request({ host, port, path: '/openai/v1/models' });
+    assert.equal(keyless.status, 401, 'a remote /openai/v1 call without the proxy key is refused');
+  } finally {
+    await stopChild(child);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
