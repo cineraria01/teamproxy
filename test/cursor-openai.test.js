@@ -349,10 +349,13 @@ test('cursor mode: every other /v1/... still goes upstream untouched', async t =
   await fetch(`${url}/v1/tokens/oidc`, { method: 'POST', body: '{}' });
   await fetch(`${url}/v1/other?a=1`);
   await fetch(`${url}/v1/models/`);
+  // A lane child's own /v1/... is cursor-agent traffic: prefix stripped and relayed, never the OpenAI surface.
+  await fetch(`${url}/teamcursor-lane/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.deepEqual(seen, [
     { method: 'POST', url: '/v1/tokens/oidc' },
     { method: 'GET', url: '/v1/other?a=1' },
     { method: 'GET', url: '/v1/models/' },
+    { method: 'POST', url: '/v1/chat/completions' },
   ]);
   assert.equal(spawns.length, 0);
 });
@@ -557,7 +560,7 @@ test('the surface exists only in cursor mode, and only when not turned off', asy
   await fetch(`${grok.url}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   await fetch(`${off.url}/v1/models`);
   const claude = await openAIProxy(t, {
-    api: `http://127.0.0.1:${apiPort}`, provider: 'claude',
+    api: `http://127.0.0.1:${apiPort}`, provider: 'anthropic',
     accounts: [{ name: 'claude-1', type: 'oauth', accountUuid: 'u-claude', accessToken: 'c', refreshToken: 'c', expiresAt: Date.now() + HOUR }],
   });
   await fetch(`${claude.url}/v1/models`);
