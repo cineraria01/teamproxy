@@ -582,3 +582,14 @@ test('SIGTERM kills the live cursor-agent runs, and the process still ends as it
   assert.deepEqual(await signalRun({ otherHandler: false }), { code: null, signal: 'SIGTERM', agentAlive: false }, 'TUI worker: default death kept');
   assert.deepEqual(await signalRun({ otherHandler: true }), { code: 7, signal: null, agentAlive: false }, 'non-TUI worker: its own shutdown kept');
 });
+
+test('a limit named only in cursor-agent text is a passing 429 rate_limit_error; insufficient_quota is the pool state', async t => {
+  const limited = await openAIProxy(t, { script: () => ({ stdout: 'Error: too many requests. Retry in 30s.', code: 1 }) });
+  const res = await chat(limited.url, { messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get('retry-after'), '30');
+  assert.equal((await res.json()).error.type, 'rate_limit_error');
+  const bare = await openAIProxy(t, { script: () => ({ stdout: 'resource_exhausted', code: 1 }) });
+  const short = await chat(bare.url, { messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual([short.status, short.headers.get('retry-after'), (await short.json()).error.type], [429, '5', 'rate_limit_error']);
+});

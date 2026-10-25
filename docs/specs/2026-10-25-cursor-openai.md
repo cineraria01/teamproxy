@@ -52,13 +52,14 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
   | 413 | `invalid_request_error` | body over `maxRequestBytes` | — |
   | 429 | `insufficient_quota` | every working account is throttled (out of usage) — checked before the run | soonest throttle end, s (60 when unknown) |
   | 429 | `rate_limit_error` | this pool already runs `cursorOpenAI.maxConcurrent` (4) completions | `5` |
+  | 429 | `rate_limit_error` | cursor-agent failed with a limit in its text (`rate limit`, `too many requests`, `resource_exhausted`, `usage limit`) while the pool still has a working account — a passing limit | its "Retry in Ns", else `5` |
   | 502 | `upstream_error` | cursor-agent failed (its message after `TeamCursor: `), printed more than 16 MiB, or the lane folder is unusable (e.g. deleted mid-run) | — |
   | 503 | `cursor_cli_not_found` | cursor-agent is not installed (`TEAMCURSOR_CURSOR_BIN` → `~/.local/bin/cursor-agent` → `PATH`) | — |
   | 504 | `timeout_error` | no answer within `cursorOpenAI.timeoutMs` (10 min); the child is killed | — |
 
   After a failed run the pool is checked again (the run may have parked or throttled the last account), so a login
-  that expires mid-run is a 401, not a 502. A failed run whose text says usage/rate limit is 429 `insufficient_quota`,
-  one that says unauthenticated is 401. The supervisor's own answers stay as they are (503 while draining, 429 when
+  that expires mid-run is a 401, not a 502. A failed run whose text names a limit is 429 `rate_limit_error` (only the pool state gives
+  `insufficient_quota`); one that says unauthenticated is 401. The supervisor's own answers stay as they are (503 while draining, 429 when
   its queue is full).
 - **`GET /teamclaude/status`** is unchanged (no new fields).
 - Config (optional, `~/.config/teamcursor.json`): `cursorOpenAI: { enabled (true), timeoutMs (600000),

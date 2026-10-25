@@ -276,7 +276,13 @@ export function chatCompletionSse(completion, includeUsage) {
 
 /** An OpenAI error status for a failed cursor-agent run (used when the pool itself looks fine). */
 export function classifyCursorRunFailure(message) {
-  if (/resource_exhausted|usage limit|rate limit|too many requests|exhausted/i.test(message)) return { status: 429, type: 'insufficient_quota' };
+  // A limit named only in cursor-agent's text is a passing one (this request, or an account the pool may still
+  // replace): `rate_limit_error` with its "Retry in Ns" when given, else 5 s. `insufficient_quota` is kept for
+  // cursorPoolProblem, which reads the whole pool's state.
+  if (/resource_exhausted|usage limit|rate limit|too many requests|exhausted/i.test(message)) {
+    const seconds = Number(/retry (?:in|after) (\d+)\s*s/i.exec(message)?.[1]);
+    return { status: 429, type: 'rate_limit_error', retryAfter: seconds > 0 ? seconds : 5 };
+  }
   if (/unauthenticated|authentication|sign in|log ?in again|api key/i.test(message)) return { status: 401, type: 'authentication_error' };
   return { status: 502, type: 'upstream_error' };
 }
@@ -603,9 +609,10 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
     const problem = poolProblem();
     if (problem) return sendProblem(res, problem);
     const message = stripAnsi(result.stderr || result.stdout).trim().slice(0, 2000) || `cursor-agent exited with code ${result.code}`;
-    const { status, type } = classifyCursorRunFailure(message);
+    const { status, type, retryAfter } = classifyCursorRunFailure(message);
     // The lane's own dead ends already say "TeamCursor …"; prefix only cursor-agent's own words.
-    return sendError(res, status, type, /^TeamCursor\b/.test(message) ? message : `TeamCursor: ${message}`);
+    return sendError(res, status, type, /^TeamCursor\b/.test(message) ? message : `TeamCursor: ${message}`,
+      retryAfter ? { 'retry-after': String(retryAfter) } : undefined);
   }
 
   async function listModels(res) {
