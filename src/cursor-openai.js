@@ -4,11 +4,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { join } from 'node:path';
 import { cursorCliNotFoundMessage, resolveCursorBin } from './cursor.js';
 
-// OpenAI-compatible surface on the Cursor pool (`/openai/v1/models`, `/openai/v1/chat/completions`) for
-// local apps that speak OpenAI (Selvi). Cursor has no public inference API — its agent stream is a private
-// protobuf protocol — so each completion runs `cursor-agent -p --mode ask` through this pool's lane and
-// maps the reply. Tool calls are asked for as JSON in the prompt and parsed back. Facts and decisions:
-// docs/specs/2026-10-25-cursor-openai.md.
+// OpenAI-compatible surface on the Cursor pool (`/v1/models`, `/v1/chat/completions`; the first address,
+// `/openai/v1/...`, still works) for local apps that speak OpenAI (Selvi). Cursor has no public inference
+// API — its agent stream is a private protobuf protocol — so each completion runs `cursor-agent -p --mode ask`
+// through this pool's lane and maps the reply. Tool calls are asked for as JSON in the prompt and parsed back.
+// Facts and decisions: docs/specs/2026-10-25-cursor-openai.md.
 
 export const CURSOR_OPENAI_PREFIX = '/openai/v1';
 // cursor-agent keeps the endpoint's path prefix, so the lane's own children are told apart by it.
@@ -59,9 +59,15 @@ export function isCursorLanePath(path) {
   return stripCursorLane(path).lane;
 }
 
+// The same surface at the root, like teamgrok's `/v1`. Only these two exact paths: cursor-agent's own traffic has
+// no `/v1/models` or `/v1/chat/completions` (2026.10.22 bundle; its one `/v1/` path, `/v1/tokens/oidc`, is served
+// on its own socket), and any other `/v1/...` still goes upstream.
+const CURSOR_OPENAI_ROOT_PATHS = new Set(['/v1/models', '/v1/chat/completions']);
+
+/** `/openai/v1` and everything under it, or exactly `/v1/models` / `/v1/chat/completions` (query allowed). */
 export function isCursorOpenAIPath(path) {
   const pathname = String(path || '').split('?', 1)[0];
-  return pathname === CURSOR_OPENAI_PREFIX || pathname.startsWith(`${CURSOR_OPENAI_PREFIX}/`);
+  return CURSOR_OPENAI_ROOT_PATHS.has(pathname) || pathname === CURSOR_OPENAI_PREFIX || pathname.startsWith(`${CURSOR_OPENAI_PREFIX}/`);
 }
 
 /** An unsigned session-JWT look-alike for the lane's children: the proxy swaps every bearer for the account's. */
@@ -319,7 +325,7 @@ export function prepareLaneHome(dir) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
   const readme = join(dir, 'README.txt');
-  if (!existsSync(readme)) writeFileSync(readme, 'teamcursor OpenAI lane: cursor-agent home for /openai/v1 requests. Safe to delete while the proxy is idle (the next request rebuilds it).\n');
+  if (!existsSync(readme)) writeFileSync(readme, 'teamcursor OpenAI lane: cursor-agent home for /v1 (and /openai/v1) requests. Safe to delete while the proxy is idle (the next request rebuilds it).\n');
   return { home, workspace };
 }
 
@@ -688,13 +694,14 @@ export function createCursorOpenAI({ config = {}, accountManager = null, port, d
     }
   }
 
-  /** The OpenAI surface. Returns after answering. */
+  /** The OpenAI surface (a path isCursorOpenAIPath accepts). Returns after answering. */
   async function handle(req, res) {
     const pathname = req.url.split('?', 1)[0];
-    if (pathname === `${CURSOR_OPENAI_PREFIX}/models` && req.method === 'GET') return listModels(res);
-    if (pathname === `${CURSOR_OPENAI_PREFIX}/chat/completions` && req.method === 'POST') return complete(req, res);
+    const route = pathname.replace(/^\/openai(?=\/v1)/, ''); // `/openai/v1/x` is the same route as `/v1/x`
+    if (route === '/v1/models' && req.method === 'GET') return listModels(res);
+    if (route === '/v1/chat/completions' && req.method === 'POST') return complete(req, res);
     req.resume();
-    return sendError(res, 404, 'not_found_error', `Not on the TeamCursor OpenAI surface: ${req.method} ${pathname}. Use GET ${CURSOR_OPENAI_PREFIX}/models or POST ${CURSOR_OPENAI_PREFIX}/chat/completions.`);
+    return sendError(res, 404, 'not_found_error', `Not on the TeamCursor OpenAI surface: ${req.method} ${pathname}. Use GET /v1/models or POST /v1/chat/completions.`);
   }
 
   return { answerLane, handle };

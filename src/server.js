@@ -1023,7 +1023,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     ? Math.max(0, config.cursorUsageActiveMs)
     : 120_000;
   const cursorAgentUpstream = config.cursorAgentUpstream || CURSOR_DEFAULT_AGENT_UPSTREAM;
-  // OpenAI surface (/openai/v1) and the lane its cursor-agent children dial (docs/specs/2026-10-25-cursor-openai.md).
+  // OpenAI surface (/v1/models, /v1/chat/completions, and /openai/v1) and the lane its cursor-agent children dial (docs/specs/2026-10-25-cursor-openai.md).
   const cursorOpenAI = provider === 'cursor' && config.cursorOpenAI?.enabled !== false
     ? createCursorOpenAI({
       config,

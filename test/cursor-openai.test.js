@@ -48,7 +48,12 @@ test('lane prefix: segment-exact strip, query kept, everything else untouched', 
   assert.equal(isCursorOpenAIPath('/openai/v1/models?x=1'), true);
   assert.equal(isCursorOpenAIPath('/openai/v1'), true);
   assert.equal(isCursorOpenAIPath('/openai/v1x/models'), false);
-  assert.equal(isCursorOpenAIPath('/v1/chat/completions'), false);
+  // The root address takes exactly two paths; every other /v1/... is cursor-agent's (or nobody's) and goes upstream.
+  assert.equal(isCursorOpenAIPath('/v1/chat/completions'), true);
+  assert.equal(isCursorOpenAIPath('/v1/models?limit=1'), true);
+  for (const path of ['/v1', '/v1/', '/v1/models/', '/v1/models/composer-2.5', '/v1/chat', '/v1/embeddings', '/v1/tokens/oidc', '/v1/other', '/v1modelsx']) {
+    assert.equal(isCursorOpenAIPath(path), false, path);
+  }
 });
 
 test('model list: parsed from --list-models text, the pool default first', () => {
@@ -302,8 +307,57 @@ async function openAIProxy(t, { accounts = [cursorAccount('cursor-1')], script, 
   return { ...fake, manager, proxy, dir, url: `http://127.0.0.1:${port}` };
 }
 
-const chat = (url, body, init = {}) => fetch(`${url}/openai/v1/chat/completions`, {
+const chat = (url, body, init = {}, path = '/openai/v1/chat/completions') => fetch(`${url}${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), ...init,
+});
+
+test('the root address: /v1/models and /v1/chat/completions are the same surface as /openai/v1', async t => {
+  const { url, spawns } = await openAIProxy(t, {
+    script: ({ args }) => (args.includes('--list-models')
+      ? { stdout: 'auto - Auto (default)\ncomposer-2.5 - Composer 2.5\n' }
+      : agentResult(args.includes('tool-model') ? '{"tool_calls":[{"name":"ping","arguments":{"message":"v1"}}]}' : '{"content":"root ok"}')),
+  });
+  const models = await fetch(`${url}/v1/models?x=1`);
+  assert.equal(models.status, 200);
+  assert.deepEqual((await models.json()).data.map(model => model.id), ['composer-2.5', 'auto']);
+  assert.equal((await fetch(`${url}/openai/v1/models`)).status, 200, 'the old address still lists');
+
+  const text = await chat(url, { model: 'composer-2.5', messages: [{ role: 'user', content: 'hi' }] }, {}, '/v1/chat/completions');
+  assert.equal(text.status, 200);
+  assert.equal((await text.json()).choices[0].message.content, 'root ok');
+  const tool = await chat(url, { model: 'tool-model', messages: [{ role: 'user', content: 'ping' }], tools: [PING] }, {}, '/v1/chat/completions?x=1');
+  assert.deepEqual((await tool.json()).choices[0].message.tool_calls[0].function, { name: 'ping', arguments: '{"message":"v1"}' });
+  assert.equal((await chat(url, { messages: [{ role: 'user', content: 'old' }] })).status, 200, 'the old address still completes');
+  assert.equal(spawns.length, 4, 'one listing (cached) and three completions');
+
+  const wrongMethod = await fetch(`${url}/v1/chat/completions`);
+  assert.equal(wrongMethod.status, 404);
+  assert.match((await wrongMethod.json()).error.message, /Use GET \/v1\/models or POST \/v1\/chat\/completions/);
+});
+
+test('cursor mode: every other /v1/... still goes upstream untouched', async t => {
+  const seen = [];
+  const api = http.createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url });
+    req.resume();
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  const apiPort = await listen(api);
+  t.after(() => new Promise(resolve => api.close(resolve)));
+  const { url, spawns } = await openAIProxy(t, { api: `http://127.0.0.1:${apiPort}` });
+  await fetch(`${url}/v1/tokens/oidc`, { method: 'POST', body: '{}' });
+  await fetch(`${url}/v1/other?a=1`);
+  await fetch(`${url}/v1/models/`);
+  // A lane child's own /v1/... is cursor-agent traffic: prefix stripped and relayed, never the OpenAI surface.
+  await fetch(`${url}/teamcursor-lane/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.deepEqual(seen, [
+    { method: 'POST', url: '/v1/tokens/oidc' },
+    { method: 'GET', url: '/v1/other?a=1' },
+    { method: 'GET', url: '/v1/models/' },
+    { method: 'POST', url: '/v1/chat/completions' },
+  ]);
+  assert.equal(spawns.length, 0);
 });
 
 test('a completion round trip: the child dials the lane, its token never reaches upstream, the account bearer does', async t => {
@@ -501,7 +555,32 @@ test('the surface exists only in cursor mode, and only when not turned off', asy
   });
   await fetch(`${grok.url}/openai/v1/models`);
   assert.deepEqual(seen, ['/openai/v1/models', '/openai/v1/models'], 'forwarded like any other path, never answered here');
-  assert.equal(off.spawns.length + grok.spawns.length, 0);
+  // /v1 is grok's real upstream (and claude's): the root address stays theirs, and a turned-off surface forwards it too.
+  await fetch(`${grok.url}/v1/models`);
+  await fetch(`${grok.url}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  await fetch(`${off.url}/v1/models`);
+  const claude = await openAIProxy(t, {
+    api: `http://127.0.0.1:${apiPort}`, provider: 'anthropic',
+    accounts: [{ name: 'claude-1', type: 'oauth', accountUuid: 'u-claude', accessToken: 'c', refreshToken: 'c', expiresAt: Date.now() + HOUR }],
+  });
+  await fetch(`${claude.url}/v1/models`);
+  assert.deepEqual(seen.slice(2), ['/v1/models', '/v1/chat/completions', '/v1/models', '/v1/models']);
+  assert.equal(off.spawns.length + grok.spawns.length + claude.spawns.length, 0);
+});
+
+test('a remote /v1/chat/completions follows the proxy-key rule (worker check)', async t => {
+  const { proxy, spawns } = await openAIProxy(t, { extra: { proxy: { apiKey: 'tc-key' } } });
+  const remote = { url: '/v1/chat/completions', remoteAddress: '203.0.113.5', headers: { 'content-type': 'application/json' } };
+  const keyless = await dispatchFrom(proxy, remote);
+  assert.equal(keyless.statusCode, 401);
+  assert.match(String(keyless.body), /Invalid proxy API key/);
+  // With the key the request reaches the surface (its own 400 for the empty body), from either header.
+  for (const headers of [{ 'x-api-key': 'tc-key' }, { authorization: 'Bearer tc-key' }]) {
+    const keyed = await dispatchFrom(proxy, { ...remote, headers: { ...remote.headers, ...headers } });
+    assert.equal(keyed.statusCode, 400, String(keyed.body));
+    assert.match(String(keyed.body), /messages is required/);
+  }
+  assert.equal(spawns.length, 0);
 });
 
 /** Calls the worker's request listener with a synthetic remote socket (macOS cannot bind a second loopback). */

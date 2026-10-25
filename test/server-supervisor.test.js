@@ -1796,6 +1796,8 @@ test('supervisor fences the Cursor lane to loopback; /openai/v1 keeps the proxy-
     assert.equal(JSON.parse(remote.body).error.type, 'permission_error');
     const keyless = await request({ host, port, path: '/openai/v1/models' });
     assert.equal(keyless.status, 401, 'a remote /openai/v1 call without the proxy key is refused');
+    const rootKeyless = await request({ host, port, path: '/v1/chat/completions', method: 'POST', headers: { 'content-length': '0' } });
+    assert.equal(rootKeyless.status, 401, 'so is the root address');
   } finally {
     await stop();
   }
