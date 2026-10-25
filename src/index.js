@@ -110,6 +110,7 @@ import {
   readCursorLocalLogin,
   resolveCursorBin,
 } from './cursor.js';
+import { isCursorLanePath } from './cursor-openai.js';
 
 const SUPERVISED_WORKER_ENV = 'TEAMCLAUDE_SUPERVISED_WORKER';
 const SUPERVISOR_PID_ENV = 'TEAMCLAUDE_SUPERVISOR_PID';
@@ -643,6 +644,15 @@ async function superviseServerCommand() {
       });
       return;
     }
+    // Same for the Cursor OpenAI lane (its cursor-agent children dial localhost);
+    // meaningless in other modes, so it is fenced whatever the provider.
+    if (isCursorLanePath(req.url) && !isLocal) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'The TeamCursor lane is local-only.' },
+      });
+      return;
+    }
     // The worker only ever sees loopback (this supervisor forwards to it), so
     // the operator-only reset-credit route must be fenced HERE, like rotate.
     if (req.url.split('?', 1)[0] === '/teamclaude/codex/reset-credit' && !isLocal) {
@@ -670,7 +680,9 @@ async function superviseServerCommand() {
       && req.url === '/teamclaude/status'
       && (contentLength == null || contentLength === '0')
       && req.headers['transfer-encoding'] == null;
-    if (deploymentDraining && !bypassAdmission) {
+    // A Cursor lane call belongs to a completion already admitted (and still counted as active): refusing it
+    // would fail that completion instead of letting it finish before the swap.
+    if (deploymentDraining && !bypassAdmission && !(isLocal && isCursorLanePath(req.url))) {
       rejectPublicRequest(
         req,
         res,

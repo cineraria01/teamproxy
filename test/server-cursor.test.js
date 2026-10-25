@@ -526,3 +526,56 @@ test('every attempt ended without a byte: the dead end says the upstream answere
     await closeAll(proxy.cursorH2, proxy, agent.server);
   }
 });
+
+// Found while adding the OpenAI surface (2026-10-25): with every login expired or parked before the request,
+// both dead ends answered resource_exhausted ("pool exhausted"), so cursor-agent told the user to wait for usage
+// instead of signing in again.
+test('every login expired or parked before the request: both dead ends say unauthenticated, not out of usage', async () => {
+  const agent = await agentUpstream();
+  const api = await apiUpstream((call, res) => { res.writeHead(200); res.end(); });
+  const { manager, proxy, h2, url } = await cursorProxy([
+    cursorAccount('old', { expiresAt: Date.now() - 1000 }), cursorAccount('parked'),
+  ], { agent: agent.url, api: api.url });
+  manager.markAuthenticationError(manager.accounts[1], 'auth-revoked');
+  try {
+    const stream = await runStream(h2);
+    assert.equal(stream.body[0], 2);
+    const streamEnd = JSON.parse(stream.body.subarray(5).toString()).error;
+    assert.equal(streamEnd.code, 'unauthenticated');
+    assert.match(streamEnd.message, /^No TeamCursor account is signed in/, 'one TeamCursor, not "TeamCursor: TeamCursor"');
+    const unary = await fetch(`${url}/aiserver.v1.DashboardService/GetMe`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'local-proxy-key' }, body: '{}',
+    });
+    assert.equal(unary.status, 401);
+    const unaryBody = await unary.json();
+    assert.equal(unaryBody.code, 'unauthenticated');
+    assert.doesNotMatch(unaryBody.message, /TeamCursor: TeamCursor/);
+    assert.equal(agent.calls.length + api.calls.length, 0);
+  } finally {
+    await closeAll(proxy.cursorH2, proxy, agent.server, api.server);
+  }
+});
+
+// /openai/v1 completions run cursor-agent with CURSOR_API_ENDPOINT=http://localhost:<port>/teamcursor-lane, so its
+// inference stream arrives as /teamcursor-lane/agent.v1.AgentService/Run: the prefix must go before routing (else the
+// stream would go to the API upstream) and the bearer must still be swapped. During a deployment drain such a stream
+// belongs to an admitted completion and is served.
+test('lane h2 stream: prefix stripped, routed to the agent upstream, bearer swapped — also while draining', async () => {
+  const agent = await agentUpstream();
+  const { proxy, h2 } = await cursorProxy([cursorAccount('a')], { agent: agent.url, api: 'http://127.0.0.1:9' });
+  try {
+    const lane = await runStream(h2, { headers: { ':path': `/teamcursor-lane${RUN}`, authorization: 'Bearer lane-look-alike' } });
+    assert.equal(lane.headers[':status'], 200);
+    assert.equal(lane.headers['x-served-by'], 'a');
+    assert.equal(agent.calls[0].headers[':path'], RUN);
+    assert.equal(agent.calls[0].headers.authorization, 'Bearer tok-a');
+    proxy.setDraining(true);
+    const drained = await runStream(h2, { headers: { ':path': `/teamcursor-lane${RUN}` } });
+    assert.equal(drained.headers['x-served-by'], 'a', 'a lane stream is not refused by the drain');
+    const refused = await runStream(h2);
+    assert.equal(JSON.parse(refused.body.subarray(5).toString()).error.code, 'unavailable', 'a plain stream still is');
+    assert.equal(agent.calls.length, 2);
+  } finally {
+    await closeAll(proxy.cursorH2, proxy, agent.server);
+  }
+});

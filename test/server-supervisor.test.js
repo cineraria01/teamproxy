@@ -1729,3 +1729,74 @@ test('supervisor fences the operator reset-credit route to loopback (codex mode)
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// The Cursor OpenAI lane is for this proxy's own cursor-agent children. The worker only ever sees loopback (this
+// supervisor re-dials it), so the fence must hold on the public listener.
+async function startCursorSupervisor() {
+  const dir = await mkdtemp(join(tmpdir(), 'teamcursor-supervisor-lane-'));
+  const configPath = join(dir, 'config.json');
+  const port = await unusedPort();
+  await writeFile(configPath, JSON.stringify({
+    provider: 'cursor',
+    proxy: { port, apiKey: 'tc-remote-lane' },
+    cursorUpstream: 'http://127.0.0.1:9',
+    cursorAgentUpstream: 'http://127.0.0.1:9',
+    activeWarmup: false,
+    cursorUsageRefresh: false,
+    accounts: [{
+      name: 'cursor-1', provider: 'cursor', type: 'oauth', accountUuid: 'u-1',
+      accessToken: 'tok-1', refreshToken: 'tok-1', expiresAt: Date.now() + 3_600_000,
+    }],
+  }));
+  const child = spawn(process.execPath, [entry, 'cursor', 'server'], {
+    env: { ...process.env, TEAMCLAUDE_CONFIG: configPath, TEAMCLAUDE_PROVIDER: 'cursor' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const stop = async () => {
+    await stopChild(child);
+    await rm(dir, { recursive: true, force: true });
+  };
+  try {
+    await waitUntil(() => status(port), 'proxy did not start');
+  } catch (error) {
+    error.message += ` (pid ${child.pid}, exit ${child.exitCode}, signal ${child.signalCode})\n${output}`;
+    await stop();
+    throw error;
+  }
+  return { port, stop };
+}
+
+const CURSOR_LANE_EXCHANGE = '/teamcursor-lane/auth/exchange_user_api_key';
+
+test('the Cursor lane from loopback reaches the lane in the worker (cursor mode)', { timeout: 20000 }, async () => {
+  const { port, stop } = await startCursorSupervisor();
+  try {
+    // The worker's lane wants this process's own lane key: a guess is its 401, not the supervisor's fence.
+    const local = await request({ port, path: CURSOR_LANE_EXCHANGE, method: 'POST', headers: { authorization: 'Bearer key_guess', 'content-length': '0' } });
+    assert.equal(local.status, 401, local.body);
+    assert.equal(JSON.parse(local.body).error, 'invalid_api_key');
+  } finally {
+    await stop();
+  }
+});
+
+test('supervisor fences the Cursor lane to loopback; /openai/v1 keeps the proxy-key rule (cursor mode)', { timeout: 20000 }, async t => {
+  const host = externalIPv4();
+  if (!host) {
+    t.skip('no non-loopback IPv4 interface is available');
+    return;
+  }
+  const { port, stop } = await startCursorSupervisor();
+  try {
+    const remote = await request({ host, port, path: CURSOR_LANE_EXCHANGE, method: 'POST', headers: { 'x-api-key': 'tc-remote-lane', 'content-length': '0' } });
+    assert.equal(remote.status, 403, remote.body);
+    assert.equal(JSON.parse(remote.body).error.type, 'permission_error');
+    const keyless = await request({ host, port, path: '/openai/v1/models' });
+    assert.equal(keyless.status, 401, 'a remote /openai/v1 call without the proxy key is refused');
+  } finally {
+    await stop();
+  }
+});

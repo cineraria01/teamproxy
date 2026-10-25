@@ -26,7 +26,7 @@ import {
   answerByokPreflight,
   admitByok,
 } from './byok.js';
-import { normalizeContinuityMaxWaitMs } from './config.js';
+import { getConfigPath, normalizeContinuityMaxWaitMs } from './config.js';
 import {
   applyCodexResetCreditOutcome,
   codexResetCreditEligibility,
@@ -84,6 +84,7 @@ import {
   isCursorAgentPath,
   peekConnectFrame,
 } from './cursor.js';
+import { createCursorOpenAI, cursorPoolProblem, isCursorOpenAIPath, stripCursorLane } from './cursor-openai.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -1022,6 +1023,17 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     ? Math.max(0, config.cursorUsageActiveMs)
     : 120_000;
   const cursorAgentUpstream = config.cursorAgentUpstream || CURSOR_DEFAULT_AGENT_UPSTREAM;
+  // OpenAI surface (/openai/v1) and the lane its cursor-agent children dial (docs/specs/2026-10-25-cursor-openai.md).
+  const cursorOpenAI = provider === 'cursor' && config.cursorOpenAI?.enabled !== false
+    ? createCursorOpenAI({
+      config,
+      accountManager,
+      port: config.proxy?.port ?? 3460,
+      dir: config.cursorOpenAI?.dir || getConfigPath().replace(/\.json$/, '') + '.openai',
+      env: hooks.cursorOpenAIEnv || process.env,
+      spawn: hooks.cursorOpenAISpawn,
+    })
+    : null;
   let cursorRefreshPromise = null;
 
   async function refreshCursorAccount(account) {
@@ -1097,13 +1109,16 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   }
 
   function handleCursorStream(stream, headers) {
-    const path = headers[':path'] || '/';
+    // The OpenAI lane's children carry its prefix; upstream gets the plain path.
+    const { path, lane } = stripCursorLane(headers[':path'] || '/');
     const agent = isCursorAgentPath(path);
     const origin = agent ? cursorAgentUpstream : upstream;
     const streaming = String(headers['content-type'] || '').startsWith('application/connect+');
     const chatKey = cursorAffinityKey(headers);
     const affinityKey = !sessionAffinity ? null : chatKey ? agyAffinityObject(chatKey) : stream.session;
-    if (cursorDraining) {
+    // A lane stream belongs to an admitted /openai/v1 completion (h2 is loopback-only): let it finish, like the
+    // supervisor does for the lane's HTTP/1.1 calls.
+    if (cursorDraining && !lane) {
       // Same answer as the supervisor's HTTP/1.1 drain 503, in Connect's shape.
       const message = 'Proxy is draining for a verified deployment';
       if (streaming) {
@@ -1199,9 +1214,12 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         return;
       }
       if (!account) {
+        // This request's own parks, or logins that were all expired/parked before it (not "out of usage").
+        const poolAuth = cursorPoolProblem(accountManager.accounts);
         if (authParks.length && !accountManager.anyUsable() && !accountManager.anyCapped()) {
           return deadEnd('unauthenticated', 'TeamCursor: every account failed authentication. Sign in again (teamcursor login).', 60);
         }
+        if (poolAuth?.status === 401) return deadEnd('unauthenticated', poolAuth.message, 60); // names TeamCursor itself
         const now = Date.now();
         const throttles = accountManager.accounts
           .filter(a => a.enabled !== false && a.status !== 'error' && a.rateLimitedUntil > now)
@@ -2097,6 +2115,24 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },
         });
         return;
+      }
+
+      if (cursorOpenAI) {
+        const lane = stripCursorLane(req.url);
+        if (lane.lane) {
+          if (!isLocal) {
+            rejectEarlyRequest(req, res, 403, { 'Content-Type': 'application/json' }, {
+              type: 'error',
+              error: { type: 'permission_error', message: 'The TeamCursor lane is local-only.' },
+            });
+            return;
+          }
+          req.url = lane.path;
+          if (cursorOpenAI.answerLane(req, res)) return;
+        } else if (isCursorOpenAIPath(req.url)) {
+          await cursorOpenAI.handle(req, res);
+          return;
+        }
       }
 
       if (isRotateRequest) {
@@ -3553,6 +3589,13 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     // cursor: the same, in the Connect unary error shape.
     if (ctx.provider === 'grok' || ctx.provider === 'cursor') {
       if (sendSaved429(res, ctx)) return;
+      const poolAuth = ctx.provider === 'cursor' ? cursorPoolProblem(accountManager.accounts) : null;
+      if (poolAuth?.status === 401) {
+        ctx.status = 401;
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(authFailureBody(ctx, poolAuth.message))); // names TeamCursor itself
+        return;
+      }
       ctx.status = 429;
       const now = Date.now();
       const throttles = accountManager.accounts

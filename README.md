@@ -132,6 +132,7 @@ teamcursor                          # cursor-agent + 하단 줄
 teamcursor -p "Reply with exactly: OK" # 인쇄 모드
 teamcursor -- models                # cursor-agent 하위 명령
 eval "$(teamcursor env)"            # 직접 띄운 cursor-agent를 프록시로(CURSOR_API_ENDPOINT=http://localhost:<포트>)
+curl -s http://127.0.0.1:3460/openai/v1/models   # OpenAI 호환 주소(앱용, 아래 "cursor 풀")
 ```
 
 프록시 명령 `run`은 서버가 없으면 띄운 뒤 CLI를 프록시에 물려 실행한다. `teamclaude run`은 `ANTHROPIC_BASE_URL`만 넣어
@@ -399,6 +400,14 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
   받아 둔 요청 바이트를 다른 계정으로 다시 보낸다. `unauthenticated`(401)면 그 계정을 세우고 넘기되, 같은 요청을 두 계정이 거절하면 요청 쪽 문제로 보고 세운 것을 되돌린다. 한 요청이 소진으로 넘기는 횟수는 `rateLimitFailovers`(최소 1)까지다. 남은 계정이 없으면 업스트림 응답을
   그대로 준다. 실제 한도 소진 응답 모양은 아직 못 봤다(방어적 설계).
 - 대화(`x-blob-encryption-key`, 대화마다 하나)는 그 계정이 못 쓸 때까지 같은 계정에 남는다.
+- **OpenAI 호환 주소** `http://127.0.0.1:3460/openai/v1`(`GET /models`, `POST /chat/completions`, 루프백은 키 없이).
+  명세 [`docs/specs/2026-10-25-cursor-openai.md`](docs/specs/2026-10-25-cursor-openai.md). Cursor에는 공개 추론 API가 없어서
+  완성 한 번마다 `cursor-agent -p --mode ask`를 풀 전용 HOME(`~/.config/teamcursor.openai`)에서 한 번 돌려 답을 OpenAI 모양으로 바꾼다
+  (도구 호출은 프롬프트로 JSON을 받아 되돌림, 그림은 빼고 알림 줄, `stream`은 끝난 뒤 한꺼번에). 모델 목록 맨 앞은 `composer-2.5`.
+  그 cursor-agent는 로컬 도구를 하나도 못 쓰고(레인 `cli-config.json` 권한 + 모든 도구를 막는 `hooks.json`), 환경 변수는 허용 목록만
+  물려받으며, 자격은 메모리에만 둔다(키체인 창 없음). 레인 폴더는 프록시가 쉬는 동안 지워도 다음 요청이 다시 만든다.
+  오류는 401(로그인 없음·만료)·429(`insufficient_quota` 풀 전체 소진, `rate_limit_error` 일시 한도·동시 4개 초과)·502·503(cursor-agent 없음)·504.
+  따뜻할 때 한 번에 4~6초.
 - 범위 밖: API 키 모드(`--api-key`/`CURSOR_API_KEY`), Cursor 데스크톱 편집기, HTTP/1.1 에이전트 전송(`useHttp1ForAgent`)의 스트리밍(경로는 에이전트 상류로 넘기지만 다 받은 뒤 전달), 스트림 복구,
   종량 과금 한도 관리, 토큰 갱신.
 
