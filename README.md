@@ -132,7 +132,7 @@ teamcursor                          # cursor-agent + 하단 줄
 teamcursor -p "Reply with exactly: OK" # 인쇄 모드
 teamcursor -- models                # cursor-agent 하위 명령
 eval "$(teamcursor env)"            # 직접 띄운 cursor-agent를 프록시로(CURSOR_API_ENDPOINT=http://localhost:<포트>)
-curl -s http://127.0.0.1:3460/openai/v1/models   # OpenAI 호환 주소(앱용, 아래 "cursor 풀")
+curl -s http://127.0.0.1:3460/v1/models   # OpenAI 호환 주소(앱용, 아래 "cursor 풀")
 ```
 
 프록시 명령 `run`은 서버가 없으면 띄운 뒤 CLI를 프록시에 물려 실행한다. `teamclaude run`은 `ANTHROPIC_BASE_URL`만 넣어
@@ -400,7 +400,9 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
   받아 둔 요청 바이트를 다른 계정으로 다시 보낸다. `unauthenticated`(401)면 그 계정을 세우고 넘기되, 같은 요청을 두 계정이 거절하면 요청 쪽 문제로 보고 세운 것을 되돌린다. 한 요청이 소진으로 넘기는 횟수는 `rateLimitFailovers`(최소 1)까지다. 남은 계정이 없으면 업스트림 응답을
   그대로 준다. 실제 한도 소진 응답 모양은 아직 못 봤다(방어적 설계).
 - 대화(`x-blob-encryption-key`, 대화마다 하나)는 그 계정이 못 쓸 때까지 같은 계정에 남는다.
-- **OpenAI 호환 주소** `http://127.0.0.1:3460/openai/v1`(`GET /models`, `POST /chat/completions`, 루프백은 키 없이).
+- **OpenAI 호환 주소** `http://127.0.0.1:3460/v1`(`GET /models`, `POST /chat/completions`, 루프백은 키 없이, teamgrok `3459/v1`과 같은 꼴).
+  처음 주소 `http://127.0.0.1:3460/openai/v1`도 그대로 받는다(앱 묶음 1.6.0·저장된 주소). `/v1` 아래는 이 두 경로만 받고 나머지 `/v1/…`는
+  지금처럼 Cursor로 넘긴다(cursor-agent가 엔드포인트로 보내는 요청에는 `/v1/…`가 없다, 2026.10.22 번들 확인).
   명세 [`docs/specs/2026-10-25-cursor-openai.md`](docs/specs/2026-10-25-cursor-openai.md). Cursor에는 공개 추론 API가 없어서
   완성 한 번마다 `cursor-agent -p --mode ask`를 풀 전용 HOME(`~/.config/teamcursor.openai`)에서 한 번 돌려 답을 OpenAI 모양으로 바꾼다
   (도구 호출은 프롬프트로 JSON을 받아 되돌림, 그림은 빼고 알림 줄, `stream`은 끝난 뒤 한꺼번에). 모델 목록 맨 앞은 `composer-2.5`.

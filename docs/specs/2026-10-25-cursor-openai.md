@@ -1,4 +1,4 @@
-# Cursor pool — OpenAI-compatible address (`/openai/v1`) — 2026-10-25
+# Cursor pool — OpenAI-compatible address (`/v1`, first `/openai/v1`) — 2026-10-25
 
 Owner request (2026-10-25, via the Selvi lead): give the Cursor pool (`teamcursor`, port 3460) an OpenAI-compatible
 address so the Selvi app can list Cursor in 설정 › AI 연결 next to the other pools. Builds on Cursor mode
@@ -15,16 +15,18 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
 
 ## Contract (Selvi builds against this)
 
-- **Address** `http://127.0.0.1:3460/openai/v1` (`localhost` and `[::1]` work too). Loopback needs **no key** (same rule
+- **Address** `http://127.0.0.1:3460/v1` (`localhost` and `[::1]` work too), the same shape as teamgrok's
+  `http://127.0.0.1:3459/v1`. The first address, `http://127.0.0.1:3460/openai/v1`, keeps working (app bundle 1.6.0
+  and saved Selvi settings use it); both reach the same handler (see "Root address" below). Loopback needs **no key** (same rule
   as every pool). A remote peer follows the pool's normal proxy-key rule (`proxy.apiKey` in `x-api-key` or
   `Authorization: Bearer`); app installs listen on loopback only anyway.
-- **`GET /openai/v1/models`** → `{object:"list", data:[{id, object:"model", created:0, owned_by:"cursor", name}]}`,
+- **`GET /v1/models`** (or `/openai/v1/models`) → `{object:"list", data:[{id, object:"model", created:0, owned_by:"cursor", name}]}`,
   the output of `cursor-agent --list-models` (265 models on 2026-10-25), cached 10 min.
   **First = the pool's default: `composer-2.5`** (Cursor's own model) when listed, then the CLI's order (`auto` first).
   Why: measured text + tool calls in 3.6–5.8 s and the tool call came back every time; `auto` routes to a model of
   Cursor's choice, and one of those (Claude Sonnet) refused the JSON framing because of the account's Cursor user
   rules. When Cursor stops listing `composer-2.5` the CLI's own order stands.
-- **`POST /openai/v1/chat/completions`** — OpenAI Chat Completions: `model` (default `auto` when absent), `messages`
+- **`POST /v1/chat/completions`** (or `/openai/v1/chat/completions`) — OpenAI Chat Completions: `model` (default `auto` when absent), `messages`
   (`system`/`developer`/`user`/`assistant` with `tool_calls`/`tool`), `tools` (`function` only), `tool_choice`
   (`none`/`auto`/`required`/a named function), `response_format` (`json_object`/`json_schema` become an instruction),
   `stream`, `stream_options.include_usage`.
@@ -48,7 +50,7 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
   |---|---|---|---|
   | 400 | `invalid_request_error` | body not JSON, no `messages`, model id not `[A-Za-z0-9][A-Za-z0-9._:[\]=,-]*` | — |
   | 401 | `authentication_error` | no enabled account, or every enabled account is parked (`error`) or past its token `exp` — checked **before** cursor-agent runs | — |
-  | 404 | `not_found_error` | any other path under `/openai/v1` | — |
+  | 404 | `not_found_error` | any other path under `/openai/v1`, or the other method on `/v1/models` / `/v1/chat/completions` | — |
   | 413 | `invalid_request_error` | body over `maxRequestBytes` | — |
   | 429 | `insufficient_quota` | every working account is throttled (out of usage) — checked before the run | soonest throttle end, s (60 when unknown) |
   | 429 | `rate_limit_error` | this pool already runs `cursorOpenAI.maxConcurrent` (4) completions | `5` |
@@ -64,7 +66,30 @@ pool, so it uses the pool's accounts like `teamcursor run` does.
 - **`GET /teamclaude/status`** is unchanged (no new fields).
 - Config (optional, `~/.config/teamcursor.json`): `cursorOpenAI: { enabled (true), timeoutMs (600000),
   maxConcurrent (4), dir (<config without .json>.openai) }`. Only in cursor mode; other pools forward `/openai/v1/*`
-  upstream like any path.
+  and `/v1/*` upstream like any path.
+
+## Root address (`/v1`, 2026-10-25)
+
+Owner decision (2026-10-25, via the Selvi lead): question "teamcursor 주소를 `http://127.0.0.1:3460/v1`로 바꿀까요?" →
+"/v1로 바꾸기 (추천)", after the owner asked why the Cursor address said `openai` (teamgrok's is `3459/v1`).
+
+- In cursor mode, **exactly** `/v1/models` and `/v1/chat/completions` (query allowed; `/v1/models/` and other
+  trailing-slash or longer forms are not these paths) go to the OpenAI surface, as does everything under
+  `/openai/v1`. Every other `/v1/...` is forwarded to Cursor's API exactly as before. `isCursorOpenAIPath` decides;
+  `handle` treats `/openai/v1/x` and `/v1/x` as one route.
+- Why not the whole `/v1/*` prefix: the endpoint is shared with cursor-agent's own traffic (`teamcursor run`, the
+  lane). Measured in the cursor-agent 2026.10.22 bundle (`~/.local/share/cursor-agent/versions/2026.10.22-27dcf5f`,
+  146 `.js` files, plus every other file in it): the only `/v1/` path literal is `"/v1/tokens/oidc"`, and it is a
+  route cursor-agent **serves itself** on its Unix socket (`POST /v1/tokens/oidc on the Unix socket at
+  $CURSOR_AGENT_SOCKET`), not a request to the endpoint. `v1/models` and `chat/completions` occur 0 times. The only
+  other `/v1` is the default path of `agent-cli-local`'s provider base URL (`CURSOR_LOCAL_AGENT_BASE_URL` /
+  `--base-url`, e.g. Ollama), which is not `CURSOR_API_ENDPOINT`. So the two paths cannot collide with the CLI today,
+  and a future CLI path under `/v1/` still reaches Cursor. Re-check the bundle when cursor-agent adds `/v1/` paths.
+- Other pools are untouched: the surface exists only in cursor mode, so grok's `/v1` (its real upstream) and
+  claude's `/v1/models` forward as before (test). A remote `/v1/chat/completions` follows the proxy-key rule like
+  every other path (tests: worker and supervisor).
+- h2: the surface is HTTP/1.1 only (as for `/openai/v1`); an h2 stream on these paths is relayed upstream like any
+  cursor-agent stream.
 
 ## How a completion runs
 
@@ -170,7 +195,9 @@ the lane test will not catch that, the run time (+30 s) and the dialog will.
 - **The lane is local-only.** `/teamcursor-lane/*` from a non-loopback peer is 403 at the supervisor (the worker only
   ever sees loopback, so the fence must be on the public port; the worker keeps the same check). Test
   (`test/server-supervisor.test.js`): a real cursor-mode server answers the lane 403 to its own non-loopback IPv4 and
-  401 `invalid_api_key` (the worker's lane) to loopback; a remote `/openai/v1/models` without the proxy key is 401.
+  401 `invalid_api_key` (the worker's lane) to loopback; a remote `/openai/v1/models` or `/v1/chat/completions` without
+  the proxy key is 401 (and the worker-level test: with the key in `x-api-key` or `Authorization: Bearer` it reaches the
+  surface).
   h2 from a non-loopback peer was already closed. The lane key is per process and only the lane's exchange accepts it.
 - **cursor-agent's tools are fenced.** Ask mode is "read-only", but it still reads any file on the machine: measured,
   a canary file outside the workspace came back through `Read` and through `Grep`. A Selvi prompt carries text taken
