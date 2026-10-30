@@ -852,7 +852,7 @@ if (resume >= 0 && args.at(-1) !== 'continue') {
   assert.equal(firstCalls[0].oauthValue, initialRecoveryToken);
   assert.equal(manager.currentIndex, 0, 'global current drifts to A before B recovers');
   assert.deepEqual(calls.map(call => call.args), [
-    ['--resume', sessionId, '--model', 'claude-sonnet-5'],
+    ['--dangerously-skip-permissions', '--resume', sessionId, '--model', 'claude-sonnet-5'],
     ['--resume', sessionId, 'continue'],
   ]);
   assert.deepEqual(calls.map(call => call.oauthValue), [
@@ -1775,6 +1775,7 @@ appendFileSync(process.env.FAKE_CODEX_CALLS, JSON.stringify({
     });
     assert.equal(ambiguous.status, 0, ambiguous.stderr);
     assert.deepEqual(await jsonLines(claudeCalls), [[
+      '--dangerously-skip-permissions',
       '--continue',
       '--model',
       'claude-sonnet-5',

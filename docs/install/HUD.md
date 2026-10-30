@@ -57,6 +57,13 @@ tmux 소켓은 `teamclaude-hud`입니다.
 `teamgrok --yolo`는 grok의 `--always-approve`가 됩니다(2026-10-15). `teamcursor --yolo`는 cursor-agent의 `--yolo` 그대로입니다(2026-10-24).
 인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. `--keep-alive`도 이제 인자 어디에 두어도 됩니다.
 
+2026-10-31부터 승인 없는 실행이 기본입니다(사용자 요청 "teamproxy 모드는 기본 yolo"). `<풀> run`(`src/index.js`)이 위 플래그를 맨 앞에 붙이므로
+하단 줄 실행, `teamclaude -- PROMPT`, `teamcodex run -- exec …`, 인쇄·비터미널 실행이 모두 같습니다. 명시한 플래그는 한 번만 넘어갑니다.
+승인·권한·샌드박스 모드를 직접 주면 붙이지 않습니다: Claude `--permission-mode`·`--allow-dangerously-skip-permissions`,
+Codex `-s`·`-a`·`--approve-for-me`·`--yolo`·`-c approval_policy=…`·`-c sandbox_mode=…`, agy `--mode`·`--sandbox`, grok `--permission-mode`·`--sandbox`,
+cursor-agent `-f`·`--force`·`--mode`·`--plan`·`--sandbox`. Claude 하위 명령(`teamclaude -- mcp list`)과 관리 명령(`status`·`server` 등)은 그대로입니다.
+Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이지 않습니다(안전 거부 뒤 권한을 올리지 않는 기존 설계).
+
 ### Claude 대화 세션의 추론 단계
 
 실행기는 `--effort`를 더하지 않습니다. `teamclaude`로 띄운 Claude Code 대화 세션은 Claude Code 설정을 따릅니다(`/effort xhigh`가 `~/.claude/settings.json`의 `modelSettings.<모델>.effortLevel`에 저장). 설정은 max를 저장하지 못하므로 max가 필요한 세션만 `teamclaude --effort max`로 띄우거나 세션 안에서 `/effort max`를 칩니다. 2026-10-12(068bf62)부터 실행기가 max를 기본으로 붙였으나 2026-10-15 사용자 결정 "기본 effort를 xhigh로"에 따라 없앴습니다.

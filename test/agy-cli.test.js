@@ -244,12 +244,21 @@ console.log(JSON.stringify({
     }));
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      args: ['-p', 'say OK'],
+      args: ['--dangerously-skip-permissions', '-p', 'say OK'],
       cloudCodeUrl: `http://127.0.0.1:${port}`,
       provider: null,
       config: null,
       userVar: 'kept',
     });
+    // An explicit mode, sandbox or the flag itself is kept as given, with nothing added.
+    for (const args of [['--mode', 'plan', '-p', 'x'], ['--sandbox'], ['--dangerously-skip-permissions', '-p', 'x']]) {
+      const explicit = await runCli(['agy', 'run', '--', ...args], isolatedEnv(dir, {
+        TEAMCLAUDE_CONFIG: configPath,
+        TEAMAGY_AGY_BIN: fakeAgy,
+      }));
+      assert.equal(explicit.status, 0, explicit.stderr);
+      assert.deepEqual(JSON.parse(explicit.stdout.trim()).args, args);
+    }
 
     const missing = join(dir, 'no-such-agy');
     const absent = await runCli(['agy', 'run'], isolatedEnv(dir, {

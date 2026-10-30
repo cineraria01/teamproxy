@@ -265,8 +265,17 @@ console.log(JSON.stringify({
     }));
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      args: ['-p', 'say OK'], base: `http://127.0.0.1:${port}/v1`, provider: null, config: null, userVar: 'kept',
+      args: ['--always-approve', '-p', 'say OK'], base: `http://127.0.0.1:${port}/v1`, provider: null, config: null,
+      userVar: 'kept',
     });
+    // An explicit permission mode, sandbox or the flag itself is kept as given, with nothing added.
+    for (const args of [['--permission-mode=plan', '-p', 'x'], ['--sandbox', 'strict'], ['--always-approve']]) {
+      const explicit = await runCli(['grok', 'run', '--', ...args], isolatedEnv(dir, {
+        TEAMCLAUDE_CONFIG: configPath, TEAMGROK_GROK_BIN: fakeGrok,
+      }));
+      assert.equal(explicit.status, 0, explicit.stderr);
+      assert.deepEqual(JSON.parse(explicit.stdout.trim()).args, args);
+    }
 
     const missing = join(dir, 'no-such-grok');
     const absent = await runCli(['grok', 'run'], isolatedEnv(dir, { TEAMCLAUDE_CONFIG: configPath, TEAMGROK_GROK_BIN: missing }));

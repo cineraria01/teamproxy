@@ -2947,15 +2947,42 @@ function displayModel(model) {
   return plain === 'claude-opus-4-8' ? `${plain}[1m]` : model;
 }
 
-async function syncLaunchModel(config, claudeArgs, childEnv) {
+function isClaudeSubcommand(claudeArgs) {
   // Claude Code subcommands (`claude --help` Commands) reject `--model` ("unknown option '--model'"),
   // so `teamclaude -- mcp list` must reach Claude unchanged. Kept local: run executes before module-level consts below it.
   // ponytail: checks the first argument only and the list follows Claude Code by hand; `claude --debug mcp list` still gets --model.
-  const subcommands = [
+  return [
     'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install', 'kill', 'logs',
     'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade',
-  ];
-  if (subcommands.includes(claudeArgs[0])) return;
+  ].includes(claudeArgs[0]);
+}
+
+// Every pool runs its agent CLI without approval prompts by default (2026-10-31 user request "teamproxy 모드는 기본
+// yolo"): the first name is the CLI's own flag that `--yolo` maps to (src/hud/launcher.py MODES). Arguments that
+// already give it or choose another approval, permission or sandbox mode get nothing. Returns what to put first.
+function defaultYolo(mode, clientArgs) {
+  const names = {
+    claude: ['--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--permission-mode'],
+    codex: ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '-s', '--sandbox', '-a', '--ask-for-approval',
+      '--approve-for-me'],
+    agy: ['--dangerously-skip-permissions', '--mode', '--sandbox'],
+    grok: ['--always-approve', '--permission-mode', '--sandbox'],
+    cursor: ['--yolo', '-f', '--force', '--mode', '--plan', '--sandbox'],
+  }[mode];
+  const end = clientArgs.indexOf('--');
+  const options = end < 0 ? clientArgs : clientArgs.slice(0, end);
+  return options.some((arg, index) => {
+    // A short option may carry its value (`-sread-only`).
+    if (names.some(name => (name.length === 2 ? arg.startsWith(name) : arg.split('=', 1)[0] === name))) return true;
+    // Codex also takes the mode as config, and the bypass flag would override it:
+    // `-c sandbox_mode=…`, `-capproval_policy=…`, `--config approval_policy=…`, `--config=sandbox_mode=…`.
+    const config = arg === '-c' || arg === '--config' ? options[index + 1] ?? '' : arg.replace(/^(-c|--config=)/, '');
+    return mode === 'codex' && config !== arg && /^\s*(approval_policy|sandbox_mode)\s*=/.test(config);
+  }) ? [] : [names[0]];
+}
+
+async function syncLaunchModel(config, claudeArgs, childEnv) {
+  if (isClaudeSubcommand(claudeArgs)) return;
   const explicitModel = modelArgValue(claudeArgs) || childEnv.ANTHROPIC_MODEL || null;
   const configuredModel = typeof config.launchModel === 'string'
       && config.launchModel.length > 0
@@ -3229,9 +3256,11 @@ async function runCommand(clientArgsOverride = null) {
       console.error(`[TeamCodex] ${err.message}`);
       process.exit(1);
     }
+    // Decided once from the caller's arguments, so a crash resume keeps the same approval mode.
+    const yolo = defaultYolo('codex', clientArgs);
     const launchCodex = launchArgs => spawnSync(
       codexBin,
-      buildCodexProxyArgs(config.proxy.port, launchArgs, { routerBaseUrl: codexRouter?.baseUrl ?? null }),
+      [...yolo, ...buildCodexProxyArgs(config.proxy.port, launchArgs, { routerBaseUrl: codexRouter?.baseUrl ?? null })],
       { stdio: 'inherit', env: childEnv },
     );
     let result = launchCodex(clientArgs);
@@ -3289,6 +3318,8 @@ async function runCommand(clientArgsOverride = null) {
   if (preserveProxyAuth) childEnv[proxyAuthEnv] = config.proxy.apiKey;
   delete childEnv.DISABLE_GROWTHBOOK;
   await syncLaunchModel(runtimeConfig, clientArgs, childEnv);
+  // First launch only: a recovery resume rebuilds its arguments and never gains a permission flag.
+  if (!isClaudeSubcommand(clientArgs)) clientArgs.unshift(...defaultYolo('claude', clientArgs));
   await seedClaudeRecoveryAccount(runtimeConfig, childEnv);
 
   // The proxy authenticates upstream accounts; the client holds only its local routing marker.
@@ -4413,7 +4444,7 @@ async function agyRunCommand(config = null) {
   const clientArgs = args.slice(1);
   if (clientArgs[0] === '--') clientArgs.shift();
   const agyBin = resolveAgyBin();
-  const result = spawnSync(agyBin, clientArgs, {
+  const result = spawnSync(agyBin, [...defaultYolo('agy', clientArgs), ...clientArgs], {
     stdio: 'inherit',
     env: buildAgyRunEnv(process.env, running.port),
   });
@@ -4589,7 +4620,7 @@ async function grokRunCommand(config = null) {
   const clientArgs = args.slice(1);
   if (clientArgs[0] === '--') clientArgs.shift();
   const grokBin = resolveGrokBin();
-  const result = spawnSync(grokBin, clientArgs, {
+  const result = spawnSync(grokBin, [...defaultYolo('grok', clientArgs), ...clientArgs], {
     stdio: 'inherit',
     env: buildGrokRunEnv(process.env, running.port),
   });
@@ -4742,7 +4773,7 @@ async function cursorRunCommand(config = null) {
   const clientArgs = args.slice(1);
   if (clientArgs[0] === '--') clientArgs.shift();
   const cursorBin = resolveCursorBin();
-  const result = spawnSync(cursorBin, clientArgs, {
+  const result = spawnSync(cursorBin, [...defaultYolo('cursor', clientArgs), ...clientArgs], {
     stdio: 'inherit',
     env: buildCursorRunEnv(process.env, running.port),
   });

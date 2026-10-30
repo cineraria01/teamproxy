@@ -269,8 +269,17 @@ console.log(JSON.stringify({
     }));
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      args: ['-p', 'say ok'], endpoint: `http://localhost:${port}`, provider: null, config: null, userVar: 'kept',
+      args: ['--yolo', '-p', 'say ok'], endpoint: `http://localhost:${port}`, provider: null, config: null,
+      userVar: 'kept',
     });
+    // An explicit mode, sandbox, -f/--force or --yolo is kept as given, with nothing added.
+    for (const args of [['--mode', 'ask', '-p', 'x'], ['--plan'], ['--sandbox', 'enabled'], ['-f', '-p', 'x'], ['--yolo']]) {
+      const explicit = await runCli(['cursor', 'run', '--', ...args], isolatedEnv(dir, {
+        TEAMCLAUDE_CONFIG: configPath, TEAMCURSOR_CURSOR_BIN: fake,
+      }));
+      assert.equal(explicit.status, 0, explicit.stderr);
+      assert.deepEqual(JSON.parse(explicit.stdout.trim()).args, args);
+    }
     const missing = join(dir, 'no-such-agent');
     const absent = await runCli(['cursor', 'run'], isolatedEnv(dir, { TEAMCLAUDE_CONFIG: configPath, TEAMCURSOR_CURSOR_BIN: missing }));
     assert.equal(absent.status, 1);

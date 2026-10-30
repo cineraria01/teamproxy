@@ -179,7 +179,7 @@ console.log(JSON.stringify({
     assert.equal(child.baseUrl, `http://localhost:${server.port}`);
     assert.equal(child.disableGrowthbook, null);
     assert.equal(child.toolSearch, 'true');
-    assert.deepEqual(child.args, ['--model', 'fable']);
+    assert.deepEqual(child.args, ['--dangerously-skip-permissions', '--model', 'fable']);
   } finally {
     if (server) await stopStatusServer(server);
     await rm(dir, { recursive: true, force: true });
@@ -220,7 +220,7 @@ console.log(JSON.stringify({
 
     assert.equal(result.status, 0, result.stderr);
     const child = JSON.parse(result.stdout.trim());
-    assert.deepEqual(child.args, ['--model', 'claude-sonnet-5']);
+    assert.deepEqual(child.args, ['--dangerously-skip-permissions', '--model', 'claude-sonnet-5']);
     assert.equal(child.anthropicModel, null);
     assert.equal(child.disableGrowthbook, null);
     assert.equal(child.toolSearch, 'false');
@@ -583,7 +583,7 @@ process.kill(process.pid, 'SIGINT');
       .filter(Boolean)
       .map(line => JSON.parse(line));
     assert.equal(invocations.length, 1, `expected one child invocation, got ${invocations.length}`);
-    assert.deepEqual(invocations[0], ['--model', 'sonnet']);
+    assert.deepEqual(invocations[0], ['--dangerously-skip-permissions', '--model', 'sonnet']);
     assert.deepEqual(
       invocations[0].filter(arg => forbiddenResumeArgs.has(arg)),
       [],
@@ -634,7 +634,7 @@ console.log(JSON.stringify({ args: process.argv.slice(2) }));
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-opus-4-8[1m]']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-opus-4-8[1m]']);
     assert.match(result.stderr, /launching Claude Code as claude-opus-4-8\[1m\]/);
   } finally {
     if (server) await stopStatusServer(server);
@@ -679,7 +679,7 @@ console.log(JSON.stringify({ args: process.argv.slice(2) }));
 
     const defaultResult = spawnSync(process.execPath, [entry, 'run'], { encoding: 'utf8', env });
     assert.equal(defaultResult.status, 0, defaultResult.stderr);
-    assert.deepEqual(JSON.parse(defaultResult.stdout.trim()).args, ['--model', 'claude-fable-5']);
+    assert.deepEqual(JSON.parse(defaultResult.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-fable-5']);
 
     const explicitResult = spawnSync(
       process.execPath,
@@ -687,7 +687,7 @@ console.log(JSON.stringify({ args: process.argv.slice(2) }));
       { encoding: 'utf8', env },
     );
     assert.equal(explicitResult.status, 0, explicitResult.stderr);
-    assert.deepEqual(JSON.parse(explicitResult.stdout.trim()).args, ['--model', 'sonnet']);
+    assert.deepEqual(JSON.parse(explicitResult.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'sonnet']);
   } finally {
     if (server) await stopStatusServer(server);
     await rm(dir, { recursive: true, force: true });
@@ -703,7 +703,16 @@ test('run passes Claude subcommands through without a launch model', async () =>
   // A prompt is not a subcommand: the launch model is still added.
   const prompt = await runModelFixture({ status: { accounts: [] }, args: ['--', 'fix the mcp list'], modelFallbacks: {} });
   assert.equal(prompt.status, 0, prompt.stderr);
-  assert.deepEqual(JSON.parse(prompt.stdout.trim()).args, ['fix the mcp list', '--model', 'claude-fable-5']);
+  assert.deepEqual(JSON.parse(prompt.stdout.trim()).args, ['--dangerously-skip-permissions', 'fix the mcp list', '--model', 'claude-fable-5']);
+});
+
+test('run keeps an explicit Claude permission choice without adding the default flag', async () => {
+  for (const args of [['--permission-mode', 'plan'], ['--permission-mode=auto', 'x'],
+    ['--allow-dangerously-skip-permissions'], ['-p', 'x', '--dangerously-skip-permissions']]) {
+    const result = await runModelFixture({ status: { accounts: [] }, args: ['--', ...args], modelFallbacks: {} });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, [...args, '--model', 'claude-fable-5']);
+  }
 });
 
 test('run preserves every explicit Fable opt-in form', async t => {
@@ -718,7 +727,7 @@ test('run preserves every explicit Fable opt-in form', async t => {
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      args: ['--model=claude-fable-5'],
+      args: ['--dangerously-skip-permissions', '--model=claude-fable-5'],
       anthropicModel: null,
     });
   });
@@ -732,7 +741,7 @@ test('run preserves every explicit Fable opt-in form', async t => {
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
-      args: [],
+      args: ['--dangerously-skip-permissions'],
       anthropicModel: 'claude-fable-5',
     });
   });
@@ -759,7 +768,7 @@ test('run does not apply Fable-only full quota evidence to an Opus launch model'
       modelFallbacks,
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-opus-4-8']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-opus-4-8']);
   });
 
   await t.test('explicit Opus remains Opus', async () => {
@@ -769,7 +778,7 @@ test('run does not apply Fable-only full quota evidence to an Opus launch model'
       args: ['--', '--model', 'claude-opus-4-8'],
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-opus-4-8']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-opus-4-8']);
   });
 });
 
@@ -789,13 +798,13 @@ test('run keeps Fable when the proxy status request fails or returns non-200', a
   await t.test('statusFailure=Fable', async () => {
     const result = await runModelFixture({ status: fullStatus, closeAfterHealth: true });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-fable-5']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-fable-5']);
   });
 
   await t.test('non200Status=Fable', async () => {
     const result = await runModelFixture({ status: fullStatus, statusCode: 503 });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-fable-5']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-fable-5']);
   });
 });
 
@@ -850,7 +859,7 @@ test('run defers Fable fallback until every general-available account is fresh a
         status: { accounts: [fullAccount, scenario.account] },
       });
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-fable-5']);
+      assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-fable-5']);
     });
   }
 });
@@ -869,7 +878,7 @@ test('run preserves fallback when no general-available Fable candidate remains',
   await t.test('noGeneralCandidate=Opus[1m]', async () => {
     const result = await runModelFixture({ status: { accounts: [generallyBlocked] } });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-opus-4-8[1m]']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-opus-4-8[1m]']);
   });
 
   await t.test('unusableCandidatesExcluded=Opus[1m]', async () => {
@@ -891,6 +900,6 @@ test('run preserves fallback when no general-available Fable candidate remains',
       status: { accounts: [fullAccount, ...unusable, generallyBlocked] },
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--model', 'claude-opus-4-8[1m]']);
+    assert.deepEqual(JSON.parse(result.stdout.trim()).args, ['--dangerously-skip-permissions', '--model', 'claude-opus-4-8[1m]']);
   });
 });

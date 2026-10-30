@@ -53,9 +53,9 @@ console.log(JSON.stringify({
 
   try {
     // When
-    const result = spawnSync(
+    const run = args => spawnSync(
       process.execPath,
-      [entry, 'codex', 'run', '--', 'exec', '--json', 'say hello'],
+      [entry, 'codex', 'run', '--', ...args],
       {
         encoding: 'utf8',
         env: {
@@ -69,6 +69,7 @@ console.log(JSON.stringify({
         },
       },
     );
+    const result = run(['exec', '--json', 'say hello']);
 
     // Then
     assert.equal(result.status, 0, result.stderr);
@@ -78,10 +79,30 @@ console.log(JSON.stringify({
     assert.equal(child.codexApiKey, null);
     assert.equal(child.codexAccessToken, null);
     assert.deepEqual(child.args.slice(-3), ['exec', '--json', 'say hello']);
-    assert.equal(child.args[1], 'model_provider="teamcodex_proxy"');
-    assert.match(child.args[3], /requires_openai_auth = false/);
-    assert.match(child.args[3], /supports_websockets = false/);
+    // No approval prompts by default (the flag `teamcodex --yolo` maps to), before the provider overrides.
+    assert.equal(child.args[0], '--dangerously-bypass-approvals-and-sandbox');
+    assert.equal(child.args[2], 'model_provider="teamcodex_proxy"');
+    assert.match(child.args[4], /requires_openai_auth = false/);
+    assert.match(child.args[4], /supports_websockets = false/);
     assert.equal(child.args.some(arg => arg.startsWith('chatgpt_base_url=')), false);
+    // An explicit approval or sandbox choice (or the flag itself) is kept as given, with nothing added.
+    for (const args of [['exec', '-s', 'read-only', 'x'], ['exec', '-sread-only', 'x'], ['--sandbox=workspace-write'],
+      ['-a', 'on-request'], ['-anever'], ['--approve-for-me'], ['exec', '--dangerously-bypass-approvals-and-sandbox', 'x'],
+      ['--yolo'], ['-c', 'sandbox_mode="read-only"', 'exec', 'x'], ['-capproval_policy="on-request"'],
+      ['--config', 'approval_policy="never"'], ['--config=sandbox_mode="workspace-write"']]) {
+      const explicit = run(args);
+      assert.equal(explicit.status, 0, explicit.stderr);
+      const explicitArgs = JSON.parse(explicit.stdout.trim()).args;
+      assert.deepEqual(explicitArgs.slice(-args.length), args);
+      assert.equal(explicitArgs.filter(arg => arg === '--dangerously-bypass-approvals-and-sandbox').length,
+        args.includes('--dangerously-bypass-approvals-and-sandbox') ? 1 : 0);
+    }
+    // Other config, or a mode inside a prompt, is not a choice.
+    for (const args of [['-c', 'model="gpt-5"', 'exec', 'x'], ['exec', 'set sandbox_mode=read-only'], ['exec', '--', '-s']]) {
+      const plain = run(args);
+      assert.equal(plain.status, 0, plain.stderr);
+      assert.equal(JSON.parse(plain.stdout.trim()).args[0], '--dangerously-bypass-approvals-and-sandbox');
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
