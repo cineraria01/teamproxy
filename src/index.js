@@ -3464,7 +3464,9 @@ async function statusCommand() {
           ? `    Rate limit used: ${ses}`
           : acct.provider === 'cursor'
             ? `    Usage:    ${ses} of included usage${q.unified5hReset ? `    cycle ends ${new Date(q.unified5hReset).toISOString()}` : ''}`
-          : `    Session:  ${ses} used    Weekly: ${wk} used`;
+          // sessionWindowStated false = the account has no 5-hour window at
+          // all (verified Ultra, 2026-10-30) — distinct from "not measured yet" (-).
+          : `    Session:  ${q.sessionWindowStated === false ? 'no 5h limit' : `${ses} used`}    Weekly: ${wk} used`;
         // Model-scoped weekly windows (7d_oi = the Fable weekly limit). Guarded
         // with ?. so a status from an older running server (no modelWeekly
         // field) still prints. Unknown labels print as-is.

@@ -1634,7 +1634,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         if (!Object.keys(headers).length) throw new Error('No valid quota windows');
         if (warmupClosed || accountManager.accounts[account.index] !== account) return false;
         headers['anthropic-ratelimit-unified-status'] = account.quota.unifiedStatus;
-        accountManager.updateQuota(account, headers);
+        // `five_hour: null` (key present, value null) is how the usage endpoint
+        // reports an account with no 5-hour window (verified Ultra, 2026-10-30);
+        // with a valid 7d it feeds the same "accepted, 7d but no 5h" rule as a
+        // /v1/messages response. A five_hour object whose reset is missing (an
+        // idle window) is dropped by put() — passing no status there keeps the
+        // flag unchanged instead of falsely stating "no 5h window".
+        const noFiveHour = Object.hasOwn(data, 'five_hour') && data.five_hour === null;
+        accountManager.updateQuota(account, headers, noFiveHour ? { status: res.status } : {});
         return true;
       } catch (err) {
         if (!warmupClosed) console.error(`[TeamClaude] OAuth usage refresh failed for "${account.name}": ${err.message}`);
@@ -1704,7 +1711,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         && rl['anthropic-ratelimit-unified-status'] === 'rejected';
       if ((res.ok || accountExhausted429) && Object.keys(rl).length
           && accountManager.accounts[account.index] === account) {
-        accountManager.updateQuota(account, rl);
+        accountManager.updateQuota(account, rl, { status: res.status });
         // Convergence accounting: a probe that leaves the account fully
         // measured resets the fruitless-probe counter; one that leaves it
         // half-measured (a header family missing) counts toward the cap.
@@ -3901,7 +3908,7 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
     }
     // A held fold still records the request itself (usage counters / lastUsed
     // live in updateQuota): fold an empty header set instead of skipping.
-    accountManager.updateQuota(account, holdHeaderFold ? {} : rateLimitHeaders);
+    accountManager.updateQuota(account, holdHeaderFold ? {} : rateLimitHeaders, { status: upstreamRes.status });
     // 401 = auth failure (stale or revoked token). For OAuth, attempt one
     // forced token refresh and retry the same account (the token may be stale
     // but still refreshable). If that doesn't fix it — refresh fails, the token

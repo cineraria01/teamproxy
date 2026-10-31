@@ -165,6 +165,15 @@ function bar(ratio, w = 10, resetTs) {
   return out;
 }
 
+// A same-width plain text cell (no bar), e.g. "none" for an account with no
+// 5-hour window.
+function textCell(text, w = 10) {
+  const t = String(text).slice(0, w);
+  const pad = w - t.length;
+  const lp = Math.floor(pad / 2);
+  return `${ESC}100;97m${' '.repeat(lp)}${t}${' '.repeat(pad - lp)}${RESET}`;
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false });
 }
@@ -1099,7 +1108,11 @@ export class TUI {
       t2 = t1;
     }
 
-    let line = ` ${sel}${cur} ${num} ${name} ${type} ${status} ${l1} ${bar(r1, bw, t1)}`;
+    // No 5-hour window at all (verified Ultra): a same-width "none" cell instead
+    // of a bar, so it reads differently from an unmeasured "-" and stays aligned.
+    const noSession = a.type === 'oauth' && q.sessionWindowStated === false;
+    const cell1 = noSession ? textCell('none', bw) : bar(r1, bw, t1);
+    let line = ` ${sel}${cur} ${num} ${name} ${type} ${status} ${l1} ${cell1}`;
     if (showBoth) {
       line += `  ${l2} ${bar(r2, bw, t2)}`;
     }

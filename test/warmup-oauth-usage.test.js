@@ -42,14 +42,14 @@ function usageReport() {
 
 // An upstream that answers the usage endpoint and records every request, so
 // a test can assert no /v1/messages probe was spent.
-function fixtureUpstream(seen, { usageStatus = 200 } = {}) {
+function fixtureUpstream(seen, { usageStatus = 200, report = usageReport } = {}) {
   return http.createServer(async (req, res) => {
     let raw = '';
     for await (const c of req) raw += c;
     seen.push({ method: req.method, url: req.url, auth: req.headers['authorization'], beta: req.headers['anthropic-beta'], body: raw });
     if (req.method === 'GET' && req.url === '/api/oauth/usage') {
       res.writeHead(usageStatus, { 'content-type': 'application/json' });
-      res.end(usageStatus === 200 ? JSON.stringify(usageReport()) : '{"error":"nope"}');
+      res.end(usageStatus === 200 ? JSON.stringify(report()) : '{"error":"nope"}');
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -174,4 +174,66 @@ test('a failing usage endpoint leaves the account unmeasured and never breaks th
     upstream.closeAllConnections();
     await new Promise(r => upstream.close(r));
   }
+});
+
+// Verified Ultra accounts (2026-10-30) have no 5-hour window: the usage report
+// says five_hour: null. That is the same "accepted, 7d but no 5h" evidence as a
+// weekly-only /v1/messages response, so the account is complete and no probe
+// is spent re-measuring it.
+async function withUsageProxy(report, fn) {
+  const seen = [];
+  const upstream = fixtureUpstream(seen, { report });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  const proxy = createProxyServer(am, {
+    provider: 'anthropic', upstream: `http://127.0.0.1:${upstreamPort}`,
+    oauthUsageUrl: `http://127.0.0.1:${upstreamPort}/api/oauth/usage`,
+    activeWarmup: true, warmupIntervalMs: 0,
+  });
+  await listen(proxy);
+  try {
+    assert.ok(await waitFor(() => status(am, 'a0')?.quota.unified7d != null), 'measured from the usage report');
+    await fn(am, proxy, seen);
+  } finally {
+    proxy.closeAllConnections();
+    await new Promise(r => proxy.close(r));
+    upstream.closeAllConnections();
+    await new Promise(r => upstream.close(r));
+  }
+}
+
+test('usage report five_hour: null states "no 5h window" and the account is fully measured', async () => {
+  await withUsageProxy(() => ({ ...usageReport(), five_hour: null }), async (am, proxy, seen) => {
+    const q = status(am, 'a0').quota;
+    assert.equal(q.sessionWindowStated, false);
+    assert.equal(q.unified5h, null);
+    assert.equal(q.unified7d, 0.34);
+    assert.equal(am._fullyMeasured(am.accounts[0]), true);
+    assert.equal(am.warmupCandidates().length, 0, 'not a re-measure candidate');
+    assert.equal(seen.filter(r => r.url === '/v1/messages').length, 0, 'no probe request was spent');
+  });
+});
+
+test('usage report with a five_hour value states the 5h window (true), even after false', async () => {
+  let fiveHour = null;
+  await withUsageProxy(() => ({ ...usageReport(), five_hour: fiveHour }), async (am, proxy) => {
+    assert.equal(status(am, 'a0').quota.sessionWindowStated, false);
+    fiveHour = { utilization: 12, resets_at: iso(HOUR) };
+    await proxy.refreshQuotaAll();
+    const q = status(am, 'a0').quota;
+    assert.equal(q.sessionWindowStated, true);
+    assert.equal(q.unified5h, 0.12);
+  });
+});
+
+test('an idle five_hour object (no reset yet) is not read as "no 5h window"', async () => {
+  await withUsageProxy(() => ({ ...usageReport(), five_hour: { utilization: 0, resets_at: null } }), async am => {
+    assert.equal(status(am, 'a0').quota.sessionWindowStated, null);
+  });
+});
+
+test('a missing five_hour key leaves the flag unknown', async () => {
+  await withUsageProxy(() => { const r = usageReport(); delete r.five_hour; return r; }, async am => {
+    assert.equal(status(am, 'a0').quota.sessionWindowStated, null);
+  });
 });
