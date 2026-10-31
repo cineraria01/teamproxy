@@ -237,3 +237,215 @@ test('a missing five_hour key leaves the flag unknown', async () => {
     assert.equal(status(am, 'a0').quota.sessionWindowStated, null);
   });
 });
+
+// The usage endpoint is rate limited per token, and the same tokens are shared
+// by several machines (2026-10-31: ~every call 429 with Retry-After). A failed
+// call must back off per account instead of being retried every warm-up pass.
+async function withFailingUsage({ usageStatus, retryAfter }, fn) {
+  const seen = [];
+  let mode = { usageStatus, retryAfter };
+  const upstream = http.createServer(async (req, res) => {
+    req.resume(); await new Promise(r => req.on('end', r));
+    seen.push({ method: req.method, url: req.url });
+    if (req.url === '/api/oauth/usage') {
+      const h = { 'content-type': 'application/json' };
+      if (mode.retryAfter != null) h['retry-after'] = mode.retryAfter;
+      res.writeHead(mode.usageStatus, h);
+      res.end(mode.usageStatus === 200 ? JSON.stringify(usageReport()) : '{"error":{"type":"rate_limit_error"}}');
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'anthropic-ratelimit-unified-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-utilization': '0.5',
+      'anthropic-ratelimit-unified-5h-reset': String(Math.ceil((Date.now() + HOUR) / 1000)),
+      'anthropic-ratelimit-unified-7d-utilization': '0.6',
+      'anthropic-ratelimit-unified-7d-reset': String(Math.ceil((Date.now() + 24 * HOUR) / 1000)),
+    });
+    res.end('{"ok":true}');
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  const proxy = createProxyServer(am, {
+    provider: 'anthropic', upstream: `http://127.0.0.1:${upstreamPort}`,
+    oauthUsageUrl: `http://127.0.0.1:${upstreamPort}/api/oauth/usage`,
+    activeWarmup: true, warmupIntervalMs: 0,
+  });
+  const errors = [];
+  const origError = console.error;
+  console.error = (...a) => { errors.push(a.join(' ')); };
+  await listen(proxy);
+  try {
+    assert.ok(await waitFor(() => seen.some(r => r.url === '/api/oauth/usage')));
+    await new Promise(r => setTimeout(r, 30));
+    await fn({ am, proxy, seen, errors, setMode: m => { mode = m; } });
+  } finally {
+    console.error = origError;
+    proxy.closeAllConnections();
+    await new Promise(r => proxy.close(r));
+    upstream.closeAllConnections();
+    await new Promise(r => upstream.close(r));
+  }
+}
+
+const usageCalls = seen => seen.filter(r => r.url === '/api/oauth/usage').length;
+const backoffLeft = am => (am.accounts[0]._anthropicUsageBackoff?.until ?? 0) - Date.now();
+
+test('a 429 with Retry-After backs the account off for that long; forced refreshes respect it', async () => {
+  await withFailingUsage({ usageStatus: 429, retryAfter: '244' }, async ({ am, proxy, seen }) => {
+    assert.equal(usageCalls(seen), 1);
+    const left = backoffLeft(am);
+    assert.ok(left > 240_000 && left <= 244_000 + 60_000, `backoff ${left}ms follows Retry-After plus jitter`);
+    // Unforced and forced passes (warm-up cycle, TUI R / teamclaude reload) do not call again.
+    am.accounts[0]._anthropicUsageCheckedAt = 0;
+    await proxy.refreshAnthropicQuotaAll();
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 1, 'no usage call while backing off');
+  });
+});
+
+test('Retry-After as an HTTP date, a missing value, and a huge value are bounded', async () => {
+  await withFailingUsage({ usageStatus: 429, retryAfter: new Date(Date.now() + 120_000).toUTCString() }, async ({ am }) => {
+    const left = backoffLeft(am);
+    assert.ok(left > 100_000 && left <= 120_000 + 60_000, `HTTP-date backoff ${left}ms`);
+  });
+  await withFailingUsage({ usageStatus: 429, retryAfter: null }, async ({ am }) => {
+    const left = backoffLeft(am);
+    assert.ok(left > 295_000 && left <= 300_000 + 60_000, `default backoff ${left}ms is 5 minutes`);
+  });
+  await withFailingUsage({ usageStatus: 429, retryAfter: '999999' }, async ({ am }) => {
+    const left = backoffLeft(am);
+    assert.ok(left > 3_590_000 && left <= HOUR + 60_000, `capped backoff ${left}ms is 1 hour`);
+  });
+});
+
+test('a 403 backs off for an hour', async () => {
+  await withFailingUsage({ usageStatus: 403, retryAfter: null }, async ({ am }) => {
+    const left = backoffLeft(am);
+    assert.ok(left > 3_590_000 && left <= HOUR + 60_000, `403 backoff ${left}ms`);
+  });
+});
+
+test('while backed off, warm-up falls through to the message probe and still measures 5h/7d', async () => {
+  await withFailingUsage({ usageStatus: 429, retryAfter: '244' }, async ({ am, proxy, seen }) => {
+    assert.equal(proxy.importProbeTemplate({ version: '2023-06-01', model: 'claude-haiku-5' }), true);
+    const before = usageCalls(seen);
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), before, 'usage endpoint not called');
+    assert.ok(seen.some(r => r.url === '/v1/messages'), 'message probe sent');
+    assert.equal(status(am, 'a0').quota.unified5h, 0.5);
+  });
+});
+
+test('the backoff is logged once; a success clears it, and the next failure logs again', async () => {
+  await withFailingUsage({ usageStatus: 429, retryAfter: '1' }, async ({ am, proxy, seen, errors, setMode }) => {
+    const logged = () => errors.filter(e => e.includes('OAuth usage')).length;
+    assert.equal(logged(), 1);
+    assert.match(errors.find(e => e.includes('OAuth usage')), /429/);
+    // Backoff expires, same 429 again: still the same backoff streak, no new line.
+    am.accounts[0]._anthropicUsageBackoff.until = 0;
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2);
+    assert.equal(logged(), 1, 'a repeated 429 does not log every cycle');
+    // Success clears the backoff state.
+    setMode({ usageStatus: 200 });
+    am.accounts[0]._anthropicUsageBackoff.until = 0;
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 3);
+    assert.equal(am.accounts[0]._anthropicUsageBackoff, undefined);
+    assert.equal(status(am, 'a0').quota.modelWeekly['7d_oi']?.utilization, 0.33);
+    // A new failure after a success starts a new backoff and logs again.
+    setMode({ usageStatus: 403 });
+    await proxy.refreshQuotaAll();
+    assert.equal(logged(), 2);
+    assert.ok(backoffLeft(am) > 3_590_000);
+  });
+});
+
+// Long-lived setup tokens lack the user:profile scope (verified 2026-10-31 on
+// lt-4: 403 permission_error oauth_scope_insufficient), so the usage endpoint
+// can never succeed for that credential. Stop calling it until the credential
+// changes; other 403s keep the 1 h backoff.
+const SCOPE_403 = JSON.stringify({
+  type: 'error',
+  error: {
+    type: 'permission_error', message: 'OAuth token does not meet scope requirement user:profile',
+    details: { required_scopes: ['user:profile'], match: 'any', error_code: 'oauth_scope_insufficient' },
+  },
+});
+
+async function withScopeUpstream(fn) {
+  const seen = [];
+  let mode = 'scope';
+  const upstream = http.createServer(async (req, res) => {
+    req.resume(); await new Promise(r => req.on('end', r));
+    seen.push({ url: req.url, auth: req.headers['authorization'] });
+    if (req.url !== '/api/oauth/usage') { res.writeHead(200); res.end('{}'); return; }
+    if (mode === '429') { res.writeHead(429, { 'retry-after': '60' }); res.end('{}'); return; }
+    if (mode === 'ok') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(usageReport())); return; }
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(SCOPE_403);
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  const proxy = createProxyServer(am, {
+    provider: 'anthropic', upstream: `http://127.0.0.1:${upstreamPort}`,
+    oauthUsageUrl: `http://127.0.0.1:${upstreamPort}/api/oauth/usage`,
+    activeWarmup: true, warmupIntervalMs: 0,
+  });
+  const errors = [];
+  const origError = console.error;
+  console.error = (...a) => { errors.push(a.join(' ')); };
+  try {
+    await fn({ am, proxy, seen, errors, upstreamPort, listenProxy: () => listen(proxy), setMode: m => { mode = m; } });
+  } finally {
+    console.error = origError;
+    proxy.closeAllConnections();
+    await new Promise(r => proxy.close(r));
+    upstream.closeAllConnections();
+    await new Promise(r => upstream.close(r));
+  }
+}
+
+test('a scope-insufficient 403 stops usage calls for that credential until it changes', async () => {
+  await withScopeUpstream(async ({ am, proxy, seen, errors, listenProxy, setMode }) => {
+    await listenProxy();
+    assert.ok(await waitFor(() => usageCalls(seen) === 1));
+    await new Promise(r => setTimeout(r, 30));
+    const a = am.accounts[0];
+    // Even past any time-based backoff, forced and unforced passes skip the call.
+    if (a._anthropicUsageBackoff) a._anthropicUsageBackoff.until = 0;
+    a._anthropicUsageCheckedAt = 0;
+    await proxy.refreshAnthropicQuotaAll();
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 1, 'no further usage call with the same credential');
+    const lines = errors.filter(e => e.includes('OAuth usage'));
+    assert.equal(lines.length, 1, 'logged once');
+    assert.match(lines[0], /user:profile|scope/);
+    assert.ok(!lines[0].includes('tok-0'), 'the token is never logged');
+    // A new credential (re-login / token swap) is tried again.
+    setMode('ok');
+    a.credential = 'tok-0-new';
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2);
+    assert.equal(seen.at(-1).auth, 'Bearer tok-0-new');
+    assert.equal(status(am, 'a0').quota.modelWeekly['7d_oi']?.utilization, 0.33);
+  });
+});
+
+test('a scope 403 that follows a 429 backoff still disables the credential', async () => {
+  await withScopeUpstream(async ({ am, proxy, seen, listenProxy, setMode }) => {
+    setMode('429');
+    await listenProxy();
+    assert.ok(await waitFor(() => usageCalls(seen) === 1));
+    await new Promise(r => setTimeout(r, 30));
+    const a = am.accounts[0];
+    setMode('scope');
+    a._anthropicUsageBackoff.until = 0;
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2);
+    a._anthropicUsageBackoff && (a._anthropicUsageBackoff.until = 0);
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2, 'scope 403 after a 429 disables the credential too');
+  });
+});

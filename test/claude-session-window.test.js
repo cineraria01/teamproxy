@@ -291,6 +291,8 @@ test('warm-up 프로브 경로: 7d만 오는 200 응답 한 번으로 플래그�
   const am = new AccountManager([oauth('ultra-1')], 0.98, 0, 3);
   const proxy = createProxyServer(am, {
     upstream: `http://127.0.0.1:${upstream.address().port}`, warmupIntervalMs: 20,
+    // 이 시험은 반쪽 재측정 경로만 센다. Fable 칸 보충 탐침(별도 상한, warmup.test.js)은 끈다.
+    modelWeeklyProbeModel: false,
   });
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
   try {
