@@ -1603,6 +1603,10 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     if (!anthropicUsageUrl || !activeWarmup || warmupClosed) return false;
     if (account.type !== 'oauth' || account.subscriptionDisabled) return false;
     if (account._anthropicUsagePromise) return account._anthropicUsagePromise;
+    // Backoff binds forced refreshes too: Retry-After is the server's call, an
+    // early retry only earns another 429, and returning false lets
+    // warmupAccount measure 5h/7d with the message probe instead.
+    if (Date.now() < (account._anthropicUsageBackoff?.until || 0)) return false;
     if (!force && Date.now() - (account._anthropicUsageCheckedAt || 0) < 60_000) return false;
     account._anthropicUsageCheckedAt = Date.now();
     account._anthropicUsagePromise = (async () => {
@@ -1613,6 +1617,11 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           headers: { authorization: `Bearer ${account.credential}`, 'anthropic-beta': 'oauth-2025-04-20' },
           redirect: 'error', signal: probe.signal,
         });
+        if (res.status === 429 || res.status === 403) {
+          await res.body?.cancel();
+          backOffAnthropicUsage(account, res.status, res.headers.get('retry-after'));
+          return false;
+        }
         if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
         const data = await res.json();
         const headers = {};
@@ -1642,6 +1651,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // flag unchanged instead of falsely stating "no 5h window".
         const noFiveHour = Object.hasOwn(data, 'five_hour') && data.five_hour === null;
         accountManager.updateQuota(account, headers, noFiveHour ? { status: res.status } : {});
+        delete account._anthropicUsageBackoff;
         return true;
       } catch (err) {
         if (!warmupClosed) console.error(`[TeamClaude] OAuth usage refresh failed for "${account.name}": ${err.message}`);
@@ -1652,6 +1662,28 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     })();
     try { return await account._anthropicUsagePromise; }
     finally { delete account._anthropicUsagePromise; }
+  }
+
+  // Per-account backoff for the usage endpoint, memory only (a restart costs
+  // one call that re-learns it). The same tokens are shared by several
+  // machines, so a 0-60 s jitter keeps them from retrying in lockstep. 429
+  // follows Retry-After (seconds or HTTP date; 5 min if absent/invalid, 1 h
+  // cap); 403 is deterministic and waits 1 h. Logged once per failure streak.
+  function backOffAnthropicUsage(account, status, retryAfter) {
+    let wait = 3600_000;
+    if (status === 429) {
+      const secs = Number(retryAfter);
+      const at = Date.parse(retryAfter ?? '');
+      wait = retryAfter && Number.isFinite(secs) && secs > 0 ? secs * 1000
+        : Number.isFinite(at) && at > Date.now() ? at - Date.now() : 300_000;
+      wait = Math.min(wait, 3600_000);
+    }
+    wait += Math.floor(Math.random() * 60_000);
+    const prev = account._anthropicUsageBackoff;
+    if (prev?.status !== status && !warmupClosed) {
+      console.error(`[TeamClaude] OAuth usage refresh for "${account.name}" got HTTP ${status} — backing off ${Math.round(wait / 1000)}s (message probe measures 5h/7d meanwhile)`);
+    }
+    account._anthropicUsageBackoff = { status, until: Date.now() + wait };
   }
 
   function refreshAnthropicQuotaAll() {
