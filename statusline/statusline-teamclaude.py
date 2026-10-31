@@ -390,22 +390,22 @@ def _reset_ts(value):
         return None
 
 
-def accounts_by_fable_reset(accounts, now):
-    """Keep account numbers stable, but show the soonest Fable reset first.
-
-    Accounts without a known Fable reset follow, ordered by the soonest weekly
-    (7d) reset — the proxy's own use-or-lose order. Setup-token accounts
-    (`claude setup-token`, inference scope only) cannot read /api/oauth/usage,
-    so their Fable window stays unknown until a Fable request passes through
-    them; without this fallback every row fell back to account-number order.
-    """
+def accounts_by_weekly_reset(accounts, now):
+    """Keep account numbers stable, but order rows like the proxy's own
+    use-or-lose pick (`autoCompare`): soonest weekly (7d) reset, then soonest
+    5h reset, then lowest 5h utilization, then account number. Past or missing
+    resets sort last; an account with no 5h window (sessionWindowStated false)
+    has an unknown 5h reset."""
     def future(value):
         reset = _reset_ts(value)
         return reset if reset is not None and reset > now * 1000 else float("inf")
 
     def key(item):
         q = item[1].get("quota") or {}
-        return (future(q.get("unified7dFableReset")), future(q.get("unified7dReset")))
+        five = float("inf") if q.get("sessionWindowStated") is False else future(q.get("unified5hReset"))
+        util = q.get("unified5h")
+        return (future(q.get("unified7dReset")), five,
+                util if isinstance(util, (int, float)) else 0, item[0])
 
     return sorted(enumerate(accounts, 1), key=key)
 
@@ -645,7 +645,7 @@ def main():
             bg,
         ))
 
-    for account_number, acct in accounts_by_fable_reset(accounts, now):
+    for account_number, acct in accounts_by_weekly_reset(accounts, now):
         name = (acct.get("name") or "?")[:NAME_W]
         is_current = (
             account_number == pinned_number

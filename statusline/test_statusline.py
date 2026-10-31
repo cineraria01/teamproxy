@@ -32,27 +32,34 @@ assert statusline.fmt_remaining((now + 90061) * 1000, now) == "1d1h"
 assert statusline.fmt_remaining(now * 1000, now) == "now"
 assert statusline.fmt_remaining(None, now) is None
 
-# Account rows are chronological by the Fable reset. Their original
-# numbers stay attached so `claude N` keeps selecting the account shown as N.
-ordered = statusline.accounts_by_fable_reset([
-    {"quota": {"unified7dFableReset": (now + 300) * 1000}},
-    {"quota": {"unified7dFableReset": (now + 100) * 1000}},
-    {"quota": {"unified7dFableReset": (now - 1) * 1000}},
-    {"quota": {"unified7dFableReset": (now + 200) * 1000}},
-    {"quota": {}},
-], now)
-assert [number for number, _ in ordered] == [2, 4, 1, 3, 5]
-
-# Without a Fable reset (setup-token accounts cannot read the usage endpoint)
-# rows follow the soonest weekly reset, after any account whose Fable reset is known.
-ordered = statusline.accounts_by_fable_reset([
-    {"quota": {"unified7dReset": (now + 500) * 1000}},
+# Account rows follow the proxy's use-or-lose order: soonest weekly reset first
+# (a known Fable reset does not matter), then soonest 5h reset, then 5h use.
+# Original numbers stay attached so `claude N` keeps selecting account N.
+ordered = statusline.accounts_by_weekly_reset([
+    {"quota": {"unified7dFableReset": (now + 100) * 1000, "unified7dReset": (now + 900) * 1000}},
     {"quota": {"unified7dReset": (now + 100) * 1000}},
-    {"quota": {"unified7dFableReset": (now + 900) * 1000, "unified7dReset": (now + 900) * 1000}},
-    {"quota": {"unified7dReset": (now - 1) * 1000}},
-    {"quota": {"unified7dReset": (now + 300) * 1000}},
+    {"quota": {"unified7dFableReset": (now + 50) * 1000, "unified7dReset": (now + 500) * 1000}},
 ], now)
-assert [number for number, _ in ordered] == [3, 2, 5, 1, 4]
+assert [number for number, _ in ordered] == [2, 3, 1]
+
+# Equal weekly reset: soonest 5h reset, then lower 5h use, then number.
+wk = (now + 500) * 1000
+ordered = statusline.accounts_by_weekly_reset([
+    {"quota": {"unified7dReset": wk, "unified5hReset": (now + 300) * 1000}},
+    {"quota": {"unified7dReset": wk, "unified5hReset": (now + 100) * 1000, "unified5h": 0.9}},
+    {"quota": {"unified7dReset": wk, "unified5hReset": (now + 100) * 1000, "unified5h": 0.2}},
+    {"quota": {"unified7dReset": wk, "sessionWindowStated": False}},
+    {"quota": {"unified7dReset": wk, "unified5hReset": (now - 1) * 1000}},
+], now)
+assert [number for number, _ in ordered] == [3, 2, 1, 4, 5]
+
+# Past or missing weekly resets sort last, keeping number order.
+ordered = statusline.accounts_by_weekly_reset([
+    {"quota": {}},
+    {"quota": {"unified7dReset": (now - 1) * 1000}},
+    {"quota": {"unified7dReset": (now + 100) * 1000}},
+], now)
+assert [number for number, _ in ordered] == [3, 1, 2]
 
 # _normalize maps 1.3.x proxy-endpoint field names onto the expected ones and
 # leaves already-normalized data untouched.
