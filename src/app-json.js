@@ -45,6 +45,9 @@ export function accountViews(configAccounts, liveStatus) {
       usable: l ? l.usable === true : null,
       priority: c.priority ?? null,
       fiveHour: q ? window(q.unified5h, q.unified5hReset) : null,
+      // false = the proxy saw this Claude account answer with no 5-hour window
+      // (verified Ultra, 2026-10-30); true = it has one; null = unknown.
+      fiveHourWindow: typeof q?.sessionWindowStated === 'boolean' ? q.sessionWindowStated : null,
       sevenDay: q ? window(q.unified7d, q.unified7dReset) : null,
       rateLimitedUntil: l?.rateLimitedUntil ?? null,
       error: l?.errorReason ?? (c.subscriptionDisabled ? 'subscription-disabled' : null),

@@ -422,9 +422,9 @@ def pool_quota(accounts):
     if len(pool) < 2:
         return None
 
-    def agg(value_key, reset_key):
+    def agg(value_key, reset_key, accounts=pool):
         vals, resets = [], []
-        for acct in pool:
+        for acct in accounts:
             q = acct.get("quota") or {}
             v = q.get(value_key)
             if v is None:
@@ -437,10 +437,14 @@ def pool_quota(accounts):
             return None, None
         return sum(vals) / len(vals), (min(resets) if resets else None)
 
+    # Accounts with no 5-hour window at all (verified Ultra) are left out of
+    # the session average; when none has one, the FLEET cell says so.
+    with_session = [a for a in pool if not no_session_window(a.get("quota") or {})]
     return {
         "size": len(pool),
         "off": len(accounts) - len(pool),
-        "five": agg("unified5h", "unified5hReset"),
+        "five": agg("unified5h", "unified5hReset", with_session),
+        "noFive": not with_session,
         "seven": agg("unified7d", "unified7dReset"),
         "fable": agg("unified7dFable", "unified7dFableReset"),
     }
@@ -522,6 +526,28 @@ def bar(ratio, reset, now, width=None, track=DEFAULT_TRACK):
     return out + RESET
 
 
+def no_session_window(q):
+    """The proxy stated this account has no 5-hour window (verified Ultra,
+    2026-10-30): quota.sessionWindowStated is JSON false. Missing / null /
+    true keep the usual gauge."""
+    return q.get("sessionWindowStated") is False
+
+
+def none_cell(width=None, track=DEFAULT_TRACK):
+    """Same-width 'none' cell for a window the account does not have, so it
+    reads differently from an unmeasured '-' and stays aligned."""
+    if width is None:
+        width = BAR_W
+    text = "none"[:width].center(width)
+    return f"\033[{track};97m{text}{RESET}" if COLOR else f"[{text}]"
+
+
+def session_cell(q, now, track=DEFAULT_TRACK):
+    if no_session_window(q):
+        return none_cell(track=track)
+    return bar(q.get("unified5h"), q.get("unified5hReset"), now, track=track)
+
+
 def bars_cell(q, now, label_color=None, track=DEFAULT_TRACK):
     """The three aligned gauges of a row: 5h session, 7d overall, 7d model
     (Fable, falling back to the Sonnet window when that is all there is)."""
@@ -532,7 +558,7 @@ def bars_cell(q, now, label_color=None, track=DEFAULT_TRACK):
         model_seven = q.get("unified7dSonnet")
         model_seven_reset = q.get("unified7dSonnetReset")
     return (
-        f"{lc}Ses{RESET} {bar(q.get('unified5h'), q.get('unified5hReset'), now, track=track)} "
+        f"{lc}Ses{RESET} {session_cell(q, now, track=track)} "
         f"{lc}Wk{RESET} {bar(q.get('unified7d'), q.get('unified7dReset'), now, track=track)} "
         f"{lc}Fbl{RESET} {bar(model_seven, model_seven_reset, now, track=track)}"
     )
@@ -612,7 +638,8 @@ def main():
             f"{DIM}     {RESET}{BOLD}{'FLEET'.ljust(NAME_W)}{RESET} "
             f"{DIM}{size.ljust(plan_w)}{RESET} "
             f"{DIM}{'pooled'.ljust(STATUS_W)}{RESET} "
-            f"{DIM}Ses{RESET} {bar(*pooled['five'], now, track=track)} "
+            f"{DIM}Ses{RESET} "
+            f"{none_cell(track=track) if pooled['noFive'] else bar(*pooled['five'], now, track=track)} "
             f"{DIM}Wk{RESET} {bar(*pooled['seven'], now, track=track)} "
             f"{DIM}Fbl{RESET} {bar(*pooled['fable'], now, track=track)}",
             bg,

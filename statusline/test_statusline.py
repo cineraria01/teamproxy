@@ -156,6 +156,25 @@ assert pooled["five"][1] == 1_999_999_000
 assert pooled["seven"] == (0.1, None)
 assert pooled["fable"] == (0.5, None)
 assert statusline.pool_quota(accounts[:2]) is None
+assert pooled["noFive"] is False
+
+# No 5-hour window (verified Ultra, quota.sessionWindowStated false): the
+# account's Ses cell says "none" (same width as a bar, distinct from the
+# unmeasured "-"), it is left out of the FLEET session average, and a fleet
+# where no account has the window shows "none" too.
+ultra = {"quota": {"sessionWindowStated": False, "unified5h": 0.99,
+                   "unified5hReset": 2_000_000_000, "unified7d": 0.5}}
+maxed = {"quota": {"sessionWindowStated": True, "unified5h": 0.2, "unified7d": 0.1}}
+assert statusline.session_cell(ultra["quota"], now) == f"[{'none'.center(statusline.BAR_W)}]"
+assert len(statusline.session_cell(ultra["quota"], now)) == len(statusline.bar(None, None, now))
+assert statusline.session_cell({"sessionWindowStated": None}, now) == statusline.bar(None, None, now)
+assert "none" in statusline.bars_cell(ultra["quota"], now)
+assert "none" not in statusline.bars_cell(maxed["quota"], now)
+mixed = statusline.pool_quota([ultra, maxed])
+assert mixed["five"] == (0.2, None) and mixed["noFive"] is False
+assert mixed["seven"][0] == 0.3
+all_ultra = statusline.pool_quota([ultra, ultra])
+assert all_ultra["noFive"] is True and all_ultra["five"] == (None, None)
 
 # Bars degrade to a bracketed centered label without colors; the visible
 # width is stable regardless of the data inside.
