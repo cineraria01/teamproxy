@@ -1072,3 +1072,75 @@ test('importProbeTemplate rejects garbage and never clobbers live evidence', asy
     proxy.close();
   }
 });
+
+// The Fable (7d_oi) window only appears on Fable-tier responses. With no Fable
+// traffic through the pool the template never elicits it, so the top-up swaps
+// only the model to config.modelWeeklyProbeModel (default claude-fable-5-1).
+async function withFableUpstream({ config = {}, fableStatus = 200 } = {}, fn) {
+  const probes = [];
+  const upstream = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const c of req) raw += c;
+    const json = JSON.parse(raw);
+    probes.push({ model: json.model, max_tokens: json.max_tokens, system: json.system });
+    const headers = RL_HEADERS();
+    if (json.model === 'claude-fable-5-1' || json.model === 'claude-custom-fable') {
+      if (fableStatus !== 200) { res.writeHead(fableStatus, { 'content-type': 'application/json' }); res.end('{}'); return; }
+      headers['anthropic-ratelimit-unified-7d_oi-utilization'] = '0.0';
+      headers['anthropic-ratelimit-unified-7d_oi-reset'] = String(Math.floor((Date.now() + 24 * HOUR) / 1000));
+    }
+    res.writeHead(200, headers);
+    res.end('{"ok":true}');
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  // Fully measured for 5h/7d, no Fable window → needsModelWeekly.
+  am.updateQuota(0, RL_HEADERS());
+  const proxy = createProxyServer(am, { upstream: `http://127.0.0.1:${upstreamPort}`, warmupIntervalMs: 20, ...config });
+  await listen(proxy);
+  try {
+    assert.equal(proxy.importProbeTemplate({ model: 'claude-small-tier', system: 'You are Claude Code' }), true);
+    await fn({ am, probes, a: am.accounts[0] });
+  } finally {
+    await new Promise(r2 => proxy.close(r2));
+    await new Promise(r2 => upstream.close(r2));
+  }
+}
+
+test('a non-eliciting template still fills the Fable window via a model-swapped probe', async () => {
+  await withFableUpstream({}, async ({ am, probes, a }) => {
+    assert.equal(await waitFor(() => a.quota.modelWeekly['7d_oi'] != null, 3000), true, 'Fable window filled');
+    const fable = probes.filter(p => p.model === 'claude-fable-5-1');
+    assert.ok(fable.length >= 1);
+    assert.equal(fable[0].max_tokens, 1);
+    assert.equal(fable[0].system, 'You are Claude Code', 'same template, only the model swapped');
+    assert.equal(am.needsModelWeekly(a), false);
+    const settled = probes.length;
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(probes.length, settled, 'no more probes once the window is filled');
+  });
+});
+
+test('a 400 from the Fable probe is not repeated', async () => {
+  await withFableUpstream({ fableStatus: 400 }, async ({ am, probes, a }) => {
+    assert.equal(await waitFor(() => probes.some(p => p.model === 'claude-fable-5-1'), 3000), true);
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(probes.filter(p => p.model === 'claude-fable-5-1').length, 1, 'probed once');
+    assert.equal(a._mwProbes, am.maxWarmupTries);
+    assert.equal(a._partialProbes || 0, 0, 'a model rejection is not a 5h/7d convergence failure');
+  });
+});
+
+test('modelWeeklyProbeModel picks the model, and false or "" turns the Fable probe off', async () => {
+  await withFableUpstream({ config: { modelWeeklyProbeModel: 'claude-custom-fable' } }, async ({ probes, a }) => {
+    assert.equal(await waitFor(() => a.quota.modelWeekly['7d_oi'] != null, 3000), true);
+    assert.ok(probes.some(p => p.model === 'claude-custom-fable'));
+    assert.ok(!probes.some(p => p.model === 'claude-fable-5-1'));
+  });
+  for (const off of [false, '']) {
+    await withFableUpstream({ config: { modelWeeklyProbeModel: off } }, async ({ probes }) => {
+      await new Promise(r => setTimeout(r, 200));
+      assert.equal(probes.length, 0, `off (${JSON.stringify(off)}): no top-up probe`);
+    });
+  }
+});

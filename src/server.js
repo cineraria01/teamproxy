@@ -4,7 +4,7 @@ import https from 'node:https';
 import { mkdir, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
   brotliDecompressSync,
@@ -586,6 +586,15 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     ? Math.floor(config.codexAuthFailureThreshold)
     : 3;
   const WARMUP_PROBE_TIMEOUT_MS = 15_000;
+  // Model for the Fable (7d_oi) top-up probe when the committed template can't
+  // elicit that window (no Fable traffic through the pool). Model names are
+  // otherwise never hardcoded; this is only a config DEFAULT, overridable by
+  // `modelWeeklyProbeModel`, because the window only appears on Fable-tier
+  // responses (verified 2026-10-31: claude-fable-5-1, max_tokens 1 → 200 with
+  // 7d_oi headers). Empty string / false turns the probe off.
+  const modelWeeklyProbeModel = config.modelWeeklyProbeModel === undefined ? 'claude-fable-5-1'
+    : typeof config.modelWeeklyProbeModel === 'string' && config.modelWeeklyProbeModel.trim()
+      ? config.modelWeeklyProbeModel.trim() : null;
   let probeTemplate = null;   // committed { model, version, beta, system } — only after a 2xx
   let warmupInFlight = false; // guard against overlapping fan-outs
   let codexRefreshPromise = null;
@@ -1607,6 +1616,10 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     // early retry only earns another 429, and returning false lets
     // warmupAccount measure 5h/7d with the message probe instead.
     if (Date.now() < (account._anthropicUsageBackoff?.until || 0)) return false;
+    // A credential without the user:profile scope (long-lived setup tokens) can
+    // never read the report; skip until the credential changes (re-login/swap).
+    if (account._anthropicUsageScopeless
+        && account._anthropicUsageScopeless === credentialFingerprint(account.credential)) return false;
     if (!force && Date.now() - (account._anthropicUsageCheckedAt || 0) < 60_000) return false;
     account._anthropicUsageCheckedAt = Date.now();
     account._anthropicUsagePromise = (async () => {
@@ -1617,9 +1630,23 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           headers: { authorization: `Bearer ${account.credential}`, 'anthropic-beta': 'oauth-2025-04-20' },
           redirect: 'error', signal: probe.signal,
         });
-        if (res.status === 429 || res.status === 403) {
+        if (res.status === 403) {
+          const text = await res.text().catch(() => '');
+          let err = null;
+          try { err = JSON.parse(text)?.error; } catch { /* not JSON */ }
+          if (err?.type === 'permission_error' && (err.details?.error_code === 'oauth_scope_insufficient'
+              || (Array.isArray(err.details?.required_scopes) && err.details.required_scopes.includes('user:profile')))) {
+            account._anthropicUsageScopeless = credentialFingerprint(account.credential);
+            delete account._anthropicUsageBackoff;
+            if (!warmupClosed) console.error(`[TeamClaude] OAuth usage report unavailable for "${account.name}": token lacks the user:profile scope — not calling it again until the credential changes (message probe measures quota)`);
+            return false;
+          }
+          backOffAnthropicUsage(account, 403);
+          return false;
+        }
+        if (res.status === 429) {
           await res.body?.cancel();
-          backOffAnthropicUsage(account, res.status, res.headers.get('retry-after'));
+          backOffAnthropicUsage(account, 429, res.headers.get('retry-after'));
           return false;
         }
         if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
@@ -1652,6 +1679,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         const noFiveHour = Object.hasOwn(data, 'five_hour') && data.five_hour === null;
         accountManager.updateQuota(account, headers, noFiveHour ? { status: res.status } : {});
         delete account._anthropicUsageBackoff;
+        delete account._anthropicUsageScopeless;
         return true;
       } catch (err) {
         if (!warmupClosed) console.error(`[TeamClaude] OAuth usage refresh failed for "${account.name}": ${err.message}`);
@@ -1669,6 +1697,10 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // machines, so a 0-60 s jitter keeps them from retrying in lockstep. 429
   // follows Retry-After (seconds or HTTP date; 5 min if absent/invalid, 1 h
   // cap); 403 is deterministic and waits 1 h. Logged once per failure streak.
+  function credentialFingerprint(credential) {
+    return createHash('sha256').update(String(credential ?? '')).digest('hex').slice(0, 16);
+  }
+
   function backOffAnthropicUsage(account, status, retryAfter) {
     let wait = 3600_000;
     if (status === 429) {
@@ -1693,11 +1725,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       .map(a => refreshAnthropicUsage(a)));
   }
 
-  async function warmupAccount(account, { force = false } = {}) {
+  async function warmupAccount(account, { force = false, model = null } = {}) {
     // The usage report measures an OAuth account outright; fall back to the
     // probe only when it is unavailable (custom upstream, endpoint failure).
     if (await refreshAnthropicUsage(account, force)) return true;
     if (!probeTemplate || warmupClosed || account._warming) return;
+    // `model` swaps only the model of the committed template (Fable top-up).
+    const template = model ? { ...probeTemplate, model } : probeTemplate;
     // Don't refresh from a background probe; skip an OAuth account that needs one.
     if (account.type === 'oauth' && isTokenExpiringSoon(account.expiresAt)) return;
     // Re-confirm it's still an available, unmeasured, idle candidate — unless
@@ -1709,13 +1743,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     account._warming = true;
     const probe = probeSignal();
     try {
-      const headers = { 'content-type': 'application/json', 'anthropic-version': probeTemplate.version };
-      if (probeTemplate.beta) headers['anthropic-beta'] = probeTemplate.beta;
+      const headers = { 'content-type': 'application/json', 'anthropic-version': template.version };
+      if (template.beta) headers['anthropic-beta'] = template.beta;
       if (account.type === 'oauth') headers['authorization'] = `Bearer ${account.credential}`;
       else headers['x-api-key'] = account.credential;
 
       const res = await fetch(`${upstream}/v1/messages`, {
-        method: 'POST', headers, body: buildProbeBody(probeTemplate), signal: probe.signal,
+        method: 'POST', headers, body: buildProbeBody(template), signal: probe.signal,
       });
       // A completed 2xx is authoritative proof that this organization can use
       // Claude Code again. Clear the durable quarantine before folding quota so
@@ -1772,8 +1806,14 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // fully unmeasured account has no reset timestamp, so no sweep would
         // ever clear its counter, and counting a passing blip would abandon it
         // permanently even after upstream recovers.
-        account._partialProbes = (account._partialProbes || 0) + 1;
-        account._lastFruitlessProbeAt = Date.now(); // paces the slow retry backstop
+        if (model) {
+          // The swapped model was refused (e.g. 400 unknown model): spend the
+          // whole Fable top-up budget instead of retrying it every interval.
+          account._mwProbes = accountManager.maxWarmupTries;
+        } else {
+          account._partialProbes = (account._partialProbes || 0) + 1;
+          account._lastFruitlessProbeAt = Date.now(); // paces the slow retry backstop
+        }
       }
     } catch (err) {
       // Best-effort: leave the account unmeasured (exactly as before warm-up).
@@ -1838,12 +1878,17 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // that exact account is idle. Force-probes so the fully-measured guard doesn't
   // exclude them; still skips in-flight/disabled/error accounts.
   async function topUpModelWeekly() {
-    if (!activeWarmup || warmupClosed || !probeTemplate || !probeTemplate._elicitsModelWeekly) return;
+    if (!activeWarmup || warmupClosed || !probeTemplate) return;
+    // A template that doesn't elicit the window gets its model swapped to the
+    // configured Fable probe model; real Fable traffic still upgrades the
+    // template itself (commitProbeTemplate), after which no swap is needed.
+    const model = probeTemplate._elicitsModelWeekly ? null : modelWeeklyProbeModel;
+    if (!probeTemplate._elicitsModelWeekly && !model) return;
     const targets = accountManager.accounts.filter(a =>
       a.enabled !== false && a.status !== 'error' && a.inflight === 0 && !a._warming
       && accountManager.needsModelWeekly(a));
     if (!targets.length) return;
-    await Promise.all(targets.map(a => warmupAccount(a, { force: true })));
+    await Promise.all(targets.map(a => warmupAccount(a, { force: true, model })));
   }
 
   // Partial-quota top-up: after a restart the lazy sweep clears an expired

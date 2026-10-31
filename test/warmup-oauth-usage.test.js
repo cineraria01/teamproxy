@@ -361,3 +361,91 @@ test('the backoff is logged once; a success clears it, and the next failure logs
     assert.ok(backoffLeft(am) > 3_590_000);
   });
 });
+
+// Long-lived setup tokens lack the user:profile scope (verified 2026-10-31 on
+// lt-4: 403 permission_error oauth_scope_insufficient), so the usage endpoint
+// can never succeed for that credential. Stop calling it until the credential
+// changes; other 403s keep the 1 h backoff.
+const SCOPE_403 = JSON.stringify({
+  type: 'error',
+  error: {
+    type: 'permission_error', message: 'OAuth token does not meet scope requirement user:profile',
+    details: { required_scopes: ['user:profile'], match: 'any', error_code: 'oauth_scope_insufficient' },
+  },
+});
+
+async function withScopeUpstream(fn) {
+  const seen = [];
+  let mode = 'scope';
+  const upstream = http.createServer(async (req, res) => {
+    req.resume(); await new Promise(r => req.on('end', r));
+    seen.push({ url: req.url, auth: req.headers['authorization'] });
+    if (req.url !== '/api/oauth/usage') { res.writeHead(200); res.end('{}'); return; }
+    if (mode === '429') { res.writeHead(429, { 'retry-after': '60' }); res.end('{}'); return; }
+    if (mode === 'ok') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(usageReport())); return; }
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(SCOPE_403);
+  });
+  const upstreamPort = await listen(upstream);
+  const am = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  const proxy = createProxyServer(am, {
+    provider: 'anthropic', upstream: `http://127.0.0.1:${upstreamPort}`,
+    oauthUsageUrl: `http://127.0.0.1:${upstreamPort}/api/oauth/usage`,
+    activeWarmup: true, warmupIntervalMs: 0,
+  });
+  const errors = [];
+  const origError = console.error;
+  console.error = (...a) => { errors.push(a.join(' ')); };
+  try {
+    await fn({ am, proxy, seen, errors, upstreamPort, listenProxy: () => listen(proxy), setMode: m => { mode = m; } });
+  } finally {
+    console.error = origError;
+    proxy.closeAllConnections();
+    await new Promise(r => proxy.close(r));
+    upstream.closeAllConnections();
+    await new Promise(r => upstream.close(r));
+  }
+}
+
+test('a scope-insufficient 403 stops usage calls for that credential until it changes', async () => {
+  await withScopeUpstream(async ({ am, proxy, seen, errors, listenProxy, setMode }) => {
+    await listenProxy();
+    assert.ok(await waitFor(() => usageCalls(seen) === 1));
+    await new Promise(r => setTimeout(r, 30));
+    const a = am.accounts[0];
+    // Even past any time-based backoff, forced and unforced passes skip the call.
+    if (a._anthropicUsageBackoff) a._anthropicUsageBackoff.until = 0;
+    a._anthropicUsageCheckedAt = 0;
+    await proxy.refreshAnthropicQuotaAll();
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 1, 'no further usage call with the same credential');
+    const lines = errors.filter(e => e.includes('OAuth usage'));
+    assert.equal(lines.length, 1, 'logged once');
+    assert.match(lines[0], /user:profile|scope/);
+    assert.ok(!lines[0].includes('tok-0'), 'the token is never logged');
+    // A new credential (re-login / token swap) is tried again.
+    setMode('ok');
+    a.credential = 'tok-0-new';
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2);
+    assert.equal(seen.at(-1).auth, 'Bearer tok-0-new');
+    assert.equal(status(am, 'a0').quota.modelWeekly['7d_oi']?.utilization, 0.33);
+  });
+});
+
+test('a scope 403 that follows a 429 backoff still disables the credential', async () => {
+  await withScopeUpstream(async ({ am, proxy, seen, listenProxy, setMode }) => {
+    setMode('429');
+    await listenProxy();
+    assert.ok(await waitFor(() => usageCalls(seen) === 1));
+    await new Promise(r => setTimeout(r, 30));
+    const a = am.accounts[0];
+    setMode('scope');
+    a._anthropicUsageBackoff.until = 0;
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2);
+    a._anthropicUsageBackoff && (a._anthropicUsageBackoff.until = 0);
+    await proxy.refreshQuotaAll();
+    assert.equal(usageCalls(seen), 2, 'scope 403 after a 429 disables the credential too');
+  });
+});
