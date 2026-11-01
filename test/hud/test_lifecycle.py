@@ -138,11 +138,76 @@ def herdr_footer():
         assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
 
 
+def hc_terminal():
+    """Outside Herdr core an interactive launch starts the launcher again, same arguments, in a new hc terminal and
+    attaches to it: no tmux, the exit code and a failed run's last lines come back. A fake hc records the calls."""
+    with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
+        folder = Path(directory)
+        calls = folder / "calls.jsonl"
+        (folder / "hc").write_text(
+            f"#!{sys.executable}\nimport json, os, sys\n"
+            f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + chr(10))\n"
+            "a, state = sys.argv[1:], os.environ.get('STATE', 'finished')\n"
+            "if a[0] == 'run' and os.environ.get('FAIL'): sys.exit('core down')\n"
+            "print(json.dumps({'address': 'lucy/t5'}) if a[0] == 'run' else 'boom' if a[0] == 'read' else"
+            " json.dumps({'state': state, 'exit_code': int(os.environ.get('CODE', '0')) if state == 'finished' else None})"
+            " if a[0] == 'get' else '')\n")
+        for name in ("hc", "teamclaude"):
+            if name == "teamclaude":
+                (folder / name).write_text(f"#!{sys.executable}\nraise SystemExit('the CLI must not run here')\n")
+            (folder / name).chmod(0o755)
+
+        def run(arguments, **extra):
+            calls.unlink(missing_ok=True)
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
+            # Only the fakes on PATH: no tmux to fall back on, and no real hc.
+            env = {"PATH": directory, "HOME": directory, "TC_ACCT": "2", **extra}
+            child = subprocess.Popen([sys.executable, str(HUD / "launcher.py"), *arguments], cwd=directory,
+                                     stdin=slave, stdout=slave, stderr=slave, env=env)
+            os.close(slave)
+            output = []
+            reader = threading.Thread(target=lambda: drain(master, output), daemon=True)
+            reader.start()
+            code = child.wait(timeout=10)
+            reader.join(timeout=2)
+            os.close(master)
+            recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return code, b"".join(output).decode(), recorded
+
+        arguments = ["--claude", "--yolo", "--model", "m", "--keep-alive"]
+        code, output, recorded = run(arguments, CODE="3")
+        assert code == 3 and "boom" in output, (code, output)
+        assert [c[0] for c in recorded] == ["run", "attach", "get", "read", "rm"], recorded
+        launched = recorded[0]
+        assert launched[launched.index("--name") + 1].startswith("claude-") and "--no-parent" in launched
+        assert Path(launched[launched.index("--cwd") + 1]).resolve() == Path(directory).resolve(), launched
+        # Same raw arguments to the same launcher, marked so it never starts another terminal; caller's choices kept.
+        tail = launched[launched.index("--") + 1:]
+        assert tail[:2] == ["env", "TEAMPROXY_HUD_HC_STARTED=1"] and f"PATH={directory}" in tail and "TC_ACCT=2" in tail
+        assert tail[-len(arguments) - 2:] == [sys.executable, str(HUD / "launcher.py"), *arguments], tail
+        assert recorded[1] == ["attach", "lucy/t5"] and recorded[-1] == ["rm", "lucy/t5"]
+        # A clean exit is removed quietly with its code.
+        code, output, recorded = run(["--claude"])
+        assert code == 0 and [c[0] for c in recorded] == ["run", "attach", "get", "rm"], recorded
+        # Detached: it keeps running, nothing removed, the address to reattach is shown.
+        code, output, recorded = run(["--claude"], STATE="live")
+        assert code == 0 and "hc attach lucy/t5" in output and [c[0] for c in recorded] == ["run", "attach", "get"]
+        # hc cannot start it: the error comes back, nonzero.
+        code, output, recorded = run(["--claude"], FAIL="1")
+        assert code != 0 and "core down" in output and [c[0] for c in recorded] == ["run"], output
+        # The launch inside that terminal never starts another one; without tmux it says what it needs.
+        code, output, recorded = run(["--claude"], TEAMPROXY_HUD_HC_STARTED="1")
+        assert code != 0 and "Requires hc (herdr-core) or tmux" in output and not recorded, output
+        # Print mode still runs directly, never through hc.
+        (folder / "teamclaude").write_text(f"#!{sys.executable}\nprint('direct', *__import__('sys').argv[1:])\n")
+        code, output, recorded = run(["--claude", "-p", "hi"])
+        assert code == 0 and "direct run -- -p hi" in output and not recorded, output
+
+
 def check():
     # The footer cases must not see the Herdr terminal this check may run in.
     os.environ.pop("HC_TERMINAL_ID", None)
-    tmux = shutil.which("tmux")
-    assert tmux, "Install tmux to run this check"
     root = HUD
     # Print/version runs answer once and exit, so they never get a footer. Codex -p is --profile, not print.
     oneshot, modes = launcher.oneshot, launcher.MODES
@@ -184,6 +249,16 @@ def check():
                                     env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             assert json.loads(result.stdout) == ["run", "--", *expected], (arguments, result.stdout, result.stderr)
     print("PASS: agy print mode and no terminal skip the footer")
+    hc_terminal()
+    print("PASS: outside Herdr core an interactive launch runs in a new hc terminal, not tmux")
+    herdr_footer()
+    print("PASS: a Herdr terminal runs the CLI without tmux, the footer as a Herdr split")
+    # The rest checks the tmux footer, used only where hc is not installed.
+    tmux = shutil.which("tmux")
+    if not tmux:
+        print("tmux footer checks not run: tmux is not installed (the tmux fallback is untested here)")
+        return
+    os.environ["TEAMPROXY_HUD_HC_STARTED"] = "1"
     # A terminal too short for the footer starts the CLI alone instead of refusing.
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         record = Path(directory) / "argv.json"
@@ -203,8 +278,6 @@ def check():
         os.close(master)
         assert json.loads(record.read_text()) == ["run", "--", "--model", "m"], record.read_text()
     print("PASS: a short terminal runs the CLI without the footer")
-    herdr_footer()
-    print("PASS: a Herdr terminal runs the CLI without tmux, the footer as a Herdr split")
     for mode in ("close", "detach", "keep-alive", "two-clients", "attach-failure", "keep-attach-failure",
                  "stale-server-cwd", "agy", "claude"):
         with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:

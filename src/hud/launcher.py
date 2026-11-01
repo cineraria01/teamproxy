@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Launch Claude Code (teamclaude --claude), Codex (teamcodex), agy (teamagy --agy), grok (teamgrok --grok) or
-cursor-agent (teamcursor --cursor) with a read-only account footer in an isolated tmux session."""
+cursor-agent (teamcursor --cursor) with a read-only account footer: a Herdr split inside Herdr core, a new
+Herdr core terminal outside it, an isolated tmux session only where hc is not installed."""
 
 import json
 import os
@@ -40,6 +41,8 @@ ONESHOT_SUBCOMMANDS = {
 # The caller's choices that must reach the CLI even when the HUD tmux server was started by an earlier launch
 # (its panes get that server's environment): Codex home, and `claude N`'s pinned account.
 FORWARD = ("CODEX_HOME", "TC_ACCT", "TEAMCLAUDE_STATUSLINE_INDEX")
+# Set in the terminal hc_terminal starts: that launch must never start another one.
+HC_STARTED = "TEAMPROXY_HUD_HC_STARTED"
 
 
 def oneshot(arguments, flags):
@@ -84,6 +87,8 @@ def herdr_footer(mode, cli):
     env = dict(os.environ)
     try:
         try:
+            if not app or not hc:
+                raise RuntimeError("herdr-app not installed")
             data = read_status(Path.home() / f".config/{MODES[mode][0]}.json")
             # No cache-usage row for Codex here: it reads the CLI's tmux pane.
             rows = len(claude_rows()) if mode == "claude" else len(
@@ -132,7 +137,34 @@ def herdr_footer(mode, cli):
         close()
 
 
+def hc_terminal(hc, cli, raw):
+    """Outside Herdr core: start this launcher again, with the same arguments, in a new hc terminal (there it takes
+    the Herdr path) and attach this terminal to it. Detaching (Ctrl+\\) leaves it running; its exit code comes back."""
+    # hc terminals get the core's environment, not ours: PATH finds the same wrapper, FORWARD keeps the choices.
+    env = ["env", f"{HC_STARTED}=1", *(f"{name}={os.environ[name]}" for name in ("PATH", *FORWARD) if name in os.environ)]
+    started = subprocess.run([hc, "run", "--bg", "--json", "--no-parent", "--name", cli.lower() + "-" + uuid.uuid4().hex[:8],
+                              "--cwd", os.getcwd(), "--", *env, sys.executable, str(Path(__file__).resolve()), *raw],
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if started.returncode:
+        sys.exit(f"Could not start {cli} in Herdr core: " + (started.stderr or started.stdout).strip())
+    address = json.loads(started.stdout)["address"]
+    subprocess.call([hc, "attach", address])
+    got = subprocess.run([hc, "get", "--json", address], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    state = json.loads(got.stdout) if got.returncode == 0 else {}
+    if state.get("state") != "finished":
+        print(f"{cli} is still running in Herdr core: hc attach {address}", file=sys.stderr)
+        return 0
+    code = state.get("exit_code")
+    if code != 0:
+        # It may have ended before the attach showed anything (a missing proxy): show its last lines.
+        sys.stderr.write(subprocess.run([hc, "read", "--lines", "20", address], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True).stdout)
+    subprocess.run([hc, "rm", address], stdin=subprocess.DEVNULL, capture_output=True)
+    return 1 if code is None else code
+
+
 def launch(arguments):
+    raw = list(arguments)
     mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy", "--grok", "--cursor") else "codex"
     if mode != "codex":
         arguments = arguments[1:]
@@ -150,9 +182,9 @@ def launch(arguments):
                  f"  {command} -- SUBCOMMAND      {cli} subcommand, no footer\n")
               + f"  {command} --yolo               {cli} without approval prompts ({yolo})\n"
               + f"  {command} --keep-alive [{cli} arguments]  Keep running after detach\n"
-              "  Closing the terminal or Ctrl-b d stops the session by default.\n"
-              f"  tmux -L {command}-hud attach   Reattach\n"
-              f"Requires: tmux, Python 3, running {command} proxy")
+              "  Outside Herdr core it runs in a new hc terminal: Ctrl+\\ detaches, hc attach ADDRESS reattaches.\n"
+              f"  Without hc (tmux): Ctrl-b d stops the session by default, tmux -L {command}-hud attach reattaches.\n"
+              f"Requires: hc (herdr-core) or tmux, Python 3, running {command} proxy")
         return 0
     # `teamcodex -- resume ID`: the `--` only gets Codex subcommands past the teamcodex wrapper.
     subcommand = bool(arguments) and arguments[0] == "--"
@@ -169,8 +201,11 @@ def launch(arguments):
     # through tmux).
     if os.environ.get("HC_TERMINAL_ID") and not os.environ.get("TMUX"):
         return herdr_footer(mode, [proxy, "run", "--", *arguments])
+    hc = shutil.which("hc")
+    if hc and not os.environ.get("HC_TERMINAL_ID") and not os.environ.get(HC_STARTED):
+        return hc_terminal(hc, cli, raw)
     if not tmux:
-        sys.exit("Requires tmux. macOS: brew install tmux")
+        sys.exit("Requires hc (herdr-core) or tmux")
     try:
         data = read_status(Path.home() / f".config/{command}.json")
     except Exception:

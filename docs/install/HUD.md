@@ -85,6 +85,17 @@ tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 He
 ID), 창이 `표 줄 수 + 10`행보다 낮거나, `herdr-app`·pane이 없으면(배경 `hc run`) 하단 줄 없이 CLI만 띄우고 이유를 한 줄 찍습니다.
 Codex 캐시 사용량 줄은 tmux 창에서 읽던 것이라 이 경로에는 없습니다.
 
+### Herdr core 밖에서는 새 hc 터미널로 (2026-11-02)
+
+모든 기계에서 tmux를 지우면서(사용자 요청 "다른곳들도 모두 tmux 은 종료 제거하고 허더 코어로 옮겨"), 다섯 명령을 hc 밖(일반 SSH·터미널)에서
+인자 없이 대화형으로 실행하면 tmux 대신 `hc run --bg --no-parent --name <cli>-<8자리> --cwd <현재 폴더>`로 **새 Herdr core 터미널**을 만들고
+실행기를 같은 인자로 그 안에서 다시 띄운 뒤 `hc attach`로 지금 터미널을 붙입니다. 그 안에서는 위 Herdr 경로를 탑니다(창이 없는
+배경 터미널이라 하단 줄 없이 CLI만, 이유 한 줄). `Ctrl+\`로 떼면 계속 돌고 `hc attach <주소>` 안내가 나오며, CLI가 끝나면 그 종료 코드를
+돌려주고 터미널을 지웁니다(0이 아니면 마지막 20줄을 먼저 보여 줌). 새 터미널은 core의 환경을 받으므로 `PATH`와 `CODEX_HOME`·`TC_ACCT`·
+`TEAMCLAUDE_STATUSLINE_INDEX`만 넘기고, `TEAMPROXY_HUD_HC_STARTED=1`을 붙여 그 안의 실행이 터미널을 또 만들지 않게 합니다.
+`-p`·`--version` 같은 한 번 실행, `--` 하위 명령, 터미널 밖 실행은 예전처럼 바로 `<명령> run -- …`입니다. tmux 하단 줄은 `hc`가
+없는 기계에서만 쓰입니다.
+
 ### teamagy (Antigravity agy 풀)
 
 `teamagy`도 같은 실행기를 씁니다(래퍼가 `launcher.py --agy`로 부름). 인자 없이 또는 agy 옵션만 주면 agy 화면 아래에
@@ -154,10 +165,10 @@ TeamClaude의 구독 인증 요청에는 일반 API 키 요청과 다른 헤더�
 ### Codex CLI 설치
 
 macOS의 기존 실행기와 Linux의 로그인·상시 서비스를 검증했습니다. Python 3.9 이상과 공식 Codex CLI가 필요하며, Codex 실행 화면에는 실행 중인 TeamCodex가 필요합니다.
-설치기는 TeamCodex가 없으면 포크 `cineraria01/teamproxy`(브랜치 `main`)의 최신 커밋을 별도 경로에 함께 설치합니다. Node.js/npm과 Git이 필요하며, 하단 고정 실행에는 tmux도 필요합니다. 자세한 안내는 [설치 및 계정 등록](SETUP.md)을 참고하세요.
+설치기는 TeamCodex가 없으면 포크 `cineraria01/teamproxy`(브랜치 `main`)의 최신 커밋을 별도 경로에 함께 설치합니다. Node.js/npm과 Git이 필요하며, 대화형 실행에는 Herdr core(`hc`)가, `hc`가 없는 기계에서는 tmux가 필요합니다. 자세한 안내는 [설치 및 계정 등록](SETUP.md)을 참고하세요.
 
 ```sh
-brew install tmux                 # macOS, 최초 한 번
+# hc(Herdr core)가 없는 기계만: brew install tmux
 git clone https://github.com/cineraria01/teamproxy.git
 cd teamproxy
 python3 scripts/install.py       # 없는 경우 TeamCodex(프록시 + 실행기) 설치
@@ -187,7 +198,8 @@ Linux의 `--service`는 `teamcodex.service`를 활성화하고 `Restart=always`�
 자동 시작을 설정하지 않은 경우 별도 터미널에서 `teamcodex server`를 켜두세요.
 
 `~/.local/bin`이 PATH에 있어야 합니다. 인자 없는 `teamcodex`는 현재 폴더에서 `teamcodex run`을
-실행합니다. 실제 Codex 화면 아래에 tmux 패널을 배치하며, 기존 Codex·Claude 설정 파일을
+실행합니다. `hc`가 있으면 위 "Herdr core 밖에서는" 절에 적은 대로 hc 터미널에서 돌고, 아래 tmux 설명은 `hc`가 없는 기계의 경우입니다.
+실제 Codex 화면 아래에 tmux 패널을 배치하며, 기존 Codex·Claude 설정 파일을
 수정하지 않습니다. 기본적으로 터미널을 닫거나 `Ctrl-b d`로 마지막 연결을 끊으면
 해당 세션도 종료되며 진행 중인 작업은 중단됩니다. 저장된 대화는
 `teamcodex -- resume SESSION_ID`로 재개할 수 있습니다.
@@ -340,7 +352,7 @@ Codex CLI의 기본 `tui.status_line`은 내장 항목만 지원합니다. 이 �
 설치 재실행 및 기존 명령 보존을 확인합니다.
 
 ```sh
-npm run test:hud                  # test/hud/*.py + statusline/ 검사. test_lifecycle.py는 tmux 필요
+npm run test:hud                  # test/hud/*.py + statusline/ 검사. test_lifecycle.py의 tmux 하단 줄 검사는 tmux가 있을 때만 돈다
 ```
 
 기존 TeamCodex가 있으면 그대로 사용합니다(래퍼에 실행기 분기가 없으면 위 블록을 넣으라고 안내합니다).

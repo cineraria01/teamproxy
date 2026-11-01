@@ -86,6 +86,17 @@ const args = process.argv.slice(2);
 require('fs').appendFileSync(process.env.FAKE_LOG, 'tmux ' + args.join(' ') + '\\n');
 if (args.includes('kill-session')) require('./restart.js');
 `;
+// Herdr core: \`<pool>-proxy\` is live only with FAKE_HC_LIVE, so the real hc (and a real proxy terminal) is never reached.
+const FAKE_HC = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'get') {
+  if (!process.env.FAKE_HC_LIVE) process.exit(3);
+  console.log(JSON.stringify({ address: 't9', name: args[1], state: 'live', status: null }));
+} else if (args[0] === 'kill') {
+  require('fs').appendFileSync(process.env.FAKE_LOG, 'hc ' + args.join(' ') + '\\n');
+  require('./restart.js');
+}
+`;
 const FAKE_SYSTEMCTL = `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args.includes('is-active')) process.exit(process.env.FAKE_SYSTEMD === '1' ? 0 : 3);
@@ -160,7 +171,7 @@ async function makeWorld({ installAt = 'A' } = {}) {
   };
   const bin = join(root, 'bin');
   mkdirSync(bin);
-  for (const [name, body] of [['restart.js', FAKE_RESTART], ['tmux', FAKE_TMUX], ['systemctl', FAKE_SYSTEMCTL], ['launchctl', FAKE_LAUNCHCTL]]) {
+  for (const [name, body] of [['restart.js', FAKE_RESTART], ['tmux', FAKE_TMUX], ['hc', FAKE_HC], ['systemctl', FAKE_SYSTEMCTL], ['launchctl', FAKE_LAUNCHCTL]]) {
     writeFileSync(join(bin, name), body);
     chmodSync(join(bin, name), 0o755);
   }
@@ -365,6 +376,18 @@ test('a live lock blocks a second update; a dead one is taken over', async () =>
   writeFileSync(lock, String(spawnSync(process.execPath, ['-e', '']).pid)); // exited
   assert.equal((await update(w, [])).result.installs[0].result, 'updated');
   assert.ok(!existsSync(lock));
+});
+
+test('macOS: a launchd-supervised hc terminal <pool>-proxy is restarted with hc kill, not tmux', { skip: process.platform !== 'darwin' }, async () => {
+  const w = await makeWorld();
+  await startServer(w, w.claude);
+  const { status, result, stderr } = await update(w, [], { FAKE_HC_LIVE: '1' });
+  assert.equal(status, 0, stderr);
+  assert.equal(result.installs[0].result, 'updated');
+  const log = readFileSync(w.log, 'utf8');
+  assert.match(log, /^hc kill teamclaude-proxy$/m);
+  assert.doesNotMatch(log, /^tmux .*kill-session/m);
+  assert.equal(await liveVersion(w), 'B');
 });
 
 test('no supervisor to restart the pool: stop before changing anything', async () => {
