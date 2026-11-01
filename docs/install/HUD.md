@@ -75,6 +75,16 @@ Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이
 키로 바꿔 보냅니다(Claude Code·agy·grok은 Alt+Enter, Codex·cursor-agent는 Ctrl+J). 바깥 터미널이 Shift+Enter를 따로 보내야(확장 키) 동작합니다.
 마우스로 글자를 고를 때는 option(macOS)이나 shift를 누른 채 끕니다.
 
+### Herdr 안에서는 tmux 없이 (2026-11-02)
+
+Herdr 터미널(`HC_TERMINAL_ID`가 있고 tmux 밖) 안에서 다섯 명령은 tmux를 쓰지 않습니다. CLI는 그 터미널에서 바로 돌고, 하단 줄은
+그 아래 Herdr 분할 창(`herdr-app do pane.split`)으로 붙어 표 줄 수만큼 높이를 맞춘 뒤 초점을 CLI로 돌려줍니다. CLI가 끝나거나 창이
+닫히거나 실행기가 신호를 받으면 하단 줄 창도 닫습니다(신호는 작업 프로세스 그룹 전체로 넘겨 `run` 감독자 아래의 진짜 CLI까지 끝냅니다).
+tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 Herdr가 작업 중·질문 대기·끝남을 보지 못했기 때문입니다(사용자
+결정 "순정이 가장 좋은데", "tmux 없이 하단에 바로 나오면 좋긴 하겠다"). 그 터미널의 프로그램이 실행기와 같은 tty에 있지 않거나(물려받은
+ID), 창이 `표 줄 수 + 10`행보다 낮거나, `herdr-app`·pane이 없으면(배경 `hc run`) 하단 줄 없이 CLI만 띄우고 이유를 한 줄 찍습니다.
+Codex 캐시 사용량 줄은 tmux 창에서 읽던 것이라 이 경로에는 없습니다.
+
 ### teamagy (Antigravity agy 풀)
 
 `teamagy`도 같은 실행기를 씁니다(래퍼가 `launcher.py --agy`로 부름). 인자 없이 또는 agy 옵션만 주면 agy 화면 아래에

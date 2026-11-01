@@ -2,9 +2,11 @@
 """Launch Claude Code (teamclaude --claude), Codex (teamcodex), agy (teamagy --agy), grok (teamgrok --grok) or
 cursor-agent (teamcursor --cursor) with a read-only account footer in an isolated tmux session."""
 
+import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import uuid
@@ -44,6 +46,88 @@ def oneshot(arguments, flags):
     return any(a.startswith("-") and a.lstrip("-").split("=")[0] in flags for a in arguments)
 
 
+def herdr_footer(mode, cli):
+    """Run the CLI in this Herdr terminal with the account footer as a Herdr split under it. Without
+    herdr-app, or when this terminal has no pane (a background hc run), the CLI runs alone."""
+    app, hc = shutil.which("herdr-app"), shutil.which("hc")
+
+    # Herdr calls never get the terminal: after a hangup it is gone and a program reading it fails to start.
+    def call(*args):
+        return json.loads(subprocess.run(args, check=True, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                         timeout=5).stdout)
+
+    footer, child = {}, []
+
+    def close():
+        if footer.get("pane"):
+            subprocess.run([app, "do", "pane.close", json.dumps({"pane": footer["pane"]})],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+
+    # Hangup or kill reaches the whole job: `teamcodex run` starts the real CLI as its own child, so sending it
+    # to the direct child alone would leave the CLI holding the terminal. The launcher, now ignoring both, waits
+    # for the CLI and closes the footer. Before the CLI runs it just ends the launcher (through the finally).
+    def forward(sig, _frame):
+        if not child:
+            raise SystemExit(1)
+        for each in (signal.SIGHUP, signal.SIGTERM):
+            signal.signal(each, signal.SIG_IGN)
+        os.killpg(os.getpgrp(), sig)
+
+    # Ctrl+C belongs to the CLI; the launcher stays to close the footer when the CLI exits.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, forward)
+    env = dict(os.environ)
+    try:
+        try:
+            data = read_status(Path.home() / f".config/{MODES[mode][0]}.json")
+            # No cache-usage row for Codex here: it reads the CLI's tmux pane.
+            rows = len(claude_rows()) if mode == "claude" else len(
+                render(data, agy=mode == "agy", grok=mode == "grok", cursor=mode == "cursor"))
+            if shutil.get_terminal_size().lines < rows + 10:
+                raise RuntimeError(f"under {rows + 10} rows")
+            me = os.environ["HC_TERMINAL_ID"]
+            # HC_TERMINAL_ID can be inherited from another terminal (tmux, a pty an agent opened): split only
+            # when that terminal's program is on this launcher's own tty.
+            program = str(call(hc, "get", me).get("pid") or 0)
+            tty = subprocess.run(["ps", "-o", "tty=", "-p", program], stdin=subprocess.DEVNULL, capture_output=True,
+                                 text=True).stdout.strip()
+            if not tty or tty != os.path.basename(os.ttyname(0)):
+                raise RuntimeError(f"{me} is not this terminal")
+            pane = next((t["pane"] for space in call(app, "ls")["spaces"] for tab in space["tabs"]
+                         for t in tab["terminals"] if t["terminal"] == me), None)
+            if not pane:
+                raise RuntimeError(f"{me} has no pane")
+            statusline = str(Path(__file__).resolve().with_name("statusline.py"))
+            footer = call(app, "do", "pane.split", json.dumps({
+                "direction": "down", "pane": pane,
+                "argv": [sys.executable, statusline, "--watch", *([] if mode == "codex" else ["--" + mode])]}))
+            call(app, "do", "pane.focus", json.dumps({"pane": pane}))
+            # Herdr sizes panes in pixels; about 20 px a row plus the pane's own chrome, then corrected from
+            # the rows the footer terminal really got. ponytail: three corrections, a rows API if Herdr adds one.
+            px = 60 + 20 * rows
+            for _ in range(4):
+                call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
+                got = call(hc, "get", footer["terminal"]).get("rows") or rows
+                if got == rows:
+                    break
+                px = max(40, px + 20 * (rows - got))
+            if mode == "claude":
+                # The Claude Code status line drops the table the footer already shows.
+                env["TEAMCLAUDE_HUD"] = "1"
+        except Exception as error:
+            close()
+            footer = {}
+            print(f"{MODES[mode][0]}: starting without the account footer ({error})", file=sys.stderr)
+        child.append(subprocess.Popen(cli, env=env,
+                                      preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)))
+        return child[0].wait()
+    finally:
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            signal.signal(sig, signal.SIG_IGN)
+        close()
+
+
 def launch(arguments):
     mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy", "--grok", "--cursor") else "codex"
     if mode != "codex":
@@ -76,6 +160,11 @@ def launch(arguments):
     if (oneshot(arguments, flags) or (arguments[:1] and arguments[0] in ONESHOT_SUBCOMMANDS.get(mode, ()))
             or not (sys.stdin.isatty() and sys.stdout.isatty())):
         os.execv(proxy, [proxy, "run", "--", *arguments])
+    # Inside a Herdr terminal the CLI runs in it directly and the footer is a Herdr split below it: Herdr then
+    # sees the CLI's working/question/done status, which tmux hides (the CLI's status query never reaches Herdr
+    # through tmux).
+    if os.environ.get("HC_TERMINAL_ID") and not os.environ.get("TMUX"):
+        return herdr_footer(mode, [proxy, "run", "--", *arguments])
     if not tmux:
         sys.exit("Requires tmux. macOS: brew install tmux")
     try:
