@@ -256,7 +256,7 @@ def check():
     # The rest checks the tmux footer, used only where hc is not installed.
     tmux = shutil.which("tmux")
     if not tmux:
-        print("tmux footer checks not run: tmux is not installed (the tmux fallback is untested here)")
+        print("SKIP: tmux footer lifecycle not checked (tmux is not installed)")
         return
     os.environ["TEAMPROXY_HUD_HC_STARTED"] = "1"
     # A terminal too short for the footer starts the CLI alone instead of refusing.

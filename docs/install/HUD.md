@@ -352,7 +352,7 @@ Codex CLI의 기본 `tui.status_line`은 내장 항목만 지원합니다. 이 �
 설치 재실행 및 기존 명령 보존을 확인합니다.
 
 ```sh
-npm run test:hud                  # test/hud/*.py + statusline/ 검사. test_lifecycle.py의 tmux 하단 줄 검사는 tmux가 있을 때만 돈다
+npm run test:hud                  # test/hud/*.py + statusline/ 검사. tmux 하단 줄 검사(test_lifecycle·test_footer_height)는 tmux가 없으면 SKIP을 찍고 넘어간다
 ```
 
 기존 TeamCodex가 있으면 그대로 사용합니다(래퍼에 실행기 분기가 없으면 위 블록을 넣으라고 안내합니다).
