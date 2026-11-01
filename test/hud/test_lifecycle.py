@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 
 HUD = Path(__file__).resolve().parents[2] / "src/hud"
@@ -33,7 +34,113 @@ def alive(pid):
     return result.returncode == 0 and not result.stdout.strip().startswith("Z")
 
 
+def drain(fd, into):
+    try:
+        while chunk := os.read(fd, 4096):
+            into.append(chunk)
+    except OSError:
+        pass
+
+
+def herdr_footer():
+    """Inside a Herdr terminal the CLI runs without tmux (so Herdr sees its status) and the footer is a Herdr
+    split under it, closed when the CLI exits. Fake herdr-app and hc record what the launcher asked."""
+    with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
+        folder = Path(directory)
+        calls = folder / "calls.jsonl"
+        log = f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + chr(10))\n"
+        (folder / "herdr-app").write_text(
+            f"#!{sys.executable}\nimport json, sys\n{log}"
+            "a = sys.argv[1:]\n"
+            "print(json.dumps({'spaces': [{'tabs': [{'terminals': [{'terminal': 't-me', 'pane': 'p-me'}]}]}]}"
+            " if a == ['ls'] else {'pane': 'p-foot', 'terminal': 't-foot'} if a[1:2] == ['pane.split']"
+            " else {'ok': True}))\n")
+        (folder / "hc").write_text(
+            f"#!{sys.executable}\nimport json, os, sys\n{log}"
+            # t-me's program is on the launcher's tty; t-other's (this check) is not.
+            "a = sys.argv[2]\n"
+            "print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}"
+            " if a == 't-other' else {'rows': 1}))\n")
+        for name in ("teamcodex", "teamclaude"):
+            (folder / name).write_text(
+                f"#!{sys.executable}\nimport json, os, sys, time\n"
+                f"open({str(folder / 'cli.json')!r}, 'w').write(json.dumps([sys.argv[1:], os.environ.get('TEAMCLAUDE_HUD')]))\n"
+                # Like `teamcodex run`, the real CLI is a child of the launcher's child.
+                "import subprocess\n"
+                "slow = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']) if os.environ.get('SLOW') else None\n"
+                f"open({str(folder / 'cli.pid')!r}, 'w').write(str(slow.pid if slow else 0))\n"
+                "slow and slow.wait()\n")
+        for name in ("herdr-app", "hc", "teamcodex", "teamclaude"):
+            (folder / name).chmod(0o755)
+
+        def run(arguments, terminal="t-me", stop=False, jobs=True):
+            calls.unlink(missing_ok=True)
+            (folder / "cli.json").unlink(missing_ok=True)
+            (folder / "cli.pid").unlink(missing_ok=True)
+            runner = (f"import launcher, os, sys\nopen({str(folder / 'launcher.pid')!r}, 'w').write(str(os.getpid()))\n"
+                      "launcher.read_status = lambda path: {}\n"
+                      "launcher.render = lambda data, **kw: ['footer']\nlauncher.claude_rows = lambda: ['footer']\n"
+                      f"raise SystemExit(launcher.launch({arguments!r}))\n")
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
+            env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS", "TMUX", "TEAMCLAUDE_HUD")}
+            env.update(PATH=directory + os.pathsep + env["PATH"], HC_TERMINAL_ID=terminal, SLOW="1" if stop else "",
+                       TEST_PID=str(os.getpid()))
+            env.update(PY=sys.executable, RUNNER=runner, HOLD="3" if stop else "0")
+
+            # A shell owns the pty as its controlling terminal and outlives the launcher, as in a real terminal
+            # (the launcher checks that tty; its exit must not hang the terminal up and kill the CLI for it).
+            def own_terminal():
+                os.setsid()
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+            # `set -m`: a job of its own, as an interactive shell (or the wrappers' exec) gives the launcher.
+            # Without it the launcher shares the shell's group, as under `sh -c 'teamcodex; next'`.
+            launched = subprocess.Popen(["/bin/sh", "-c", ("set -m; " if jobs else "")
+                                         + '"$PY" -c "$RUNNER"; code=$?; sleep "$HOLD"; exit $code'],
+                                        cwd=HUD, preexec_fn=own_terminal, stdin=slave, stdout=slave, stderr=slave,
+                                        env=env)
+            os.close(slave)
+            # Read the terminal like a real one: an exiting shell otherwise waits for unread output to drain.
+            output = []
+            threading.Thread(target=lambda: drain(master, output), daemon=True).start()
+            if stop:
+                eventually(lambda: (folder / "cli.pid").exists())
+                os.kill(int((folder / "launcher.pid").read_text()), signal.SIGTERM)
+                eventually(lambda: calls.exists() and '"pane.close"' in calls.read_text())
+                time.sleep(0.3)
+                # Only the launcher was signalled; the CLI under `teamcodex run` must not outlive it. Sharing the
+                # shell's group, only the direct child gets the signal (the shell must live on).
+                grandchild = int((folder / "cli.pid").read_text())
+                assert not jobs or not alive(grandchild), "the CLI was left running"
+                if alive(grandchild):
+                    os.kill(grandchild, signal.SIGKILL)
+            code = launched.wait(timeout=10)
+            os.close(master)
+            recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            return code, json.loads((folder / "cli.json").read_text()), recorded
+
+        code, cli, recorded = run(["--yolo"])
+        assert code == 0 and cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
+        assert [c[:2] for c in recorded] == [["get", "t-me"], ["ls"], ["do", "pane.split"], ["do", "pane.focus"],
+                                             ["do", "layout.resize"], ["get", "t-foot"], ["do", "pane.close"]], recorded
+        assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
+        assert json.loads(recorded[-1][2]) == {"pane": "p-foot"}
+        # Claude's own status line drops the account table only when the footer shows it.
+        assert run(["--claude"])[1] == [["run", "--"], "1"]
+        # A terminal id that is not this terminal's (inherited) splits nothing; the CLI runs alone.
+        code, cli, recorded = run(["--claude"], terminal="t-other")
+        assert code == 0 and cli == [["run", "--"], None] and [c[:2] for c in recorded] == [["get", "t-other"]], recorded
+        # Killing the launcher reaches the CLI and still closes the footer.
+        code, cli, recorded = run([], stop=True)
+        # The shell that started the launcher is not signalled with it (it exits normally, not by SIGTERM).
+        assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
+        code, cli, recorded = run([], stop=True, jobs=False)
+        assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
+
+
 def check():
+    # The footer cases must not see the Herdr terminal this check may run in.
+    os.environ.pop("HC_TERMINAL_ID", None)
     tmux = shutil.which("tmux")
     assert tmux, "Install tmux to run this check"
     root = HUD
@@ -96,6 +203,8 @@ def check():
         os.close(master)
         assert json.loads(record.read_text()) == ["run", "--", "--model", "m"], record.read_text()
     print("PASS: a short terminal runs the CLI without the footer")
+    herdr_footer()
+    print("PASS: a Herdr terminal runs the CLI without tmux, the footer as a Herdr split")
     for mode in ("close", "detach", "keep-alive", "two-clients", "attach-failure", "keep-attach-failure",
                  "stale-server-cwd", "agy", "claude"):
         with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
