@@ -71,7 +71,11 @@ def herdr_footer(mode, cli):
             raise SystemExit(1)
         for each in (signal.SIGHUP, signal.SIGTERM):
             signal.signal(each, signal.SIG_IGN)
-        os.killpg(os.getpgrp(), sig)
+        # A shell without job control (`sh -c 'teamcodex; next'`) shares the group: then only the child.
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpgrp(), sig)
+        else:
+            child[0].send_signal(sig)
 
     # Ctrl+C belongs to the CLI; the launcher stays to close the footer when the CLI exits.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -92,7 +96,7 @@ def herdr_footer(mode, cli):
             program = str(call(hc, "get", me).get("pid") or 0)
             tty = subprocess.run(["ps", "-o", "tty=", "-p", program], stdin=subprocess.DEVNULL, capture_output=True,
                                  text=True).stdout.strip()
-            if not tty or tty != os.path.basename(os.ttyname(0)):
+            if not tty or tty != os.ttyname(0).removeprefix("/dev/"):
                 raise RuntimeError(f"{me} is not this terminal")
             pane = next((t["pane"] for space in call(app, "ls")["spaces"] for tab in space["tabs"]
                          for t in tab["terminals"] if t["terminal"] == me), None)

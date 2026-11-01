@@ -73,7 +73,7 @@ def herdr_footer():
         for name in ("herdr-app", "hc", "teamcodex", "teamclaude"):
             (folder / name).chmod(0o755)
 
-        def run(arguments, terminal="t-me", stop=False):
+        def run(arguments, terminal="t-me", stop=False, jobs=True):
             calls.unlink(missing_ok=True)
             (folder / "cli.json").unlink(missing_ok=True)
             (folder / "cli.pid").unlink(missing_ok=True)
@@ -93,7 +93,10 @@ def herdr_footer():
             def own_terminal():
                 os.setsid()
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-            launched = subprocess.Popen(["/bin/sh", "-c", '"$PY" -c "$RUNNER"; code=$?; sleep "$HOLD"; exit $code'],
+            # `set -m`: a job of its own, as an interactive shell (or the wrappers' exec) gives the launcher.
+            # Without it the launcher shares the shell's group, as under `sh -c 'teamcodex; next'`.
+            launched = subprocess.Popen(["/bin/sh", "-c", ("set -m; " if jobs else "")
+                                         + '"$PY" -c "$RUNNER"; code=$?; sleep "$HOLD"; exit $code'],
                                         cwd=HUD, preexec_fn=own_terminal, stdin=slave, stdout=slave, stderr=slave,
                                         env=env)
             os.close(slave)
@@ -105,8 +108,12 @@ def herdr_footer():
                 os.kill(int((folder / "launcher.pid").read_text()), signal.SIGTERM)
                 eventually(lambda: calls.exists() and '"pane.close"' in calls.read_text())
                 time.sleep(0.3)
-                # Only the launcher was signalled; the CLI under `teamcodex run` must not outlive it.
-                assert not alive(int((folder / "cli.pid").read_text())), "the CLI was left running"
+                # Only the launcher was signalled; the CLI under `teamcodex run` must not outlive it. Sharing the
+                # shell's group, only the direct child gets the signal (the shell must live on).
+                grandchild = int((folder / "cli.pid").read_text())
+                assert not jobs or not alive(grandchild), "the CLI was left running"
+                if alive(grandchild):
+                    os.kill(grandchild, signal.SIGKILL)
             code = launched.wait(timeout=10)
             os.close(master)
             recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
@@ -125,7 +132,10 @@ def herdr_footer():
         assert code == 0 and cli == [["run", "--"], None] and [c[:2] for c in recorded] == [["get", "t-other"]], recorded
         # Killing the launcher reaches the CLI and still closes the footer.
         code, cli, recorded = run([], stop=True)
-        assert recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
+        # The shell that started the launcher is not signalled with it (it exits normally, not by SIGTERM).
+        assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
+        code, cli, recorded = run([], stop=True, jobs=False)
+        assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
 
 
 def check():
