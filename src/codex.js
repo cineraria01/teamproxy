@@ -421,10 +421,13 @@ export function buildCodexProxyArgs(port, userArgs, { routerBaseUrl = null } = {
     '-c',
     `model_providers.teamcodex_proxy={ ${provider} }`,
   ];
+  // -c overrides need embedded mode (Codex 0.166+ notice otherwise); a repeated flag is a parse error.
+  const end = userArgs.indexOf('--');
+  const noDaemon = userArgs.slice(0, end < 0 ? undefined : end).includes('--no-daemon') ? [] : ['--no-daemon'];
   if (userArgs[0] === 'resume') {
-    return [...userArgs, ...overrides];
+    return [...noDaemon, ...userArgs, ...overrides];
   }
-  return [...overrides, ...userArgs];
+  return [...noDaemon, ...overrides, ...userArgs];
 }
 
 export function assertSafeCodexArgs(userArgs) {

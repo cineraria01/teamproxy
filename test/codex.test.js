@@ -127,16 +127,39 @@ test('buildCodexProxyArgs uses a login-free HTTP-only local provider', () => {
 
   // Then
   assert.deepEqual(args.slice(-3), userArgs);
-  assert.equal(args[0], '-c');
-  assert.equal(args[1], 'model_provider="teamcodex_proxy"');
-  assert.equal(args[2], '-c');
-  assert.match(args[3], /base_url = "http:\/\/127\.0\.0\.1:4567\/codex"/);
-  assert.match(args[3], /requires_openai_auth = false/);
-  assert.match(args[3], /supports_websockets = false/);
-  assert.doesNotMatch(args[3], /env_key/);
+  // -c overrides need Codex's embedded mode; asking for it up front avoids the fallback notice
+  assert.equal(args[0], '--no-daemon');
+  assert.equal(args[1], '-c');
+  assert.equal(args[2], 'model_provider="teamcodex_proxy"');
+  assert.equal(args[3], '-c');
+  assert.match(args[4], /base_url = "http:\/\/127\.0\.0\.1:4567\/codex"/);
+  assert.match(args[4], /requires_openai_auth = false/);
+  assert.match(args[4], /supports_websockets = false/);
+  assert.doesNotMatch(args[4], /env_key/);
   // image_gen is only offered to an OpenAI-auth or actor-authorized provider
-  assert.match(args[3], /http_headers = \{ "x-openai-actor-authorization" = "teamcodex" \}/);
+  assert.match(args[4], /http_headers = \{ "x-openai-actor-authorization" = "teamcodex" \}/);
   assert.equal(args.some(arg => arg.startsWith('chatgpt_base_url=')), false);
+});
+
+test('buildCodexProxyArgs adds --no-daemon once, at the root, keeping argument order', () => {
+  const count = args => args.filter(arg => arg === '--no-daemon').length;
+  // Given: interactive prompt, exec, resume — one root-level flag, user args untouched
+  for (const userArgs of [['say hello'], ['exec', '--json', 'x'], ['review'], ['resume', 'ID', 'next']]) {
+    const args = buildCodexProxyArgs(4567, userArgs);
+    assert.equal(args[0], '--no-daemon');
+    assert.equal(count(args), 1);
+  }
+  // resume keeps the provider overrides last
+  assert.deepEqual(buildCodexProxyArgs(4567, ['resume', 'ID']).slice(0, 3), ['--no-daemon', 'resume', 'ID']);
+  assert.equal(buildCodexProxyArgs(4567, ['resume', 'ID']).at(-2), '-c');
+  // Given: the caller already asked for it (Codex rejects a repeat) — nothing added
+  for (const userArgs of [['--no-daemon'], ['--no-daemon', 'hi'], ['resume', '--no-daemon', 'ID']]) {
+    assert.equal(count(buildCodexProxyArgs(4567, userArgs)), 1);
+  }
+  // Given: the literal text after `--` is a prompt, not the flag
+  const prompt = buildCodexProxyArgs(4567, ['--', '--no-daemon']);
+  assert.equal(prompt[0], '--no-daemon');
+  assert.deepEqual(prompt.slice(-2), ['--', '--no-daemon']);
 });
 
 test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then PATH', () => {
@@ -228,22 +251,22 @@ test('buildCodexProxyArgs router mode points Codex at the router capability URL,
 
   // Then: same provider id, so nothing else about the launch changes
   assert.deepEqual(args.slice(-2), userArgs);
-  assert.equal(args[1], 'model_provider="teamcodex_proxy"');
-  assert.match(args[3], /base_url = "http:\/\/127\.0\.0\.1:4202\/_codex-router\/caller-key\/v1"/);
-  assert.doesNotMatch(args[3], /4567\/codex/);
+  assert.equal(args[2], 'model_provider="teamcodex_proxy"');
+  assert.match(args[4], /base_url = "http:\/\/127\.0\.0\.1:4202\/_codex-router\/caller-key\/v1"/);
+  assert.doesNotMatch(args[4], /4567\/codex/);
   // Never the ChatGPT login and never an env_key bearer: the router ignores
   // the bearer once the capability is in the path, and a signed-in Codex sends
   // its own session token for native GPT models regardless of env_key.
-  assert.match(args[3], /requires_openai_auth = false/);
-  assert.doesNotMatch(args[3], /env_key/);
-  assert.match(args[3], /X-TeamCodex-Invocation/);
+  assert.match(args[4], /requires_openai_auth = false/);
+  assert.doesNotMatch(args[4], /env_key/);
+  assert.match(args[4], /X-TeamCodex-Invocation/);
   // The router answers a bearer-less image request with native_session_required,
   // so router mode carries a placeholder the pool replaces.
-  assert.match(args[3], /http_headers = \{ "x-openai-actor-authorization" = "teamcodex", "authorization" = "Bearer teamcodex-pool" \}/);
+  assert.match(args[4], /http_headers = \{ "x-openai-actor-authorization" = "teamcodex", "authorization" = "Bearer teamcodex-pool" \}/);
 
   // And: the plain pool launch is unchanged and sends no placeholder bearer
-  assert.match(buildCodexProxyArgs(4567, userArgs)[3], /base_url = "http:\/\/127\.0\.0\.1:4567\/codex"/);
-  assert.doesNotMatch(buildCodexProxyArgs(4567, userArgs)[3], /"authorization"/);
+  assert.match(buildCodexProxyArgs(4567, userArgs)[4], /base_url = "http:\/\/127\.0\.0\.1:4567\/codex"/);
+  assert.doesNotMatch(buildCodexProxyArgs(4567, userArgs)[4], /"authorization"/);
 });
 
 test('resolveCodexRouter is off by default and embeds the caller key from config, env, or file', () => {

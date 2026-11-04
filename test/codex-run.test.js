@@ -81,9 +81,10 @@ console.log(JSON.stringify({
     assert.deepEqual(child.args.slice(-3), ['exec', '--json', 'say hello']);
     // No approval prompts by default (the flag `teamcodex --yolo` maps to), before the provider overrides.
     assert.equal(child.args[0], '--dangerously-bypass-approvals-and-sandbox');
-    assert.equal(child.args[2], 'model_provider="teamcodex_proxy"');
-    assert.match(child.args[4], /requires_openai_auth = false/);
-    assert.match(child.args[4], /supports_websockets = false/);
+    assert.equal(child.args[1], '--no-daemon');
+    assert.equal(child.args[3], 'model_provider="teamcodex_proxy"');
+    assert.match(child.args[5], /requires_openai_auth = false/);
+    assert.match(child.args[5], /supports_websockets = false/);
     assert.equal(child.args.some(arg => arg.startsWith('chatgpt_base_url=')), false);
     // An explicit approval or sandbox choice (or the flag itself) is kept as given, with nothing added.
     for (const args of [['exec', '-s', 'read-only', 'x'], ['exec', '-sread-only', 'x'], ['--sandbox=workspace-write'],
