@@ -81,6 +81,36 @@ cat > ~/.local/bin/teamclaude <<EOF
 PKG=\$HOME/.local/share/teamclaude-global/lib/node_modules/teamcodex
 # No args or Claude flags open Claude Code with the account footer (src/hud/launcher.py --claude runs teamclaude run -- …;
 # -p and non-terminal runs skip the footer). A Claude subcommand goes after -- and runs without it.
+EOF
+# 중복 재개 가드(2026-11-04): 같은 세션 ID를 이미 살아 있는 Claude가 돌리면 --resume/-r <ID>를 종료 75로 거절한다.
+cat >> ~/.local/bin/teamclaude <<'EOF'
+# >>> resume-guard (2026-11-04, selvi .qa/2026-11-04/concurrent-edit-guard 1단계 A): a session runs once.
+# --resume/-r <id> while ~/.claude/sessions/<pid>.json (Claude writes it) shows that sessionId in a live process
+# (pid alive, procStart = its `ps lstart` in UTC) exits 75. No bypass; an unreadable registry goes on.
+# Runs on every path (footer, run, --), so the footer calling this wrapper again checks again before Claude starts.
+_rg_id= _rg_prev=
+for _rg_a in "$@"; do
+  case $_rg_prev in --resume|-r) _rg_id=$_rg_a ;; esac
+  case $_rg_a in --resume=*) _rg_id=${_rg_a#--resume=} ;; esac
+  _rg_prev=$_rg_a
+done
+if [ -n "$_rg_id" ]; then
+  _rg_us=$(printf '\037')
+  while IFS=$_rg_us read -r _rg_pid _rg_st _rg_name _rg_cwd; do
+    [ -n "$_rg_pid" ] && kill -0 "$_rg_pid" 2>/dev/null || continue
+    [ -z "$_rg_st" ] || [ "$(echo $(LC_ALL=C TZ=UTC ps -o lstart= -p "$_rg_pid" 2>/dev/null))" = "$(echo $_rg_st)" ] || continue
+    echo "teamclaude: 세션 $(printf %.8s "$_rg_id")는 pid $_rg_pid($_rg_name, cwd $_rg_cwd)이 이미 돌리는 중. hc ls / hc read로 확인하라." >&2
+    exit 75
+  done <<_RG_EOF
+$(_rg_q='select(.sessionId == $s) | [.pid, .procStart, .name, .cwd] | map(. // "" | tostring) | join("\u001f")'
+  _rg_d=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions   # files have no trailing newline: a JSON stream, per file if one is broken
+  /usr/bin/jq -r --arg s "$_rg_id" "$_rg_q" "$_rg_d"/*.json 2>/dev/null ||
+    for _rg_f in "$_rg_d"/*.json; do /usr/bin/jq -r --arg s "$_rg_id" "$_rg_q" "$_rg_f" 2>/dev/null; done)
+_RG_EOF
+fi
+# <<< resume-guard
+EOF
+cat >> ~/.local/bin/teamclaude <<EOF
 case "\${1-}" in
   -h|--help) ;;
   --) shift; set -- run -- "\$@" ;;
@@ -91,6 +121,13 @@ EOF
 chmod 755 ~/.local/bin/teamclaude
 teamclaude --help | head -3
 ```
+
+가운데 `<<'EOF'` 조각은 중복 재개 가드다(2026-11-04, 같은 세션을 두 프로세스가 이어 돌려 서로의 작업을 덮은 일 뒤). `--resume`·`-r`·`--resume=`에 준 세션 ID를
+Claude가 스스로 쓰는 `~/.claude/sessions/<pid>.json`에서 찾아, 그 pid가 살아 있고 시작 시각(`procStart` = UTC `ps -o lstart=`)이 같으면
+종료 75로 거절한다(pid 재사용은 시작 시각이 달라 통과). 우회 변수는 없고 레지스트리를 못 읽으면 그대로 진행한다. 하단 줄 실행기가
+래퍼를 다시 불러도 Claude가 뜨기 전이라 자기 자신을 막지 않는다. `--continue`·ID 없는 선택기·맨 `claude --resume`은 이 래퍼를 거치지
+않아 못 막는다. 시험: `test/install-doc-resume-guard.test.js`. 이미 깔린 래퍼에는 `# >>> resume-guard`~`# <<< resume-guard` 블록만
+`case "${1-}" in` 줄 앞에 넣으면 된다.
 
 ### 1-3. agy 풀 래퍼 `~/.local/bin/teamagy` 만들기 (선택)
 
