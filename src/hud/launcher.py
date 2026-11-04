@@ -49,6 +49,14 @@ def oneshot(arguments, flags):
     return any(a.startswith("-") and a.lstrip("-").split("=")[0] in flags for a in arguments)
 
 
+def with_effort(arguments):
+    # Claude Code's settings.json cannot store max and CLAUDE_CODE_EFFORT_LEVEL would override subagent effort, so
+    # the conversation session gets max from the launcher unless the caller chose an effort (2026-11-04).
+    if any(a == "--effort" or a.startswith("--effort=") for a in arguments):
+        return arguments
+    return [*arguments, "--effort", "max"]
+
+
 def herdr_footer(mode, cli):
     """Run the CLI in this Herdr terminal with the account footer as a Herdr split under it. Without
     herdr-app, or when this terminal has no pane (a background hc run), the CLI runs alone."""
@@ -180,6 +188,7 @@ def launch(arguments):
                  "  teamcodex -- resume ID     Continue an existing conversation\n" if mode == "codex" else
                  f"  {command} -p PROMPT          Print mode, no footer (also without a terminal)\n"
                  f"  {command} -- SUBCOMMAND      {cli} subcommand, no footer\n")
+              + (f"  {command}                  … (Claude: --effort max by default)\n" if mode == "claude" else "")
               + f"  {command} --yolo               {cli} without approval prompts ({yolo})\n"
               + f"  {command} --keep-alive [{cli} arguments]  Keep running after detach\n"
               "  Outside Herdr core it runs in a new hc terminal: Ctrl+\\ detaches, hc attach ADDRESS reattaches.\n"
@@ -196,6 +205,8 @@ def launch(arguments):
     if (oneshot(arguments, flags) or (arguments[:1] and arguments[0] in ONESHOT_SUBCOMMANDS.get(mode, ()))
             or not (sys.stdin.isatty() and sys.stdout.isatty())):
         os.execv(proxy, [proxy, "run", "--", *arguments])
+    if mode == "claude" and not subcommand:
+        arguments = with_effort(arguments)
     # Inside a Herdr terminal the CLI runs in it directly and the footer is a Herdr split below it: Herdr then
     # sees the CLI's working/question/done status, which tmux hides (the CLI's status query never reaches Herdr
     # through tmux).

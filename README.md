@@ -101,7 +101,7 @@ npm 레지스트리의 `teamcodex`. 이름은 같지만 이 포크의 수정이 
 (Claude Code·agy `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, grok `--always-approve`, cursor-agent는 자기 `--yolo`).
 2026-10-31부터는 `--yolo` 없이도 기본이다: `<풀> run`(하단 줄, `--` 경로, 인쇄·비터미널 실행 모두)이 같은 플래그를 맨 앞에 붙인다.
 승인·권한·샌드박스 모드를 직접 주면(예: Claude `--permission-mode plan`, Codex `-s read-only`·`-c sandbox_mode=…`, agy·cursor-agent `--mode`, `--sandbox`) 붙이지 않고, Claude 하위 명령(`teamclaude -- mcp list`)도 그대로다.
-실행기는 `--effort`를 더하지 않는다. Claude Code 대화 세션의 추론 단계는 Claude Code 설정(`/effort`가 저장하는 `modelSettings.<모델>.effortLevel`)을 따르고, 그 세션만 다르게 하려면 `--effort max`처럼 직접 준다.
+Claude Code 대화 세션(하단 줄 경로)에는 `--effort`를 주지 않으면 `--effort max`를 더한다(2026-11-04 사용자 결정). 인쇄 모드와 `--` 하위 명령에는 더하지 않는다.
 
 ```sh
 # Claude

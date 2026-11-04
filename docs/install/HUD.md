@@ -64,9 +64,9 @@ Codex `-s`·`-a`·`--approve-for-me`·`--yolo`·`-c approval_policy=…`·`-c sa
 cursor-agent `-f`·`--force`·`--mode`·`--plan`·`--sandbox`. Claude 하위 명령(`teamclaude -- mcp list`)과 관리 명령(`status`·`server` 등)은 그대로입니다.
 Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이지 않습니다(안전 거부 뒤 권한을 올리지 않는 기존 설계).
 
-### Claude 대화 세션의 추론 단계
+### Claude 대화 세션은 추론 max
 
-실행기는 `--effort`를 더하지 않습니다. `teamclaude`로 띄운 Claude Code 대화 세션은 Claude Code 설정을 따릅니다(`/effort xhigh`가 `~/.claude/settings.json`의 `modelSettings.<모델>.effortLevel`에 저장). 설정은 max를 저장하지 못하므로 max가 필요한 세션만 `teamclaude --effort max`로 띄우거나 세션 안에서 `/effort max`를 칩니다. 2026-10-12(068bf62)부터 실행기가 max를 기본으로 붙였으나 2026-10-15 사용자 결정 "기본 effort를 xhigh로"에 따라 없앴습니다.
+`teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort max`를 더합니다. settings.json `effortLevel`은 max를 저장하지 못하고 `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 실행기가 맡습니다. `--effort high` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다. 2026-10-12(068bf62)에 넣었다가 2026-10-15(cba0ee5)에 뺐고, 2026-11-04 사용자 결정 "teamclaude 기본이 effort max"로 다시 넣었습니다.
 
 ### 세 하단 줄 공통 tmux 설정
 
