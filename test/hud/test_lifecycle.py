@@ -126,10 +126,10 @@ def herdr_footer():
         assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
         assert json.loads(recorded[-1][2]) == {"pane": "p-foot"}
         # Claude's own status line drops the account table only when the footer shows it.
-        assert run(["--claude"])[1] == [["run", "--", "--effort", "max"], "1"]
+        assert run(["--claude"])[1] == [["run", "--", "--effort", "xhigh"], "1"]
         # A terminal id that is not this terminal's (inherited) splits nothing; the CLI runs alone.
         code, cli, recorded = run(["--claude"], terminal="t-other")
-        assert code == 0 and cli == [["run", "--", "--effort", "max"], None] and [c[:2] for c in recorded] == [["get", "t-other"]], recorded
+        assert code == 0 and cli == [["run", "--", "--effort", "xhigh"], None] and [c[:2] for c in recorded] == [["get", "t-other"]], recorded
         # Killing the launcher reaches the CLI and still closes the footer.
         code, cli, recorded = run([], stop=True)
         # The shell that started the launcher is not signalled with it (it exits normally, not by SIGTERM).
@@ -223,11 +223,12 @@ def check():
         assert oneshot(flags, modes["cursor"][2]), flags
     assert not oneshot(["--model", "gpt-5"], modes["cursor"][2]) and not oneshot(["--resume", "x"], modes["cursor"][2])
     assert modes["cursor"][1] == "Cursor" and modes["cursor"][3] == "C-j" and modes["cursor"][4] == "--yolo"
-    # Claude conversations default to --effort max; an explicit effort is kept.
-    assert launcher.with_effort([]) == ["--effort", "max"]
+    # Claude conversations default to --effort xhigh; an explicit effort (max included) is kept.
+    assert launcher.with_effort([]) == ["--effort", "xhigh"]
     assert launcher.with_effort(["--effort", "high"]) == ["--effort", "high"]
+    assert launcher.with_effort(["--effort", "max"]) == ["--effort", "max"]
     assert launcher.with_effort(["--effort=low", "-c"]) == ["--effort=low", "-c"]
-    assert launcher.with_effort(["--dangerously-skip-permissions"]) == ["--dangerously-skip-permissions", "--effort", "max"]
+    assert launcher.with_effort(["--dangerously-skip-permissions"]) == ["--dangerously-skip-permissions", "--effort", "xhigh"]
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         fake = Path(directory) / "teamagy"
         fake.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
@@ -357,7 +358,7 @@ def check():
                     pids = [parent, child]
                     expected = ["--model", "m"] if mode in ("agy", "claude") else ["resume", "test-id"]
                     if mode == "claude":
-                        expected += ["--effort", "max"]
+                        expected += ["--effort", "xhigh"]
                     assert forwarded == ["run", "--", *expected], forwarded
                     assert launched_in == str(root), launched_in
                     session = sessions().split()[0]

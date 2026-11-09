@@ -64,9 +64,9 @@ Codex `-s`·`-a`·`--approve-for-me`·`--yolo`·`-c approval_policy=…`·`-c sa
 cursor-agent `-f`·`--force`·`--mode`·`--plan`·`--sandbox`. Claude 하위 명령(`teamclaude -- mcp list`)과 관리 명령(`status`·`server` 등)은 그대로입니다.
 Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이지 않습니다(안전 거부 뒤 권한을 올리지 않는 기존 설계).
 
-### Claude 대화 세션은 추론 max
+### Claude 대화 세션은 추론 xhigh
 
-`teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort max`를 더합니다. settings.json `effortLevel`은 max를 저장하지 못하고 `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 실행기가 맡습니다. `--effort high` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다. 2026-10-12(068bf62)에 넣었다가 2026-10-15(cba0ee5)에 뺐고, 2026-11-04 사용자 결정 "teamclaude 기본이 effort max"로 다시 넣었습니다.
+`teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort xhigh`를 더합니다. 실행기는 `--model`을 붙이지 않습니다. `teamclaude run`이 `--model`이 없으면 `~/.config/teamclaude.json`의 `launchModel`을 붙이므로, 지휘 기본 모델을 바꿀 때는 `launchModel`을 `~/.claude/settings.json`의 `model`과 같게 둡니다(2026-11-10 둘 다 `claude-fable-5-2`). `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 쓰지 않고 실행기가 맡습니다. `--effort max` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다. 2026-10-12(068bf62)에 max로 넣었다가 2026-10-15(cba0ee5)에 뺐고, 2026-11-04 사용자 결정 "teamclaude 기본이 effort max"로 다시 넣었으며, 2026-11-10 사용자 결정(지휘 기본 Fable 5.2 xhigh, 코드 작성·조사·감사 worker는 `teamclaude run -- --model claude-opus-5-5 --effort max`)으로 xhigh로 바꿨습니다.
 
 ### 세 하단 줄 공통 tmux 설정
 
