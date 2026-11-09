@@ -50,11 +50,13 @@ def oneshot(arguments, flags):
 
 
 def with_effort(arguments):
-    # Claude Code's settings.json cannot store max and CLAUDE_CODE_EFFORT_LEVEL would override subagent effort, so
-    # the conversation session gets max from the launcher unless the caller chose an effort (2026-11-04).
+    # The conversation session gets xhigh from the launcher unless the caller chose an effort; CLAUDE_CODE_EFFORT_LEVEL
+    # is not used because it would override subagent effort too (2026-11-04 to 11-09 this was max).
+    # 2026-11-10 사용자 결정: 지휘 기본 Fable 5.2 xhigh, 모델은 settings.json 기본값
+    # (no --model here: `<pool> run` adds the config's launchModel, so keep that equal to the settings.json model).
     if any(a == "--effort" or a.startswith("--effort=") for a in arguments):
         return arguments
-    return [*arguments, "--effort", "max"]
+    return [*arguments, "--effort", "xhigh"]
 
 
 def herdr_footer(mode, cli):
@@ -188,7 +190,7 @@ def launch(arguments):
                  "  teamcodex -- resume ID     Continue an existing conversation\n" if mode == "codex" else
                  f"  {command} -p PROMPT          Print mode, no footer (also without a terminal)\n"
                  f"  {command} -- SUBCOMMAND      {cli} subcommand, no footer\n")
-              + (f"  {command}                  … (Claude: --effort max by default)\n" if mode == "claude" else "")
+              + (f"  {command}                  … (Claude: --effort xhigh by default)\n" if mode == "claude" else "")
               + f"  {command} --yolo               {cli} without approval prompts ({yolo})\n"
               + f"  {command} --keep-alive [{cli} arguments]  Keep running after detach\n"
               "  Outside Herdr core it runs in a new hc terminal: Ctrl+\\ detaches, hc attach ADDRESS reattaches.\n"
