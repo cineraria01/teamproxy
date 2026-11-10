@@ -948,12 +948,17 @@ export class AccountManager {
 
   /**
    * Display staleness: this account's numbers were last refreshed more than
-   * quotaStaleMs ago. Accounts without an age (other pools, an old snapshot)
-   * or without numbers to show are never stale, so their display is unchanged.
+   * quotaStaleMs ago. Only accounts the idle re-measure keeps fresh — usable
+   * now (the side-effect-free twin of _isAvailable, so a status poll never
+   * heals a throttle) — can be stale: a near-quota, throttled, disabled or
+   * errored row keeps its usual look (its numbers only rise until the reset,
+   * and its red bar must not go gray). Accounts without an age (other pools,
+   * an old snapshot) or without numbers to show are never stale either.
    */
   isQuotaStale(account) {
     const at = account.quota.updatedAt;
-    return Number.isFinite(at) && Date.now() - at > this.quotaStaleMs && this._isMeasured(account);
+    return Number.isFinite(at) && Date.now() - at > this.quotaStaleMs
+      && this._isMeasured(account) && this._isUsableNow(account);
   }
 
   /**

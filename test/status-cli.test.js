@@ -151,8 +151,8 @@ test('status appends the age to a stale account and leaves fresh lines alone', a
   assert.equal(res.status, 0, res.stderr);
   const block = name => res.stdout.split('\n\n').find(b => b.includes(`  ${name} (`));
   assert.match(block('fresh@example.com'), /\n {4}Session: {2}10\.0% used {4}Weekly: 20\.0% used\n/);
-  assert.match(block('stale@example.com'), /\n {4}Session: {2}10\.0% used {4}Weekly: 20\.0% used {4}\(2h 전\)\n/);
-  assert.match(block('api@example.com'), /\n {4}Tokens: {3}50\.0% used {4}Requests: - used {4}\(2h 전\)\n/);
+  assert.match(block('stale@example.com'), /\n {4}Session: {2}10\.0% used {4}Weekly: 20\.0% used {4}\(2h ago\)\n/);
+  assert.match(block('api@example.com'), /\n {4}Tokens: {3}50\.0% used {4}Requests: - used {4}\(2h ago\)\n/);
   assert.doesNotMatch(res.stdout, /\x1b\[/, 'no ANSI when stdout is not a terminal');
 });
 

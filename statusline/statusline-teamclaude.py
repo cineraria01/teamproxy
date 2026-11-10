@@ -15,10 +15,9 @@ D-DAY) on the right:
 
 Every cell sticks to ASCII (marker '>', 'x4', '!HH:MM' for rate limits)
 because ambiguous-width glyphs (▶ × ⛔) render 2 cells wide in CJK
-terminals and would break the column alignment. The one exception is the
-'2h 전' tag after a row whose numbers the proxy reports as stale
-(quotaStale): Hangul is always 2 cells wide and is counted as such, and the
-row's gauges lose their colored fill. When the installed
+terminals and would break the column alignment. A row whose numbers the
+proxy reports as stale (quotaStale) gets gray gauges and its age ('2h ago')
+at the end. When the installed
 teamclaude build lacks `status --json`, the running proxy's
 `/teamclaude/status` endpoint is read directly instead.
 
@@ -57,7 +56,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import unicodedata
 from datetime import date, datetime, timezone
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -134,9 +132,7 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def visible_len(text):
-    # Wide characters (the stale tag's Hangul) take two terminal cells.
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
-               for c in _ANSI_RE.sub("", text))
+    return len(_ANSI_RE.sub("", text))
 
 
 _GRAY_BG_RE = re.compile(r"\033\[48;5;(\d+)m")
@@ -499,11 +495,11 @@ def fmt_remaining(value, now=None):
 
 
 def fmt_age(updated_at, now):
-    """'2h 전': how long ago the proxy refreshed an account's numbers."""
+    """'2h ago': how long ago the proxy refreshed an account's numbers."""
     minutes = max(0, int((now - updated_at / 1000) // 60))
     if minutes < 60:
-        return f"{minutes}m 전"
-    return f"{minutes // 60}h 전" if minutes < 1440 else f"{minutes // 1440}d 전"
+        return f"{minutes}m ago"
+    return f"{minutes // 60}h ago" if minutes < 1440 else f"{minutes // 1440}d ago"
 
 
 def bar(ratio, reset, now, width=None, track=DEFAULT_TRACK, stale=False):

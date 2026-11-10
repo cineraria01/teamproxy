@@ -17,13 +17,13 @@ Fable 5
 
 teamclaude TUI를 반영한 대시보드입니다. 최상단 `FLEET` 줄은 활성 계정들을 풀링합니다(창별 평균 사용률, 가장 빠른 리셋 시각, 비활성 계정이 제외되면 `+N off` 표기). 각 계정 줄에는 요금제(`Max 20x` / `Pro`), 상태 컬럼, 세 개의 쿼터 게이지 — `Ses` 5시간 세션, `Wk` 전체 7일, `Fbl` 모델별 7일(Fable, 해당 창이 없으면 Sonnet 창) — 이 `사용률% 리셋까지-남은-시간` 형태로 표시됩니다. 오른쪽 `End` 막대는 날짜와 D-day를 함께 표시하며 추정 결제일에는 `~`를 붙입니다.
 
-컬러 터미널에서는 게이지가 사용률만큼 배경색이 채워진 막대로 그려집니다(위 예시의 대괄호는 `NO_COLOR` 폴백 표기). 회색 `-` 막대는 teamclaude가 해당 창을 보고하지 않았다는 뜻입니다. 모호폭 문자(`▶ × ⛔`)가 2칸을 차지하는 CJK 터미널에서도 칸이 어긋나지 않도록 모든 표시는 ASCII만 사용합니다(아래 낡은 값 표시의 `전`만 예외로, 늘 2칸이라 2칸으로 셉니다).
+컬러 터미널에서는 게이지가 사용률만큼 배경색이 채워진 막대로 그려집니다(위 예시의 대괄호는 `NO_COLOR` 폴백 표기). 회색 `-` 막대는 teamclaude가 해당 창을 보고하지 않았다는 뜻입니다. 모호폭 문자(`▶ × ⛔`)가 2칸을 차지하는 CJK 터미널에서도 칸이 어긋나지 않도록 모든 표시는 ASCII만 사용합니다.
 
 - `>` — 현재 요청을 처리 중인 계정
 - 상태 컬럼의 `!HH:MM` — 해당 시각까지 레이트리밋에 걸린 계정
 - `off` — 로테이션에서 제외된 계정
 - 막대 색상: 초록 < 70% < 노랑 < 90% < 빨강
-- 색이 빠진 회색 막대와 줄 끝의 `2h 전` — 프록시가 그 계정의 숫자를 그만큼 전에 마지막으로 갱신했다(30분 넘게 오래됨, 다른 기기의 사용분이 빠졌을 수 있음). 프록시는 쉬는 계정을 15분마다 다시 잰다(`quotaMaxAgeMs`, 2026-11-10)
+- 색이 빠진 회색 막대와 줄 끝의 `2h ago` — 프록시가 그 계정의 숫자를 그만큼 전에 마지막으로 갱신했다(30분 넘게 오래됨, 다른 기기의 사용분이 빠졌을 수 있음). 지금 쓸 수 있는 계정만 이렇게 보이고, 한도 근처·쉼·꺼짐·오류 계정은 원래 색 그대로다. 프록시는 쉬는 계정을 15분마다 다시 잰다(`quotaMaxAgeMs`, 2026-11-10)
 - `TC down` — 프록시가 실행 중이 아님, `teamclaude not installed` — CLI가 설치되지 않음
 
 ### 2026-09-11 날짜 표시 복구
@@ -189,17 +189,17 @@ In a color terminal the gauges are background-filled bars proportional to
 usage (the brackets above are the `NO_COLOR` fallback); a gray `-` bar means
 teamclaude did not report that window. Every glyph is ASCII so the columns
 stay aligned in CJK terminals where ambiguous-width characters (`▶ × ⛔`)
-occupy two cells; the one exception, the stale tag's `전`, is always two
-cells wide and counted as such.
+occupy two cells.
 
 - `>` — the account currently serving your requests
 - `!HH:MM` in the status column — the account is rate-limited until that time
 - `off` — the account is excluded from rotation
 - bar colors: green < 70% < yellow < 90% < red
-- gray bars with `2h 전` at the end of the row — the proxy last refreshed
+- gray bars with `2h ago` at the end of the row — the proxy last refreshed
   that account's numbers that long ago (over 30 minutes; usage from other
-  machines may be missing). The proxy re-measures idle accounts every 15
-  minutes (`quotaMaxAgeMs`, 2026-11-10)
+  machines may be missing). Only accounts usable right now show this;
+  near-quota, throttled, disabled and errored rows keep their colors. The
+  proxy re-measures idle accounts every 15 minutes (`quotaMaxAgeMs`, 2026-11-10)
 - `TC down` — the proxy isn't running; `teamclaude not installed` — the CLI is missing
 
 ### Requirements

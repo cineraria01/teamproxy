@@ -386,6 +386,43 @@ test('a failed re-measure parks nothing and refreshes no token (401, 403, 5xx, 4
   }
 });
 
+// The commonest 429 a re-measure meets: other machines used the account up.
+// That is a measurement, not a failure — only the numbers change, and the
+// account leaves rotation through them alone (no throttle, no park).
+test('a re-measure that meets an exhausted account (429 rejected) only takes its numbers', async () => {
+  const up = await fakeUpstream((req, res) => {
+    res.writeHead(429, { ...rl(0.4, 1), 'anthropic-ratelimit-unified-status': 'rejected', 'retry-after': '120' });
+    res.end('{"type":"error","error":{"type":"rate_limit_error"}}');
+  });
+  const am = measuredManager(1);
+  const a = am.accounts[0];
+  makeOld(am, 0, 20 * MIN);
+  const refreshes = [];
+  const ensure = am.ensureTokenFresh.bind(am);
+  am.ensureTokenFresh = (...args) => { refreshes.push(args); return ensure(...args); };
+  const proxy = await claudeProxy(am, up.url);
+  try {
+    const t0 = Date.now();
+    await proxy.remeasureStale();
+    assert.equal(probes(up.seen).length, 1);
+    assert.equal(a.quota.unified7d, 1, 'the exhausted weekly window is taken');
+    assert.ok(a.quota.updatedAt >= t0, 'and stamped');
+    assert.equal(a.status, 'active', 'not throttled or parked');
+    assert.equal(a.rateLimitedUntil, null);
+    assert.equal(a.errorReason, undefined);
+    assert.deepEqual(refreshes, [], 'no token refresh');
+    assert.equal(am._isAvailable(a), false, 'out of rotation now…');
+    assert.equal(am._isNearQuota(a), true, '…because of its numbers');
+    a.quota.unified7d = 0.5;
+    assert.equal(am._isAvailable(a), true, 'and nothing else keeps it out');
+    await proxy.remeasureStale();
+    assert.equal(probes(up.seen).length, 1, 'not re-measured before the age runs out');
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
 test('an account whose token is about to expire is left to the keep-alive sweep', async () => {
   const up = await fakeUpstream((req, res) => { res.writeHead(200, rl()); res.end('{}'); });
   const am = measuredManager(1);
@@ -443,10 +480,10 @@ const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 test('quotaAge reads minutes, hours, then days', () => {
   const now = Date.now();
-  assert.equal(quotaAge(now - 45 * MIN, now), '45m 전');
-  assert.equal(quotaAge(now - 2 * HOUR - 5 * MIN, now), '2h 전');
-  assert.equal(quotaAge(now - 3 * 24 * HOUR, now), '3d 전');
-  assert.equal(quotaAge(now + MIN, now), '0m 전');
+  assert.equal(quotaAge(now - 45 * MIN, now), '45m ago');
+  assert.equal(quotaAge(now - 2 * HOUR - 5 * MIN, now), '2h ago');
+  assert.equal(quotaAge(now - 3 * 24 * HOUR, now), '3d ago');
+  assert.equal(quotaAge(now + MIN, now), '0m ago');
 });
 
 test('dashboard: a fresh row is unchanged; a stale row grays its bars and appends its age', () => {
@@ -466,12 +503,38 @@ test('dashboard: a fresh row is unchanged; a stale row grays its bars and append
   makeOld(am, 1, 2 * HOUR + 5 * MIN);
   const stale = row(1);
   assert.doesNotMatch(stale, /\x1b\[4[123];97m/, 'stale bars lose the colored fill');
-  assert.match(stale, /\x1b\[2m2h 전\x1b\[0m$/, 'age appended, dimmed, after everything else');
+  assert.match(stale, /\x1b\[2m2h ago\x1b\[0m$/, 'age appended, dimmed, after everything else');
   // Same columns: the stale row is the fresh row's text plus the age.
   am.accounts[1].quota.updatedAt = Date.now();
   const same = stripAnsi(row(1));
-  assert.equal(stripAnsi(stale), `${same}  2h 전`);
+  assert.equal(stripAnsi(stale), `${same}  2h ago`);
   assert.match(same, /Ses .*10%.*Wk .*20%.*Fbl .*30%.*#2$/, 'the numbers and badge stay put');
+});
+
+// Only accounts the idle re-measure keeps fresh can read as stale: a
+// near-quota (re-measure skips it until its reset), throttled, disabled or
+// errored row keeps its usual look however old its numbers are.
+test('a near-quota, throttled, disabled or errored account never reads as stale', () => {
+  const am = measuredManager(6);
+  for (let i = 0; i < 6; i++) makeOld(am, i, 3 * HOUR);
+  am.accounts[1].quota.unified7d = 0.99;                    // near quota
+  am.markRateLimited(2, 300);                               // throttled
+  am.setEnabled(am.accounts[3], false);                     // disabled
+  am.accounts[4].status = 'error';                          // auth error
+  am.accounts[4].errorReason = 'auth-revoked';
+  am.accounts[5].status = 'throttled';                      // throttle ran out, not healed yet
+  am.accounts[5].rateLimitedUntil = Date.now() - 1000;
+  const stale = am.getStatus({ includeIdentity: true }).accounts.map(a => [a.name, a.quotaStale]);
+  assert.deepEqual(stale, [['a0', true], ['a1', false], ['a2', false], ['a3', false], ['a4', false], ['a5', false]]);
+  assert.equal(am.accounts[5].status, 'throttled', 'a status poll heals no throttle (the next tick does)');
+
+  // The near-quota row renders exactly as it did before the stamp existed.
+  const tui = new TUI({ accountManager: am, config: { accounts: [] }, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {} });
+  const row = tui._renderAcct(am.accounts[1], 1, 12, true, true);
+  am.accounts[1].quota.updatedAt = null;
+  assert.equal(row, tui._renderAcct(am.accounts[1], 1, 12, true, true));
+  assert.match(row, /\x1b\[41;97m/, 'keeps its red fill');
+  assert.doesNotMatch(stripAnsi(row), /ago/, 'and no age');
 });
 
 test('app JSON adds quotaUpdatedAt and quotaStale next to the unchanged fields', () => {

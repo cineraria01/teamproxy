@@ -296,11 +296,10 @@ assert packed.ROW_GAP is False and packed.ROW_SEP == "\n"
 
 # Stale numbers (the proxy reports quotaStale with quota.updatedAt): the row
 # keeps its columns and gains its age at the end; a fresh row is unchanged and
-# the Hangul tag counts as two cells, so the rows still pad to one width.
-assert statusline.fmt_age((now - 45 * 60) * 1000, now) == "45m 전"
-assert statusline.fmt_age((now - 2 * 3600 - 300) * 1000, now) == "2h 전"
-assert statusline.fmt_age((now - 3 * 86400) * 1000, now) == "3d 전"
-assert statusline.visible_len("2h 전") == 5
+# the rows still pad to one width.
+assert statusline.fmt_age((now - 45 * 60) * 1000, now) == "45m ago"
+assert statusline.fmt_age((now - 2 * 3600 - 300) * 1000, now) == "2h ago"
+assert statusline.fmt_age((now - 3 * 86400) * 1000, now) == "3d ago"
 gauge = {"unified5h": 0.26, "unified5hReset": (now + 120) * 1000, "unified7d": 0.5}
 statusline.load_status = lambda: {
     "currentAccount": "one@example.com",
@@ -315,9 +314,9 @@ sys.stdout = output
 statusline.main()
 sys.stdout = sys.__stdout__
 fleet, one, two = output.getvalue().splitlines()
-assert "전" not in one and two.endswith(" 2h 전"), two
+assert "ago" not in one and two.endswith(" 2h ago"), two
 assert one.index("Ses") == two.index("Ses")
-assert one[one.index("Ses"):].rstrip() + " 2h 전" == two[two.index("Ses"):]
+assert one[one.index("Ses"):].rstrip() + " 2h ago" == two[two.index("Ses"):]
 assert len({statusline.visible_len(r) for r in (fleet, one, two)}) == 1
 
 print("ok")

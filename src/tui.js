@@ -123,10 +123,10 @@ function formatReset(resetTs) {
   return rh > 0 ? `${days}d${rh}h` : `${days}d`;
 }
 
-/** "2h 전": how long ago an account's quota numbers were refreshed (stale tag). */
+/** "2h ago": how long ago an account's quota numbers were refreshed (stale tag). */
 export function quotaAge(updatedAt, now = Date.now()) {
   const m = Math.max(0, Math.floor((now - updatedAt) / 60000));
-  return m < 60 ? `${m}m 전` : m < 1440 ? `${Math.floor(m / 60)}h 전` : `${Math.floor(m / 1440)}d 전`;
+  return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`;
 }
 
 /**
