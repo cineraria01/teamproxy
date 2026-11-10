@@ -98,7 +98,7 @@
 | `reload --json` | `{"ok":true,"measured":2,"targets":2,"total":2}` (서버가 없으면 `not_running`, 트래픽이 아직 없으면 `reload_failed`) |
 
 `applied`: `live`(실행 중 서버에 SIGHUP 또는 `POST /teamclaude/accounts/sync`로 반영 — 아래 [Windows](#windows)) · `config_only`(서버가 없어 설정만 바꿈) · `restart_required`(서버가 라이브 반영을 못 함).
-계정 항목: `name`, `type`(`oauth`|`api`), `provider`, `plan`, `email`(가림), `enabled`, `usable`(서버가 없으면 `null`), `priority`, `fiveHour`/`sevenDay`(`{"usedPct":12.3,"resetsAt":"ISO"}`, 서버가 없으면 `null`), `rateLimitedUntil`, `error`(짧은 코드: `subscription-disabled`·`auth-revoked`·`refresh-failed`·`auth-rejected`). agy는 `claudeGpt`(Claude/GPT 그룹 5시간·주간)도 준다.
+계정 항목: `name`, `type`(`oauth`|`api`), `provider`, `plan`, `email`(가림), `enabled`, `usable`(서버가 없으면 `null`), `priority`, `fiveHour`/`sevenDay`(`{"usedPct":12.3,"resetsAt":"ISO"}`, 서버가 없으면 `null`), `rateLimitedUntil`, `error`(짧은 코드: `subscription-disabled`·`auth-revoked`·`refresh-failed`·`auth-rejected`), `quotaUpdatedAt`(프록시가 그 숫자를 마지막으로 갱신한 ISO 시각, Claude 계정만·모르면 `null`), `quotaStale`(그 시각이 표시 기준(기본 30분)보다 오래됐는지, 서버가 없거나 이 필드를 모르는 옛 서버면 `null`, 2026-11-10). agy는 `claudeGpt`(Claude/GPT 그룹 5시간·주간)도 준다.
 오류 코드: `account_not_found`·`usage`·`not_running`·`reload_unsupported`·`reload_failed`.
 
 ## 앱용 로그인 (`login --name <이름> --json`)

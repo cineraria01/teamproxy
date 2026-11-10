@@ -294,6 +294,32 @@ packed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packed)
 assert packed.ROW_GAP is False and packed.ROW_SEP == "\n"
 
+# Stale numbers (the proxy reports quotaStale with quota.updatedAt): the row
+# keeps its columns and gains its age at the end; a fresh row is unchanged and
+# the Hangul tag counts as two cells, so the rows still pad to one width.
+assert statusline.fmt_age((now - 45 * 60) * 1000, now) == "45m 전"
+assert statusline.fmt_age((now - 2 * 3600 - 300) * 1000, now) == "2h 전"
+assert statusline.fmt_age((now - 3 * 86400) * 1000, now) == "3d 전"
+assert statusline.visible_len("2h 전") == 5
+gauge = {"unified5h": 0.26, "unified5hReset": (now + 120) * 1000, "unified7d": 0.5}
+statusline.load_status = lambda: {
+    "currentAccount": "one@example.com",
+    "accounts": [
+        {"name": "one@example.com", "quotaStale": False, "quota": {**gauge, "updatedAt": now * 1000}},
+        {"name": "two@example.com", "quotaStale": True, "quota": {**gauge, "updatedAt": (now - 7500) * 1000}},
+    ],
+}
+sys.stdin = io.StringIO("{}")
+output = io.StringIO()
+sys.stdout = output
+statusline.main()
+sys.stdout = sys.__stdout__
+fleet, one, two = output.getvalue().splitlines()
+assert "전" not in one and two.endswith(" 2h 전"), two
+assert one.index("Ses") == two.index("Ses")
+assert one[one.index("Ses"):].rstrip() + " 2h 전" == two[two.index("Ses"):]
+assert len({statusline.visible_len(r) for r in (fleet, one, two)}) == 1
+
 print("ok")
 
 # Row backgrounds: with colors on, every dashboard row (not the model header,
@@ -339,6 +365,11 @@ assert colored.track_code("\033[48;5;254m") == "48;5;255"
 assert colored.track_code("") == "100" and colored.track_code("\033[44m") == "100"
 assert "\033[48;5;239;37m" in fleet and "\033[100;37m" not in fleet
 assert "\033[100;37m" in one and "\033[48;5;239;37m" not in one
+# A stale gauge keeps its label and width but drops the colored fill.
+assert "\033[42;97m" in colored.bar(0.5, None, now)
+assert "\033[42;97m" not in colored.bar(0.5, None, now, stale=True)
+assert "50%" in colored.bar(0.5, None, now, stale=True)
+assert colored.visible_len(colored.bar(0.5, None, now, stale=True)) == colored.visible_len(colored.bar(0.5, None, now))
 os.environ["NO_COLOR"] = "1"
 print("bg ok")
 

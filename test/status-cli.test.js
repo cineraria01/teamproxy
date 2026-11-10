@@ -134,6 +134,28 @@ test('status lists healthy accounts with quota lines', async () => {
   assert.match(res.stdout, /b@example\.com/);
 });
 
+// Numbers the proxy has not refreshed for a while (quotaStale) carry their
+// age; fresh lines print exactly as before (no ANSI off a terminal).
+test('status appends the age to a stale account and leaves fresh lines alone', async () => {
+  const at = Date.now() - (2 * 3600_000 + 5 * 60_000);
+  const quota = account('x').quota;
+  const res = await runStatusAgainst(basePayload([
+    account('fresh@example.com', { quota: { ...quota, updatedAt: Date.now() } }),
+    account('stale@example.com', { quotaStale: true, quota: { ...quota, updatedAt: at } }),
+    account('api@example.com', {
+      type: 'apikey', quotaStale: true,
+      quota: { ...quota, unified5h: null, unified7d: null, tokensLimit: 100, tokensRemaining: 50, updatedAt: at },
+    }),
+  ]));
+
+  assert.equal(res.status, 0, res.stderr);
+  const block = name => res.stdout.split('\n\n').find(b => b.includes(`  ${name} (`));
+  assert.match(block('fresh@example.com'), /\n {4}Session: {2}10\.0% used {4}Weekly: 20\.0% used\n/);
+  assert.match(block('stale@example.com'), /\n {4}Session: {2}10\.0% used {4}Weekly: 20\.0% used {4}\(2h 전\)\n/);
+  assert.match(block('api@example.com'), /\n {4}Tokens: {3}50\.0% used {4}Requests: - used {4}\(2h 전\)\n/);
+  assert.doesNotMatch(res.stdout, /\x1b\[/, 'no ANSI when stdout is not a terminal');
+});
+
 test('reload and status finish when lsof hangs and ignores SIGTERM', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'teamclaude-lsof-timeout-'));
   const bin = join(dir, 'bin');

@@ -560,6 +560,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   const warmupIntervalMs = Number.isFinite(config.warmupIntervalMs)
     ? Math.max(0, config.warmupIntervalMs)
     : provider === 'agy' || provider === 'cursor' ? 10 * 60 * 1000 : 5 * 60 * 1000;
+  // Idle re-measure (Claude mode): the warm-up timer re-probes a measured
+  // account whose numbers are older than this (remeasureStale). 0/false = off.
+  // `quotaProbeSeconds`, left in some configs, is deliberately not read.
+  const quotaMaxAgeMs = config.quotaMaxAgeMs === false ? 0
+    : Number.isFinite(config.quotaMaxAgeMs) ? Math.max(0, config.quotaMaxAgeMs) : 15 * 60 * 1000;
+  // Display: twice the re-measure age, 30 min when the re-measure cannot run.
+  if (activeWarmup && warmupIntervalMs > 0 && quotaMaxAgeMs > 0) accountManager.quotaStaleMs = 2 * quotaMaxAgeMs;
   // A structured organization-access 403 is authoritative for that moment,
   // but external billing/policy changes can restore the account later. Keep it
   // out of client rotation while periodically rechecking with the known-good
@@ -1828,8 +1835,9 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // Forced fleet re-measure (TUI Reload / R): probe EVERY idle account —
   // measured or not, ENABLED OR DISABLED — so the dashboard reflects fresh
   // upstream numbers on demand. Usage spent from other devices/sessions never
-  // flows through this proxy, so the displayed values can silently drift until
-  // the next organic measurement. Disabled accounts are out of *rotation*, not
+  // flows through this proxy, so the displayed values can drift until the next
+  // organic measurement or idle re-measure (remeasureStale, enabled accounts
+  // only). Disabled accounts are out of *rotation*, not
   // out of *monitoring*: R is an explicit "show me everything" action, and a
   // probe is read-only (it reserves no rotation slot and routes no client
   // traffic), so refreshing a disabled account's dashboard row is safe and is
@@ -1924,6 +1932,25 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     await Promise.all(alive.map(a => warmupAccount(a, { force: true })));
   }
 
+  // Idle re-measure: usage spent from another machine never flows through this
+  // proxy, so an account it leaves idle keeps its old numbers until it is used
+  // again (2026-11-10: an account read 0% here while other machines had spent
+  // 38% of it). Re-probe accounts whose numbers are older than quotaMaxAgeMs
+  // through R's own path (warmupAccount force). Unlike R it never refreshes a
+  // token — an expiring one is left to the keep-alive sweep and picked up on a
+  // later tick — so a failure leaves the account exactly as it was. Runs last
+  // on the timer, so when the Fable top-up probes the same account this tick,
+  // its probe goes first and this one stands down (warmupAccount's _warming).
+  async function remeasureStale() {
+    if (!activeWarmup || warmupClosed || !probeTemplate || quotaMaxAgeMs <= 0) return;
+    const now = Date.now();
+    const targets = accountManager.accounts.filter(a => !a._warming
+      && !(a.type === 'oauth' && isTokenExpiringSoon(a.expiresAt))
+      && accountManager.needsRemeasure(a, quotaMaxAgeMs, now));
+    for (const a of targets) a._remeasureAt = now;
+    await Promise.all(targets.map(a => warmupAccount(a, { force: true })));
+  }
+
   // Revalidate only the narrowly classified organization-access quarantine.
   // Other auth errors stay parked until re-import/login because a generic
   // probe must never revive revoked credentials. Each account is paced before
@@ -1977,6 +2004,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       warmupUnmeasured();
       topUpPartialQuota(); // heal half-measured accounts (a window swept, the other survives)
       topUpModelWeekly(); // heal fully-measured accounts still missing their Fable window
+      remeasureStale(); // re-measure idle accounts whose numbers are older than quotaMaxAgeMs
     }, warmupIntervalMs);
     warmupTimer.unref(); // never keep the process alive just for warm-up
   }
@@ -2766,6 +2794,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // so only a deliberate local action should trigger it.
   server.refreshQuotaAll = refreshQuotaAll;
   server.refreshAnthropicQuotaAll = refreshAnthropicQuotaAll;
+  server.remeasureStale = remeasureStale;
   // cursor: the worker's h2c listener (index.js listens on it and hands its
   // port to the supervisor, which tunnels cursor-agent's h2 connections here).
   if (provider === 'cursor') {

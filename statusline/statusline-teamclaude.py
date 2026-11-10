@@ -15,7 +15,10 @@ D-DAY) on the right:
 
 Every cell sticks to ASCII (marker '>', 'x4', '!HH:MM' for rate limits)
 because ambiguous-width glyphs (▶ × ⛔) render 2 cells wide in CJK
-terminals and would break the column alignment. When the installed
+terminals and would break the column alignment. The one exception is the
+'2h 전' tag after a row whose numbers the proxy reports as stale
+(quotaStale): Hangul is always 2 cells wide and is counted as such, and the
+row's gauges lose their colored fill. When the installed
 teamclaude build lacks `status --json`, the running proxy's
 `/teamclaude/status` endpoint is read directly instead.
 
@@ -54,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import date, datetime, timezone
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -130,7 +134,9 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def visible_len(text):
-    return len(_ANSI_RE.sub("", text))
+    # Wide characters (the stale tag's Hangul) take two terminal cells.
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+               for c in _ANSI_RE.sub("", text))
 
 
 _GRAY_BG_RE = re.compile(r"\033\[48;5;(\d+)m")
@@ -492,12 +498,21 @@ def fmt_remaining(value, now=None):
         return None
 
 
-def bar(ratio, reset, now, width=None, track=DEFAULT_TRACK):
+def fmt_age(updated_at, now):
+    """'2h 전': how long ago the proxy refreshed an account's numbers."""
+    minutes = max(0, int((now - updated_at / 1000) // 60))
+    if minutes < 60:
+        return f"{minutes}m 전"
+    return f"{minutes // 60}h 전" if minutes < 1440 else f"{minutes // 1440}d 전"
+
+
+def bar(ratio, reset, now, width=None, track=DEFAULT_TRACK, stale=False):
     """TUI-style quota gauge: `width` background-colored cells, filled
     proportionally to usage (green <70%, yellow <90%, red beyond) over a gray
     remainder (`track`, an SGR background code), with 'usage% countdown'
-    centered inside. No-data windows render an all-track bar. Without colors,
-    degrades to the bracketed label."""
+    centered inside. No-data windows render an all-track bar, and so do stale
+    ones (label kept, colored fill dropped). Without colors, degrades to the
+    bracketed label."""
     if width is None:
         width = BAR_W
     remaining = fmt_remaining(reset, now)
@@ -516,7 +531,7 @@ def bar(ratio, reset, now, width=None, track=DEFAULT_TRACK):
     text = label[:width].center(width)
     if not COLOR:
         return f"[{text}]"
-    filled = round(ratio * width)
+    filled = 0 if stale else round(ratio * width)
     bg = 42 if ratio < 0.7 else 43 if ratio < 0.9 else 41
     out = ""
     if filled:
@@ -542,13 +557,13 @@ def none_cell(width=None, track=DEFAULT_TRACK):
     return f"\033[{track};97m{text}{RESET}" if COLOR else f"[{text}]"
 
 
-def session_cell(q, now, track=DEFAULT_TRACK):
+def session_cell(q, now, track=DEFAULT_TRACK, stale=False):
     if no_session_window(q):
         return none_cell(track=track)
-    return bar(q.get("unified5h"), q.get("unified5hReset"), now, track=track)
+    return bar(q.get("unified5h"), q.get("unified5hReset"), now, track=track, stale=stale)
 
 
-def bars_cell(q, now, label_color=None, track=DEFAULT_TRACK):
+def bars_cell(q, now, label_color=None, track=DEFAULT_TRACK, stale=False):
     """The three aligned gauges of a row: 5h session, 7d overall, 7d model
     (Fable, falling back to the Sonnet window when that is all there is)."""
     lc = DIM if label_color is None else label_color
@@ -558,9 +573,9 @@ def bars_cell(q, now, label_color=None, track=DEFAULT_TRACK):
         model_seven = q.get("unified7dSonnet")
         model_seven_reset = q.get("unified7dSonnetReset")
     return (
-        f"{lc}Ses{RESET} {session_cell(q, now, track=track)} "
-        f"{lc}Wk{RESET} {bar(q.get('unified7d'), q.get('unified7dReset'), now, track=track)} "
-        f"{lc}Fbl{RESET} {bar(model_seven, model_seven_reset, now, track=track)}"
+        f"{lc}Ses{RESET} {session_cell(q, now, track=track, stale=stale)} "
+        f"{lc}Wk{RESET} {bar(q.get('unified7d'), q.get('unified7dReset'), now, track=track, stale=stale)} "
+        f"{lc}Fbl{RESET} {bar(model_seven, model_seven_reset, now, track=track, stale=stale)}"
     )
 
 
@@ -662,14 +677,21 @@ def main():
             else f"{accent}{name.ljust(NAME_W)}{RESET}"
         )
         plan = (plan_label(acct) or "")[:plan_w]
+        q = acct.get("quota") or {}
+        # The proxy has not refreshed these numbers for a while (another
+        # machine may have used the account): grayed gauges, age at the end.
+        updated = q.get("updatedAt")
+        stale = acct.get("quotaStale") is True and isinstance(updated, (int, float))
         row = (
             f"{marker}{accent}{account_number:>2}.{RESET} {name_cell} "
             f"{accent}{plan.ljust(plan_w)}{RESET} {status_cell(acct)} "
-            f"{bars_cell(acct.get('quota') or {}, now, accent, track_code(bg))}"
+            f"{bars_cell(q, now, accent, track_code(bg), stale)}"
         )
         renewal = fmt_renewal(acct)
         unknown = f"\033[100;37m{'-'.center(14)}{RESET}" if COLOR else f"[{'-'.center(14)}]"
         row += f" {accent}End{RESET} {renewal or unknown}"
+        if stale:
+            row += f" {DIM}{fmt_age(updated, now)}{RESET}"
         rows.append((row, bg))
 
     print(ROW_SEP.join(parts + paint_rows(rows)))

@@ -38,7 +38,7 @@ import {
   isCodexInvocationId,
   isCodexResponsesPath,
 } from './codex-recovery.js';
-import { TUI, applyTuiAccountMutation } from './tui.js';
+import { TUI, applyTuiAccountMutation, quotaAge } from './tui.js';
 import { accountViews, emit, emitDone, enableMachineLogin, errorCode, machine } from './app-json.js';
 import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
@@ -3455,6 +3455,13 @@ async function statusCommand() {
       if (acct.maxConcurrent != null) {
         console.log(`    In flight: ${acct.inflight ?? 0}/${acct.maxConcurrent} concurrent`);
       }
+      // Numbers not refreshed for a while (another machine may have used the
+      // account since): their age appended, dimmed on a color terminal.
+      const quotaLine = s => {
+        if (!acct.quotaStale) return console.log(s);
+        const t = `${s}    (${quotaAge(q.updatedAt)})`;
+        console.log(process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[2m${t}\x1b[0m` : t);
+      };
 
       if (q.unified5h != null || q.unified7d != null || Object.keys(q.modelWeekly ?? {}).length > 0) {
         const ses = q.unified5h != null ? (q.unified5h * 100).toFixed(1) + '%' : '-';
@@ -3475,7 +3482,7 @@ async function statusCommand() {
           const name = label === '7d_oi' ? 'Fable wk' : label;
           line += `    ${name}: ${(w.utilization * 100).toFixed(1)}% used`;
         }
-        console.log(line);
+        quotaLine(line);
         // agy: the line above is the Gemini group; the Claude/GPT group has
         // its own 5h/weekly limits. A group blocked by an exhaustion 429 says so.
         if (acct.provider === 'agy' && q.agyGroups) {
@@ -3505,7 +3512,7 @@ async function statusCommand() {
       } else {
         const tok = q.tokensLimit ? ((1 - q.tokensRemaining / q.tokensLimit) * 100).toFixed(1) + '%' : '-';
         const req = q.requestsLimit ? ((1 - q.requestsRemaining / q.requestsLimit) * 100).toFixed(1) + '%' : '-';
-        console.log(`    Tokens:   ${tok} used    Requests: ${req} used`);
+        quotaLine(`    Tokens:   ${tok} used    Requests: ${req} used`);
       }
 
       console.log(`    Total:    ${acct.usage.totalInputTokens + acct.usage.totalOutputTokens} tokens, ${acct.usage.totalRequests} requests`);

@@ -49,6 +49,10 @@ export function accountViews(configAccounts, liveStatus) {
       // (verified Ultra, 2026-10-30); true = it has one; null = unknown.
       fiveHourWindow: typeof q?.sessionWindowStated === 'boolean' ? q.sessionWindowStated : null,
       sevenDay: q ? window(q.unified7d, q.unified7dReset) : null,
+      // When the proxy last refreshed these numbers (Claude accounts; null when
+      // unknown) and whether they are older than the stale-display threshold.
+      quotaUpdatedAt: iso(q?.updatedAt),
+      quotaStale: typeof l?.quotaStale === 'boolean' ? l.quotaStale : null,
       rateLimitedUntil: l?.rateLimitedUntil ?? null,
       error: l?.errorReason ?? (c.subscriptionDisabled ? 'subscription-disabled' : null),
     };

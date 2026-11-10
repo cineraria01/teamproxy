@@ -15,6 +15,9 @@ const CODEX_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const CODEX_MODEL_UNSUPPORTED_TTL_MS = 30 * 60 * 1000;
 const CODEX_MODEL_UNSUPPORTED_MAX_ENTRIES = 64;
 const MODEL_WEEKLY_MAX_ENTRIES = 64;
+// Anthropic quota window headers (5h/7d/7d_<label>, standard tokens/requests):
+// any of them on a response, usage report or probe stamps quota.updatedAt.
+const QUOTA_WINDOW_HEADER = /^anthropic-ratelimit-(unified-(5h|7d)|tokens-|requests-)/;
 
 /** Coerce a per-account / global concurrency cap to a positive integer, else fallback. */
 function coerceMaxConcurrent(value, fallback) {
@@ -103,6 +106,11 @@ function emptyQuota() {
     // accounts get no session window). Display and probe-candidacy only —
     // account selection still blocks on measured values, never on this flag.
     sessionWindowStated: null,
+    // Freshness stamp (Anthropic): ms timestamp of the last time a response,
+    // the OAuth usage report or a warm-up probe folded anthropic-ratelimit
+    // window headers (updateQuota). Persisted with the snapshot; drives the
+    // idle re-measure (needsRemeasure) and the stale display (isQuotaStale).
+    updatedAt: null,
     // Freshness stamp: ms timestamp of the last authoritative codex wham/usage
     // apply (updateCodexUsage). Per-response x-codex headers never set it —
     // they are a non-authoritative signal. Drives the active fast-lane refresh
@@ -210,6 +218,9 @@ export class AccountManager {
     // header-less) recovers without a restart, while a truly pathological one
     // costs at most one probe per window.
     this.probeRetryAfterMs = 15 * 60 * 1000;
+    // Display: quota numbers older than this read as stale. The server sets it
+    // to twice its idle re-measure age (createProxyServer); 30 min otherwise.
+    this.quotaStaleMs = 30 * 60 * 1000;
     this._warmupCursor = 0;  // round-robin pointer used during warm-up
     this._waiters = [];      // overflow queue: requests waiting for a free slot
     this._accountFlagWrites = new Set();
@@ -917,6 +928,35 @@ export class AccountManager {
   }
 
   /**
+   * A fully-measured idle account whose numbers are older than `maxAgeMs`.
+   * Usage spent from another machine never flows through this proxy, so a
+   * measured account the proxy itself leaves idle keeps showing (and being
+   * ordered by) its old numbers until something re-measures it. Same screen
+   * as the warm-up candidates — available (enabled, not throttled, exhausted,
+   * errored, cooling or near quota) with nothing in flight (that response
+   * refreshes it anyway) — and the partial/unmeasured cases stay with their
+   * own capped passes. An unknown age (a snapshot from before the stamp)
+   * counts as old. `_remeasureAt` (set by the caller) paces attempts to one
+   * per `maxAgeMs` even when a probe fails.
+   */
+  needsRemeasure(account, maxAgeMs, now = Date.now()) {
+    return account.inflight === 0
+      && this._isAvailable(account)
+      && this._fullyMeasured(account)
+      && now - Math.max(account.quota.updatedAt || 0, account._remeasureAt || 0) >= maxAgeMs;
+  }
+
+  /**
+   * Display staleness: this account's numbers were last refreshed more than
+   * quotaStaleMs ago. Accounts without an age (other pools, an old snapshot)
+   * or without numbers to show are never stale, so their display is unchanged.
+   */
+  isQuotaStale(account) {
+    const at = account.quota.updatedAt;
+    return Number.isFinite(at) && Date.now() - at > this.quotaStaleMs && this._isMeasured(account);
+  }
+
+  /**
    * An account still needing warm-up: available, not yet MEASURED, under the
    * per-account attempt cap.
    *
@@ -1360,6 +1400,8 @@ export class AccountManager {
     if (requestsReset) account.quota.requestsReset = requestsReset;
     if (tokensReset) account.quota.resetsAt = tokensReset;
     else if (requestsReset) account.quota.resetsAt = requestsReset;
+
+    if (Object.keys(headers).some(k => QUOTA_WINDOW_HEADER.test(k))) account.quota.updatedAt = Date.now();
 
     account.usage.totalRequests++;
     account.usage.lastUsed = new Date().toISOString();
@@ -2282,6 +2324,8 @@ export class AccountManager {
           sessionWindowStated: a.provider === 'anthropic' && a.type === 'oauth'
             && typeof s.quota.sessionWindowStated === 'boolean'
             ? s.quota.sessionWindowStated : null,
+          // Absent in snapshots written before the stamp existed → unknown.
+          updatedAt: Number.isFinite(s.quota.updatedAt) ? Math.min(s.quota.updatedAt, Date.now()) : null,
         };
         // Same invariant as _isNearQuota: a no-session-window account carries
         // no 5h reading, so a restored status never reports a blocking value.
@@ -2340,6 +2384,8 @@ export class AccountManager {
       // Computed BEFORE the quota snapshot below so _isNearQuota's lazy
       // sweep of expired windows is reflected in the copied quota.
       usable: this._isUsableNow(a),
+      // The numbers below are older than quotaStaleMs (quota.updatedAt = when).
+      quotaStale: this.isQuotaStale(a),
       enabled: a.enabled !== false,
       priority: a.priority ?? null,
       // Deep-copy the nested modelWeekly map — the shallow quota spread would

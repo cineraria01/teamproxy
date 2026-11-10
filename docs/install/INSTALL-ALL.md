@@ -281,7 +281,6 @@ patch('~/.config/teamclaude.json', {
     'switchThreshold': 0.98,
     'rateLimitFailovers': 3,        # 429 때 계정 4개를 다 돌아본다(기본 1)
     'continuityMode': False,        # 제한 응답을 15분 내부 재시도하며 다른 세션까지 세우던 것 해제
-    'quotaProbeSeconds': 300,
     'launchModel': 'claude-fable-5-1[1m]',   # 새 claude 세션 기본 모델(없으면 sonnet 주입)
 })
 patch('~/.config/teamcodex.json', {

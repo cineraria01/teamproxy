@@ -123,11 +123,18 @@ function formatReset(resetTs) {
   return rh > 0 ? `${days}d${rh}h` : `${days}d`;
 }
 
+/** "2h 전": how long ago an account's quota numbers were refreshed (stale tag). */
+export function quotaAge(updatedAt, now = Date.now()) {
+  const m = Math.max(0, Math.floor((now - updatedAt) / 60000));
+  return m < 60 ? `${m}m 전` : m < 1440 ? `${Math.floor(m / 60)}h 전` : `${Math.floor(m / 1440)}d 전`;
+}
+
 /**
  * Render a progress bar using background colors with text overlaid.
  * The label (e.g. "Ses 2h30m" or "45%") is drawn on top of the bar.
+ * A stale bar keeps its label but loses the colored fill (grayed out).
  */
-function bar(ratio, w = 10, resetTs) {
+function bar(ratio, w = 10, resetTs, stale = false) {
   const rst = formatReset(resetTs);
 
   if (ratio == null || isNaN(ratio)) {
@@ -141,7 +148,7 @@ function bar(ratio, w = 10, resetTs) {
   }
 
   ratio = Math.max(0, Math.min(1, ratio));
-  const f = Math.round(ratio * w);
+  const f = stale ? 0 : Math.round(ratio * w);
   // Background colors: 42=green, 43=yellow, 41=red; 100=bright black (gray) for empty
   const bg = ratio < 0.7 ? 42 : ratio < 0.9 ? 43 : 41;
 
@@ -1111,15 +1118,18 @@ export class TUI {
     // No 5-hour window at all (verified Ultra): a same-width "none" cell instead
     // of a bar, so it reads differently from an unmeasured "-" and stays aligned.
     const noSession = a.type === 'oauth' && q.sessionWindowStated === false;
-    const cell1 = noSession ? textCell('none', bw) : bar(r1, bw, t1);
+    // Numbers not refreshed for a while (another machine may have used the
+    // account since): grayed-out bars, and their age appended after the badge.
+    const stale = this.am.isQuotaStale(a);
+    const cell1 = noSession ? textCell('none', bw) : bar(r1, bw, t1, stale);
     let line = ` ${sel}${cur} ${num} ${name} ${type} ${status} ${l1} ${cell1}`;
     if (showBoth) {
-      line += `  ${l2} ${bar(r2, bw, t2)}`;
+      line += `  ${l2} ${bar(r2, bw, t2, stale)}`;
     }
     if (showThree) {
       // API-key accounts have no third metric — pad the slot so the rank
       // badges stay column-aligned across mixed account types.
-      line += l3 ? `  ${l3} ${bar(r3, bw, t3)}` : ' '.repeat(6 + bw);
+      line += l3 ? `  ${l3} ${bar(r3, bw, t3, stale)}` : ' '.repeat(6 + bw);
     }
     // Order badge: ranked accounts show their 1-based position (#1 = most
     // preferred). While ordering, unranked accounts are labelled "auto" so the
@@ -1128,6 +1138,7 @@ export class TUI {
     const rank = this._rankOf(a);
     if (rank != null) line += `  ${dim('#' + rank)}`;
     else if (this.mode === 'order') line += `  ${dim('auto')}`;
+    if (stale) line += `  ${dim(quotaAge(q.updatedAt))}`;
     return line;
   }
 

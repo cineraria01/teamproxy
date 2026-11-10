@@ -195,6 +195,8 @@ TeamAgy | 1 accounts | switch 98% | 5h 7d Gemini, 3p Claude/GPT | > selected, * 
 - 숫자는 사용률이고 잔여량이 아니다. 뒤의 시간은 그 창이 초기화될 때까지 남은 시간이다. `-`는 프록시가 아직 보고하지 않은 값이다.
 - `>` 선택된 계정, `*`/`busy` 요청 처리 중. 상태는 `ready`·`off`(제외)·`wait`·`limit`·`error`.
 - 컬러 터미널에서는 막대가 사용률만큼 초록·노랑·빨강으로 찬다.
+- Claude 풀: 프록시가 숫자를 30분(`quotaMaxAgeMs`의 2배) 넘게 갱신하지 못한 계정은 막대가 회색으로 바래고 줄 끝에 `2h 전`처럼
+  경과 시간이 붙는다. 다른 기기의 사용분이 빠졌을 수 있다는 뜻이다. `teamclaude status`와 대시보드도 같다.
 - `End`는 날짜와 D-day. 3일 이하 빨강, 7일 이하 노랑.
 - `FLEET avg`는 켜져 있고 오류가 없는 계정 중 측정된 값의 단순 평균이다.
 
@@ -345,6 +347,9 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 **계정 고르기.**
 - 처음에는 아직 측정 안 된 계정부터 돌려 쿼터를 잰다. active warm-up이 마지막으로 받아들여진 요청 모양으로 1토큰 요청을 보내
   나머지 계정도 바로 잰다(Claude 풀 기본 켜짐).
+- 다른 기기에서 쓴 사용량은 이 프록시를 지나지 않는다. 그래서 쉬는 계정도 숫자가 `quotaMaxAgeMs`(기본 15분, `0`·`false`면 끔)보다
+  오래되면 warm-up 주기(`warmupIntervalMs`, 기본 5분)에 R과 같은 1토큰 요청으로 다시 잰다(Claude 풀). 요청 처리 중·꺼짐·오류·냉각·한도
+  근처 계정과 곧 만료될 토큰은 건너뛰고, 계정 선택은 새 숫자로만 바뀐다. 예전 설정에 남은 `quotaProbeSeconds`는 읽지 않는다.
 - 그 뒤로는 use-or-lose다. `switchThreshold`(기본 0.98) 아래인 계정 중 주간 한도가 가장 빨리 초기화되는 계정을 먼저 쓴다.
   동률이면 세션 초기화가 빠른 쪽, 그다음 세션 사용률이 낮은 쪽이다. `priority`로 고정한 계정이 이보다 앞선다.
 - 고른 계정은 프롬프트 캐시를 위해 붙어 있는다. 우선순위는 `reevalIntervalMs`(기본 5분)마다, 그리고 지금 계정을 못 쓰게 되면
@@ -368,7 +373,8 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 워커가 응답 도중 죽어도 supervisor가 같은 방식으로 끝낸다. `streamRecovery: false`로 끈다.
 
 **토큰과 상태 보존.** 5분 안에 만료될 OAuth 토큰은 요청 전에 갱신하고, 5분마다 유휴·비활성 계정 토큰도 돌려 refresh 체인이
-끊기지 않게 한다. 계정별 쿼터와 warm-up 요청 모양은 1분마다와 종료 때 `<설정>.quota.json`에 남겨 재시작 뒤에 복원한다.
+끊기지 않게 한다. 계정별 쿼터와 그 숫자가 갱신된 시각, warm-up 요청 모양은 1분마다와 종료 때 `<설정>.quota.json`에 남겨
+재시작 뒤에 복원한다.
 클라이언트의 `/v1/oauth/token` 요청은 손대지 않고 그대로 넘긴다.
 
 **Codex 풀.**

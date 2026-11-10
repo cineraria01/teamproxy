@@ -13,6 +13,7 @@
   "continuityMaxSleepMs": 30000,
   "activeWarmup": true,
   "warmupIntervalMs": 300000,
+  "quotaMaxAgeMs": 900000,
   "tokenRefreshIntervalMs": 300000,
   "streamRecovery": true,
   "maxResponseBytes": 67108864,

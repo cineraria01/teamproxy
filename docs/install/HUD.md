@@ -50,6 +50,9 @@ tmux 소켓은 `teamclaude-hud`입니다.
   1. lt-1                  active  Ses   0% 1h29m   Wk   0% 6d23h   Fbl      -       End       -
 ```
 
+프록시가 숫자를 30분(재측정 기준 `quotaMaxAgeMs`의 2배) 넘게 갱신하지 못한 계정은 막대가 회색으로 바래고(값은 그대로 보임)
+줄 끝에 `2h 전`처럼 경과 시간이 붙습니다(2026-11-10). 다른 기기에서 쓴 사용량이 빠졌을 수 있다는 뜻입니다.
+
 ### 세 명령 공통 `--yolo`
 
 `teamclaude --yolo`·`claude --yolo`·`teamcodex --yolo`·`teamagy --yolo`는 승인 없이 실행합니다(2026-10-10 사용자 요청 "--yolo 로 하자 3개모두").
