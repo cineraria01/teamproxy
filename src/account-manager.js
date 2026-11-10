@@ -949,16 +949,25 @@ export class AccountManager {
   /**
    * Display staleness: this account's numbers were last refreshed more than
    * quotaStaleMs ago. Only accounts the idle re-measure keeps fresh — usable
-   * now (the side-effect-free twin of _isAvailable, so a status poll never
-   * heals a throttle) — can be stale: a near-quota, throttled, disabled or
-   * errored row keeps its usual look (its numbers only rise until the reset,
-   * and its red bar must not go gray). Accounts without an age (other pools,
-   * an old snapshot) or without numbers to show are never stale either.
+   * now — can be stale: a near-quota, throttled, disabled or errored row keeps
+   * its usual look (its numbers only rise until the reset, and its red bar
+   * must not go gray). Accounts without an age (other pools, an old snapshot)
+   * or without numbers to show are never stale either.
+   *
+   * Reads the stored values only, never _isUsableNow/_isNearQuota: the TUI
+   * paints this every frame and redraws on every log line, and their
+   * expired-window sweep logs before it clears — a render that swept re-entered
+   * itself until the stack overflowed. A window past its reset but not yet
+   * swept counts as it stands until the next sweep.
    */
   isQuotaStale(account) {
-    const at = account.quota.updatedAt;
-    return Number.isFinite(at) && Date.now() - at > this.quotaStaleMs
-      && this._isMeasured(account) && this._isUsableNow(account);
+    const q = account.quota;
+    const used = (left, of) => (left != null && of != null ? 1 - left / of : null);
+    return Number.isFinite(q.updatedAt) && Date.now() - q.updatedAt > this.quotaStaleMs
+      && this._isMeasured(account) && account.enabled !== false && account.status === 'active'
+      && !(account.rateLimitedUntil > Date.now()) && !this._isCapacityCooling(account)
+      && ![q.unified5h, q.unified7d, used(q.tokensRemaining, q.tokensLimit), used(q.requestsRemaining, q.requestsLimit)]
+        .some(u => u != null && u >= this.switchThreshold);
   }
 
   /**

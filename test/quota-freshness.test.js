@@ -537,6 +537,53 @@ test('a near-quota, throttled, disabled or errored account never reads as stale'
   assert.doesNotMatch(stripAnsi(row), /ago/, 'and no age');
 });
 
+const accountState = am => structuredClone(am.accounts.map(a => ({
+  quota: a.quota, status: a.status, rateLimitedUntil: a.rateLimitedUntil, enabled: a.enabled,
+  counters: [a._partialProbes, a._warmupTries, a._mwProbes],
+})));
+
+// Re-audit R1: the TUI redraws on every log line, and the expired-window sweep
+// logs before it clears the window. A stale check that swept from the render
+// re-entered itself until the stack overflowed (the worker died, and died again
+// on restart — the window was never cleared). Drawing must only read.
+test('a TUI that redraws on every log line survives a stale account past its window reset', () => {
+  for (const win of ['5h', '7d']) for (const used of [0.5, 0.98]) for (const trigger of ['render', 'sweepExpired', 'getStatus']) {
+    const label = `${win} at ${used}, ${trigger}`;
+    const am = measuredManager(2);
+    for (const i of [0, 1]) makeOld(am, i, 45 * MIN);
+    am.accounts[0].status = 'throttled';                   // throttle ran out, not healed yet
+    am.accounts[0].rateLimitedUntil = Date.now() - 1000;
+    const a = am.accounts[1];
+    a.quota[`unified${win}`] = used;
+    a.quota[`unified${win}Reset`] = Date.now() - 1000;     // past its reset, not swept yet
+    a._partialProbes = a._warmupTries = 2;
+    const tui = new TUI({ accountManager: am, config: { accounts: [] }, saveConfig: async () => {}, syncAccounts: async () => 0, onQuit: () => {} });
+    const before = accountState(am);
+    const { log, error } = console;
+    const { write } = process.stdout;
+    let writes = 0;
+    tui.running = true;                                    // as start() leaves it
+    console.log = console.error = (...m) => tui._addLog(m.join(' '));
+    process.stdout.write = () => { writes++; return true; };
+    try {
+      if (trigger === 'render') tui.render(); else am[trigger]();
+    } finally {
+      tui.running = false;
+      Object.assign(console, { log, error });
+      process.stdout.write = write;
+    }
+    assert.equal(writes, 1, `${label}: one frame drawn`);
+    assert.equal(am.accounts[0].status, 'throttled', `${label}: no throttle healed`);
+    if (trigger === 'render') {
+      assert.deepEqual(accountState(am), before, `${label}: drawing changes no account state`);
+      assert.equal(tui.log.length, 0, `${label}: drawing logs nothing`);
+    } else {
+      assert.equal(a.quota[`unified${win}`], null, `${label}: the sweep still clears the window`);
+      assert.equal(tui.log.length, 1, `${label}: one reset line`);
+    }
+  }
+});
+
 test('app JSON adds quotaUpdatedAt and quotaStale next to the unchanged fields', () => {
   const at = Date.now() - 2 * HOUR;
   const live = { accounts: [
