@@ -1653,6 +1653,8 @@ test('terminal auto mode unavailable uses one exported safe prompt without repla
   assert.deepEqual(calls[1], [
     '--resume',
     sessionId,
+    '--model',
+    'claude-fable-5',
     CLAUDE_SAFETY_DENIAL_RECOVERY_PROMPT,
   ]);
   assert.match(CLAUDE_SAFETY_DENIAL_RECOVERY_PROMPT, /read-only/i);
@@ -1907,16 +1909,20 @@ test('terminal safeguard refusal uses the exported safe prompt without replay, m
   assert.equal(rotations, 0);
   assert.equal(calls.length, 2);
   const sessionId = calls[0][calls[0].indexOf('--session-id') + 1];
+  // No model change: the resume pins the original model (Claude would otherwise pick its
+  // default for a session refused before its first reply).
   assert.deepEqual(calls[1], [
     '--resume',
     sessionId,
+    '--model',
+    'claude-fable-5',
     CLAUDE_SAFEGUARD_RECOVERY_PROMPT,
   ]);
   assert.match(CLAUDE_SAFEGUARD_RECOVERY_PROMPT, /do not retry|do not.*replay/i);
   assert.match(CLAUDE_SAFEGUARD_RECOVERY_PROMPT, /read-only/i);
   assert.match(CLAUDE_SAFEGUARD_RECOVERY_PROMPT, /if none remain.*wait/i);
   assert.doesNotMatch(calls[1].join(' '), new RegExp(blockedPrompt, 'i'));
-  assert.doesNotMatch(calls[1].join(' '), /--model|permission|approve/i);
+  assert.doesNotMatch(calls[1].join(' '), /permission|approve/i);
 });
 
 test('persistent safeguard refusal obeys its separate 0, 1, and N resume budget', async t => {
@@ -2108,6 +2114,70 @@ test('connection failure retries only refused requests and safely reopens reset 
     'wait:2',
     'spawn:3',
   ]);
+});
+
+test('recovery relaunches keep the original --model and --effort in both forms', async t => {
+  // Claude Code restores neither on --resume (2026-11-10, v2.1.321): effort falls back to the
+  // saved per-model level, and a session without a reply yet reopens on the default model.
+  const root = await mkdtemp(join(tmpdir(), 'teamclaude-recovery-keep-model-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, 'project');
+  const transcriptRoot = join(root, 'transcripts');
+  await mkdir(cwd);
+  const originalPrompt = 'original task prompt must not replay';
+  const calls = [];
+
+  const result = await runClaudeWithRecovery({
+    claudeArgs: ['--model', 'claude-opus-5-5', '--effort=max', originalPrompt],
+    childEnv: {},
+    config: {
+      autoResumeClaude: true,
+      claudeAutoResumeMaxRetries: 1,
+      claudeAmbiguousDispatchMaxResumes: 1,
+      claudeAutoResumeBackoffMs: 0,
+    },
+    cwd,
+    transcriptRoot,
+    pollIntervalMs: 5,
+    fetchStatus: async () => ({ accounts: [] }),
+    waitForConnectionRecovery: async ({ childEnv: recoveryEnv } = {}) => ({ childEnv: recoveryEnv }),
+    spawnClaude(args) {
+      const child = fakeChild();
+      calls.push([...args]);
+      if (calls.length <= 2) {
+        const selector = args.includes('--session-id') ? '--session-id' : '--resume';
+        const sessionId = args[args.indexOf(selector) + 1];
+        setTimeout(async () => {
+          const dir = join(transcriptRoot, 'project');
+          await mkdir(dir, { recursive: true });
+          await appendFile(
+            join(dir, `${sessionId}.jsonl`),
+            `${connectionRefusedRecord(
+              cwd,
+              calls.length === 1
+                ? 'Unable to connect to API (ConnectionRefused)'
+                : 'Unable to connect to API (ConnectionReset)',
+            )}\n`,
+          );
+        }, 10);
+        setTimeout(() => child.finish(9), 80);
+      } else {
+        setTimeout(() => child.finish(0), 10);
+      }
+      return child;
+    },
+    launchCodex: async () => {
+      throw new Error('a local proxy outage must not switch providers');
+    },
+    log() {},
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(calls.length, 3);
+  const sessionId = calls[0][calls[0].indexOf('--session-id') + 1];
+  assert.deepEqual(calls[1], ['--resume', sessionId, '--model', 'claude-opus-5-5', '--effort=max', 'continue']);
+  // The UI-only reopen after an ambiguous reset keeps the flags but still sends no prompt.
+  assert.deepEqual(calls[2], ['--resume', sessionId, '--model', 'claude-opus-5-5', '--effort=max']);
 });
 
 test('persistent ConnectionRefused obeys the general 0, 1, and N retry budget', async t => {

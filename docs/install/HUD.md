@@ -63,6 +63,8 @@ tmux 소켓은 `teamclaude-hud`입니다.
 Codex `-s`·`-a`·`--approve-for-me`·`--yolo`·`-c approval_policy=…`·`-c sandbox_mode=…`, agy `--mode`·`--sandbox`, grok `--permission-mode`·`--sandbox`,
 cursor-agent `-f`·`--force`·`--mode`·`--plan`·`--sandbox`. Claude 하위 명령(`teamclaude -- mcp list`)과 관리 명령(`status`·`server` 등)은 그대로입니다.
 Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이지 않습니다(안전 거부 뒤 권한을 올리지 않는 기존 설계).
+모델·추론은 처음 실행의 `--model`·`--effort`(설정 `launchModel`로 붙은 값 포함)를 그대로 이어 붙입니다(2026-11-10). Claude Code는
+`--resume`만으로는 추론을 되살리지 않아 모델별 저장값으로 돌아가고, 첫 답이 오기 전에 끊긴 세션은 모델도 기본값(`settings.json` `model`)으로 엽니다.
 
 ### Claude 대화 세션은 추론 xhigh
 
