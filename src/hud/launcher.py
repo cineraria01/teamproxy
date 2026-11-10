@@ -61,8 +61,8 @@ def with_effort(arguments):
 
 def herdr_footer(mode, cli):
     """Run the CLI in this Herdr terminal with the account footer as a Herdr split under it. Without
-    herdr-app, or when this terminal has no pane (a background hc run), the CLI runs alone and says why in one
-    line, except Claude without herdr-app: its status line shows the accounts then."""
+    herdr-app or hc, or when this terminal has no pane (a background hc run), the CLI runs alone and says why in
+    one line, except Claude without herdr-app: its status line shows the accounts then."""
     app, hc = shutil.which("herdr-app"), shutil.which("hc")
 
     # Herdr calls never get the terminal: after a hangup it is gone and a program reading it fails to start.
@@ -101,8 +101,10 @@ def herdr_footer(mode, cli):
     env.pop("TEAMCLAUDE_HUD", None)
     try:
         try:
-            if not app or not hc:
+            if not app:
                 raise RuntimeError("herdr-app not installed")
+            if not hc:
+                raise RuntimeError("hc not installed")
             data = read_status(Path.home() / f".config/{MODES[mode][0]}.json")
             # No cache-usage row for Codex here: it reads the CLI's tmux pane.
             rows = len(claude_rows()) if mode == "claude" else len(

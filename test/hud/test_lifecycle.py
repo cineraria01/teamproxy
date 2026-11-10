@@ -49,15 +49,17 @@ def herdr_footer():
         folder = Path(directory)
         calls = folder / "calls.jsonl"
         log = f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + chr(10))\n"
-        # herdr-app sits in its own folder so a run can leave it off PATH (a machine with Herdr core only).
+        # herdr-app and hc sit in folders of their own so a run can leave either off PATH (a machine with Herdr core
+        # only, or an HC_TERMINAL_ID inherited onto a PATH without hc).
         (folder / "app").mkdir()
+        (folder / "core").mkdir()
         (folder / "app/herdr-app").write_text(
             f"#!{sys.executable}\nimport json, sys\n{log}"
             "a = sys.argv[1:]\n"
             "print(json.dumps({'spaces': [{'tabs': [{'terminals': [{'terminal': 't-me', 'pane': 'p-me'}]}]}]}"
             " if a == ['ls'] else {'pane': 'p-foot', 'terminal': 't-foot'} if a[1:2] == ['pane.split']"
             " else {'ok': True}))\n")
-        (folder / "hc").write_text(
+        (folder / "core/hc").write_text(
             f"#!{sys.executable}\nimport json, os, sys\n{log}"
             # t-me's program is on the launcher's tty; t-other's (this check) is not.
             "a = sys.argv[2]\n"
@@ -72,10 +74,10 @@ def herdr_footer():
                 "slow = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']) if os.environ.get('SLOW') else None\n"
                 f"open({str(folder / 'cli.pid')!r}, 'w').write(str(slow.pid if slow else 0))\n"
                 "slow and slow.wait()\n")
-        for name in ("app/herdr-app", "hc", "teamcodex", "teamclaude", "teamgrok"):
+        for name in ("app/herdr-app", "core/hc", "teamcodex", "teamclaude", "teamgrok"):
             (folder / name).chmod(0o755)
 
-        def run(arguments, terminal="t-me", stop=False, jobs=True, app=True, **inherited):
+        def run(arguments, terminal="t-me", stop=False, jobs=True, app=True, core=True, **inherited):
             calls.unlink(missing_ok=True)
             (folder / "cli.json").unlink(missing_ok=True)
             (folder / "cli.pid").unlink(missing_ok=True)
@@ -86,9 +88,12 @@ def herdr_footer():
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
             env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS", "TMUX", "TEAMCLAUDE_HUD")}
-            # Without app, no herdr-app anywhere on PATH, whatever this machine has installed.
-            path = [d for d in env["PATH"].split(os.pathsep) if app or not (Path(d) / "herdr-app").exists()]
-            env.update(PATH=os.pathsep.join([directory, *([str(folder / "app")] if app else []), *path]),
+            # Without app (core), no herdr-app (hc) anywhere on PATH, whatever this machine has installed. Whole
+            # folders go; what the run needs besides the fakes is the shell's sleep, and Python by its absolute path.
+            gone = [name for name, keep in (("herdr-app", app), ("hc", core)) if not keep]
+            path = [d for d in env["PATH"].split(os.pathsep) if not any((Path(d) / name).exists() for name in gone)]
+            fakes = [directory, *([str(folder / "app")] if app else []), *([str(folder / "core")] if core else [])]
+            env.update(PATH=os.pathsep.join([*fakes, *path]),
                        HC_TERMINAL_ID=terminal, SLOW="1" if stop else "", TEST_PID=str(os.getpid()), **inherited)
             env.update(PY=sys.executable, RUNNER=runner, HOLD="3" if stop else "0")
 
@@ -150,6 +155,16 @@ def herdr_footer():
             code, cli, recorded, output = run([pool] if pool else [], app=False)
             assert code == 0 and not recorded and cli[0] == ["run", "--"], (pool, code, cli, recorded)
             assert output.count(note) == 1 and f"{command}: {note} (herdr-app not installed)" in output, (pool, output)
+        # Without hc as well it is still a machine without herdr-app: Claude stays quiet.
+        code, cli, recorded, output = run(["--claude"], app=False, core=False)
+        assert code == 0 and not recorded and note not in output, (code, recorded, output)
+        assert cli == [["run", "--", "--effort", "xhigh"], None], cli
+        # herdr-app but no hc on PATH (an inherited HC_TERMINAL_ID): the note names the program that is missing, and
+        # Claude says it too.
+        for pool, command, argv in (("--claude", "teamclaude", ["--effort", "xhigh"]), (None, "teamcodex", [])):
+            code, cli, recorded, output = run([pool] if pool else [], core=False, TEAMCLAUDE_HUD="1")
+            assert code == 0 and not recorded and cli == [["run", "--", *argv], None], (pool, code, cli, recorded)
+            assert output.count(note) == 1 and f"{command}: {note} (hc not installed)" in output, (pool, output)
         # Killing the launcher reaches the CLI and still closes the footer.
         code, cli, recorded, _ = run([], stop=True)
         # The shell that started the launcher is not signalled with it (it exits normally, not by SIGTERM).
