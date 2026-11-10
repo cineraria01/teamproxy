@@ -237,11 +237,11 @@ if (sessionFlag >= 0) {
       assert.equal(calls.length, 2);
       const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
       const expectedArgs = scenario.expectedPrompt == null
-        ? ['--resume', sessionId]
-        : ['--resume', sessionId, scenario.expectedPrompt];
+        ? ['--resume', sessionId, '--model', 'claude-fable-5']
+        : ['--resume', sessionId, '--model', 'claude-fable-5', scenario.expectedPrompt];
       assert.deepEqual(calls[1].args, expectedArgs);
       assert.doesNotMatch(calls[1].args.join(' '), new RegExp(blockedPrompt, 'i'));
-      assert.doesNotMatch(calls[1].args.join(' '), /--model|permission|approve/i);
+      assert.doesNotMatch(calls[1].args.join(' '), /permission|approve/i);
     });
   }
 });
@@ -404,7 +404,7 @@ appendFileSync(process.env.FAKE_CODEX_CALLS, JSON.stringify({
   assert.equal(currentAccount, 'account-b');
   assert.equal(calls.length, 2);
   const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-  assert.deepEqual(calls[1].args, ['--resume', sessionId, 'continue']);
+  assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5', 'continue']);
   assert.deepEqual(
     calls.map(call => ({
       oauthPresent: call.oauthPresent,
@@ -853,7 +853,7 @@ if (resume >= 0 && args.at(-1) !== 'continue') {
   assert.equal(manager.currentIndex, 0, 'global current drifts to A before B recovers');
   assert.deepEqual(calls.map(call => call.args), [
     ['--dangerously-skip-permissions', '--resume', sessionId, '--model', 'claude-sonnet-5'],
-    ['--resume', sessionId, 'continue'],
+    ['--resume', sessionId, '--model', 'claude-sonnet-5', 'continue'],
   ]);
   assert.deepEqual(calls.map(call => call.oauthValue), [
     initialRecoveryToken,
@@ -965,7 +965,7 @@ if (sessionFlag >= 0) {
   assert.ok(statusHits >= 2, `expected startup and recovery probes, got ${statusHits}`);
   assert.equal(calls.length, 2);
   const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-  assert.deepEqual(calls[1].args, ['--resume', sessionId, 'continue']);
+  assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5', 'continue']);
   assert.match(result.stderr, /Local proxy connection lost/);
   assert.match(result.stderr, /Local proxy connection restored/);
 });
@@ -1051,7 +1051,7 @@ if (sessionFlag >= 0) {
   assert.ok(statusHits >= 2, `expected startup and recovery readiness checks, got ${statusHits}`);
   assert.equal(calls.length, 2);
   const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-  assert.deepEqual(calls[1].args, ['--resume', sessionId]);
+  assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5']);
   assert.equal(calls[0].baseUrl, `http://localhost:${port}`);
   assert.equal(calls[1].baseUrl, `http://localhost:${port}`);
   assert.match(result.stderr, /did not replay the request/);
@@ -1181,7 +1181,7 @@ if (sessionFlag >= 0) {
   assert.equal(new Set(upstreamAuths).size, 1, 'launcher continuation must not rotate accounts');
   assert.equal(calls.length, 2);
   const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-  assert.deepEqual(calls[1].args, ['--resume', sessionId]);
+  assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5']);
 });
 
 test('tunnel-only run waits for the external listener instead of starting an empty local proxy', async t => {
@@ -1529,7 +1529,7 @@ if (sessionFlag >= 0) {
   assert.equal(calls[0].baseUrl, `http://localhost:${oldPort}`);
   assert.equal(calls[1].baseUrl, `http://localhost:${newPort}`);
   const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-  assert.deepEqual(calls[1].args, ['--resume', sessionId, 'continue']);
+  assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5', 'continue']);
 });
 
 test('real run follows a replacement supervisor to its new configured port before resuming', {
@@ -1631,7 +1631,7 @@ if (sessionFlag >= 0) {
     assert.equal(calls[0].baseUrl, `http://localhost:${oldPort}`);
     assert.equal(calls[1].baseUrl, `http://localhost:${newPort}`);
     const sessionId = calls[0].args[calls[0].args.indexOf('--session-id') + 1];
-    assert.deepEqual(calls[1].args, ['--resume', sessionId, 'continue']);
+    assert.deepEqual(calls[1].args, ['--resume', sessionId, '--model', 'claude-sonnet-5', 'continue']);
     await waitForStatus(newPort);
   } finally {
     controlServer.closeAllConnections();
@@ -1793,7 +1793,7 @@ appendFileSync(process.env.FAKE_CODEX_CALLS, JSON.stringify({
     const resumedCalls = await jsonLines(claudeCalls);
     assert.equal(resumedCalls.length, 2);
     const sessionId = resumedCalls[0][resumedCalls[0].indexOf('--session-id') + 1];
-    assert.deepEqual(resumedCalls[1], ['--resume', sessionId]);
+    assert.deepEqual(resumedCalls[1], ['--resume', sessionId, '--model', 'claude-sonnet-5']);
     assert.deepEqual(await jsonLines(codexCalls), []);
 
     await writeFile(claudeCalls, '');

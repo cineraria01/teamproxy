@@ -299,6 +299,20 @@ function sessionSelector(args) {
   return { kind: 'new', sessionId: null };
 }
 
+// Claude Code restores neither of these on --resume (2026-11-10, v2.1.321): effort falls back to
+// the saved per-model level, and a session without a reply yet reopens on the default model.
+function modelAndEffortArgs(args) {
+  const kept = [];
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '--model' || args[i] === '--effort') && i + 1 < args.length) {
+      kept.push(args[i], args[++i]);
+    } else if (args[i].startsWith('--model=') || args[i].startsWith('--effort=')) {
+      kept.push(args[i]);
+    }
+  }
+  return kept;
+}
+
 function redactSecrets(text) {
   return text
     .replace(
@@ -566,6 +580,8 @@ export async function runClaudeWithRecovery({
     sessionId = randomUUID();
     nextArgs = ['--session-id', sessionId, ...nextArgs];
   }
+  const keptArgs = modelAndEffortArgs(claudeArgs);
+  const resumeArgs = (...prompt) => ['--resume', sessionId, ...keptArgs, ...prompt];
 
   const maxRetries = Number.isFinite(config.claudeAutoResumeMaxRetries)
     ? Math.max(0, Math.floor(config.claudeAutoResumeMaxRetries))
@@ -597,11 +613,11 @@ export async function runClaudeWithRecovery({
     // following UI reopen into another inference POST, even if a caller or a
     // future branch accidentally appends the literal continuation prompt.
     const launchArgs = suppressNextContinuationPrompt
-        && nextArgs.length === 3
+        && nextArgs.length === 3 + keptArgs.length
         && nextArgs[0] === '--resume'
         && UUID_RE.test(nextArgs[1])
-        && nextArgs[2] === 'continue'
-      ? nextArgs.slice(0, 2)
+        && nextArgs.at(-1) === 'continue'
+      ? nextArgs.slice(0, -1)
       : nextArgs;
     suppressNextContinuationPrompt = false;
     const child = spawnClaude(launchArgs, nextEnv);
@@ -698,7 +714,7 @@ export async function runClaudeWithRecovery({
 
       log(`[TeamClaude] Claude login expired; switched account and resuming session ${sessionId}.`);
       await stopChild(child);
-      nextArgs = ['--resume', sessionId, 'continue'];
+      nextArgs = resumeArgs('continue');
       nextEnv = recovery.childEnv;
       continue;
     }
@@ -718,11 +734,7 @@ export async function runClaudeWithRecovery({
         if (backoffMs > 0) {
           await delay(Math.min(backoffMs * 2 ** (safetyDenialRecoveries - 1), 30_000));
         }
-        nextArgs = [
-          '--resume',
-          sessionId,
-          CLAUDE_SAFETY_DENIAL_RECOVERY_PROMPT,
-        ];
+        nextArgs = resumeArgs(CLAUDE_SAFETY_DENIAL_RECOVERY_PROMPT);
         continue;
       }
       log(`[TeamClaude] Auto-mode safety-denial resume budget exhausted (${safetyDenialRecoveries}/${maxSafetyDenialResumes}); preserving the session for manual continuation.`);
@@ -739,11 +751,7 @@ export async function runClaudeWithRecovery({
         if (backoffMs > 0) {
           await delay(Math.min(backoffMs * 2 ** (safeguardRecoveries - 1), 30_000));
         }
-        nextArgs = [
-          '--resume',
-          sessionId,
-          CLAUDE_SAFEGUARD_RECOVERY_PROMPT,
-        ];
+        nextArgs = resumeArgs(CLAUDE_SAFEGUARD_RECOVERY_PROMPT);
         continue;
       }
       log(`[TeamClaude] Fable safeguard resume budget exhausted (${safeguardRecoveries}/${maxSafeguardResumes}); preserving the blocked session for user revision.`);
@@ -761,7 +769,7 @@ export async function runClaudeWithRecovery({
           return { status: 1, signal: null };
         }
         log(`[TeamClaude] Local proxy connection restored; resuming session ${sessionId}.`);
-        nextArgs = ['--resume', sessionId, 'continue'];
+        nextArgs = resumeArgs('continue');
         continue;
       }
       log(`[TeamClaude] Connection-refused retry budget exhausted (${retries}/${maxRetries}); preserving session ${sessionId} for manual continuation.`);
@@ -790,7 +798,7 @@ export async function runClaudeWithRecovery({
           await delay(Math.min(backoffMs * 2 ** (ambiguousRecoveries - 1), 30_000));
         }
         log(`[TeamClaude] Reopening ambiguous session ${sessionId} without resending the last prompt.`);
-        nextArgs = ['--resume', sessionId];
+        nextArgs = resumeArgs();
         continue;
       }
       log(`[TeamClaude] Ambiguous-request safe-reopen budget exhausted (${ambiguousRecoveries}/${maxAmbiguousDispatchResumes}); preserving session ${sessionId} without resending the last prompt.`);
@@ -833,7 +841,7 @@ export async function runClaudeWithRecovery({
         retries += 1;
         log(`[TeamClaude] Claude usage limit detected; switched account and resuming session (${retries}/${maxRetries}).`);
         if (backoffMs > 0) await delay(Math.min(backoffMs * 2 ** (retries - 1), 30_000));
-        nextArgs = ['--resume', sessionId, 'continue'];
+        nextArgs = resumeArgs('continue');
         nextEnv = recovery.childEnv;
         continue;
       }
@@ -871,7 +879,7 @@ export async function runClaudeWithRecovery({
       log(`[TeamClaude] Claude timeout detected; reopening session without resending the last prompt (${retries}/${maxRetries}).`);
       await stopChild(child);
       if (backoffMs > 0) await delay(Math.min(backoffMs * 2 ** (retries - 1), 30_000));
-      nextArgs = ['--resume', sessionId];
+      nextArgs = resumeArgs();
       continue;
     }
 
@@ -880,7 +888,7 @@ export async function runClaudeWithRecovery({
       log(`[TeamClaude] Claude ${outcome.event.kind} detected; resuming session automatically (${retries}/${maxRetries}).`);
       await stopChild(child);
       if (backoffMs > 0) await delay(Math.min(backoffMs * 2 ** (retries - 1), 30_000));
-      nextArgs = ['--resume', sessionId, 'continue'];
+      nextArgs = resumeArgs('continue');
       continue;
     }
     return childExit(child);
