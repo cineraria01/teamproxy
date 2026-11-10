@@ -89,16 +89,19 @@ Herdr 터미널(`HC_TERMINAL_ID`가 있고 tmux 밖) 안에서 다섯 명령은 
 tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 Herdr가 작업 중·질문 대기·끝남을 보지 못했기 때문입니다(사용자
 결정 "순정이 가장 좋은데", "tmux 없이 하단에 바로 나오면 좋긴 하겠다"). 그 터미널의 프로그램이 실행기와 같은 tty에 있지 않거나(물려받은
 ID), 창이 `표 줄 수 + 10`행보다 낮거나, `herdr-app`·pane이 없으면(배경 `hc run`) 하단 줄 없이 CLI만 띄우고 이유를 한 줄 찍습니다.
-Codex 캐시 사용량 줄은 tmux 창에서 읽던 것이라 이 경로에는 없습니다.
+다만 `herdr-app`이 없는 기계(Herdr 코어만 둔 리눅스 서버)의 Claude는 그 줄 없이 조용히 뜹니다. `TEAMCLAUDE_HUD`가 없으니 Claude Code
+상태줄이 계정 표를 직접 그려 잃는 것이 없기 때문입니다(2026-11-11). Herdr 경로는 물려받은 `TEAMCLAUDE_HUD`를 늘 지우고,
+하단 줄을 붙인 Claude에만 1을 넣습니다. Codex 캐시 사용량 줄은 tmux 창에서 읽던 것이라 이 경로에는 없습니다.
 
 ### Herdr core 밖에서는 새 hc 터미널로 (2026-11-02)
 
 모든 기계에서 tmux를 지우면서(사용자 요청 "다른곳들도 모두 tmux 은 종료 제거하고 허더 코어로 옮겨"), 다섯 명령을 hc 밖(일반 SSH·터미널)에서
 인자 없이 대화형으로 실행하면 tmux 대신 `hc run --bg --no-parent --name <cli>-<8자리> --cwd <현재 폴더>`로 **새 Herdr core 터미널**을 만들고
 실행기를 같은 인자로 그 안에서 다시 띄운 뒤 `hc attach`로 지금 터미널을 붙입니다. 그 안에서는 위 Herdr 경로를 탑니다(창이 없는
-배경 터미널이라 하단 줄 없이 CLI만, 이유 한 줄). `Ctrl+\`로 떼면 계속 돌고 `hc attach <주소>` 안내가 나오며, CLI가 끝나면 그 종료 코드를
-돌려주고 터미널을 지웁니다(0이 아니면 마지막 20줄을 먼저 보여 줌). 새 터미널은 core의 환경을 받으므로 `PATH`와 `CODEX_HOME`·`TC_ACCT`·
-`TEAMCLAUDE_STATUSLINE_INDEX`만 넘기고, `TEAMPROXY_HUD_HC_STARTED=1`을 붙여 그 안의 실행이 터미널을 또 만들지 않게 합니다.
+배경 터미널이라 하단 줄 없이 CLI만, 이유 한 줄. 위 예외대로 `herdr-app` 없는 기계의 Claude는 조용히). `Ctrl+\`로 떼면 계속 돌고
+`hc attach <주소>` 안내가 나오며, CLI가 끝나면 그 종료 코드를 돌려주고 터미널을 지웁니다(0이 아니면 마지막 20줄을 먼저 보여 줌).
+새 터미널은 core의 환경을 받으므로 `PATH`와 `CODEX_HOME`·`TC_ACCT`·`TEAMCLAUDE_STATUSLINE_INDEX`만 넘기고,
+`TEAMPROXY_HUD_HC_STARTED=1`을 붙여 그 안의 실행이 터미널을 또 만들지 않게 합니다.
 `-p`·`--version` 같은 한 번 실행, `--` 하위 명령, 터미널 밖 실행은 예전처럼 바로 `<명령> run -- …`입니다. tmux 하단 줄은 `hc`가
 없는 기계에서만 쓰입니다.
 

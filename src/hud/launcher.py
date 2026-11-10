@@ -61,7 +61,8 @@ def with_effort(arguments):
 
 def herdr_footer(mode, cli):
     """Run the CLI in this Herdr terminal with the account footer as a Herdr split under it. Without
-    herdr-app, or when this terminal has no pane (a background hc run), the CLI runs alone."""
+    herdr-app, or when this terminal has no pane (a background hc run), the CLI runs alone and says why in one
+    line, except Claude without herdr-app: its status line shows the accounts then."""
     app, hc = shutil.which("herdr-app"), shutil.which("hc")
 
     # Herdr calls never get the terminal: after a hangup it is gone and a program reading it fails to start.
@@ -95,6 +96,9 @@ def herdr_footer(mode, cli):
     for sig in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(sig, forward)
     env = dict(os.environ)
+    # Only a footer this launch opened may hide the Claude status line's table; an inherited value would hide it
+    # with no footer to show it.
+    env.pop("TEAMCLAUDE_HUD", None)
     try:
         try:
             if not app or not hc:
@@ -137,7 +141,11 @@ def herdr_footer(mode, cli):
         except Exception as error:
             close()
             footer = {}
-            print(f"{MODES[mode][0]}: starting without the account footer ({error})", file=sys.stderr)
+            # Without herdr-app (a machine with Herdr core only) Claude loses nothing: with no TEAMCLAUDE_HUD its
+            # status line draws the account table itself, so the note would be noise. The other pools have no such
+            # fallback.
+            if app or mode != "claude":
+                print(f"{MODES[mode][0]}: starting without the account footer ({error})", file=sys.stderr)
         child.append(subprocess.Popen(cli, env=env,
                                       preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)))
         return child[0].wait()

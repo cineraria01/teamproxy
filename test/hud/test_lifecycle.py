@@ -49,7 +49,9 @@ def herdr_footer():
         folder = Path(directory)
         calls = folder / "calls.jsonl"
         log = f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + chr(10))\n"
-        (folder / "herdr-app").write_text(
+        # herdr-app sits in its own folder so a run can leave it off PATH (a machine with Herdr core only).
+        (folder / "app").mkdir()
+        (folder / "app/herdr-app").write_text(
             f"#!{sys.executable}\nimport json, sys\n{log}"
             "a = sys.argv[1:]\n"
             "print(json.dumps({'spaces': [{'tabs': [{'terminals': [{'terminal': 't-me', 'pane': 'p-me'}]}]}]}"
@@ -61,7 +63,7 @@ def herdr_footer():
             "a = sys.argv[2]\n"
             "print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}"
             " if a == 't-other' else {'rows': 1}))\n")
-        for name in ("teamcodex", "teamclaude"):
+        for name in ("teamcodex", "teamclaude", "teamgrok"):
             (folder / name).write_text(
                 f"#!{sys.executable}\nimport json, os, sys, time\n"
                 f"open({str(folder / 'cli.json')!r}, 'w').write(json.dumps([sys.argv[1:], os.environ.get('TEAMCLAUDE_HUD')]))\n"
@@ -70,10 +72,10 @@ def herdr_footer():
                 "slow = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']) if os.environ.get('SLOW') else None\n"
                 f"open({str(folder / 'cli.pid')!r}, 'w').write(str(slow.pid if slow else 0))\n"
                 "slow and slow.wait()\n")
-        for name in ("herdr-app", "hc", "teamcodex", "teamclaude"):
+        for name in ("app/herdr-app", "hc", "teamcodex", "teamclaude", "teamgrok"):
             (folder / name).chmod(0o755)
 
-        def run(arguments, terminal="t-me", stop=False, jobs=True):
+        def run(arguments, terminal="t-me", stop=False, jobs=True, app=True, **inherited):
             calls.unlink(missing_ok=True)
             (folder / "cli.json").unlink(missing_ok=True)
             (folder / "cli.pid").unlink(missing_ok=True)
@@ -84,8 +86,10 @@ def herdr_footer():
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
             env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS", "TMUX", "TEAMCLAUDE_HUD")}
-            env.update(PATH=directory + os.pathsep + env["PATH"], HC_TERMINAL_ID=terminal, SLOW="1" if stop else "",
-                       TEST_PID=str(os.getpid()))
+            # Without app, no herdr-app anywhere on PATH, whatever this machine has installed.
+            path = [d for d in env["PATH"].split(os.pathsep) if app or not (Path(d) / "herdr-app").exists()]
+            env.update(PATH=os.pathsep.join([directory, *([str(folder / "app")] if app else []), *path]),
+                       HC_TERMINAL_ID=terminal, SLOW="1" if stop else "", TEST_PID=str(os.getpid()), **inherited)
             env.update(PY=sys.executable, RUNNER=runner, HOLD="3" if stop else "0")
 
             # A shell owns the pty as its controlling terminal and outlives the launcher, as in a real terminal
@@ -102,7 +106,8 @@ def herdr_footer():
             os.close(slave)
             # Read the terminal like a real one: an exiting shell otherwise waits for unread output to drain.
             output = []
-            threading.Thread(target=lambda: drain(master, output), daemon=True).start()
+            reader = threading.Thread(target=lambda: drain(master, output), daemon=True)
+            reader.start()
             if stop:
                 eventually(lambda: (folder / "cli.pid").exists())
                 os.kill(int((folder / "launcher.pid").read_text()), signal.SIGTERM)
@@ -115,26 +120,41 @@ def herdr_footer():
                 if alive(grandchild):
                     os.kill(grandchild, signal.SIGKILL)
             code = launched.wait(timeout=10)
+            reader.join(timeout=2)
             os.close(master)
             recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
-            return code, json.loads((folder / "cli.json").read_text()), recorded
+            return code, json.loads((folder / "cli.json").read_text()), recorded, b"".join(output).decode()
 
-        code, cli, recorded = run(["--yolo"])
+        note = "starting without the account footer"
+        code, cli, recorded, output = run(["--yolo"])
         assert code == 0 and cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
         assert [c[:2] for c in recorded] == [["get", "t-me"], ["ls"], ["do", "pane.split"], ["do", "pane.focus"],
                                              ["do", "layout.resize"], ["get", "t-foot"], ["do", "pane.close"]], recorded
         assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
         assert json.loads(recorded[-1][2]) == {"pane": "p-foot"}
+        assert note not in output, output
         # Claude's own status line drops the account table only when the footer shows it.
         assert run(["--claude"])[1] == [["run", "--", "--effort", "xhigh"], "1"]
-        # A terminal id that is not this terminal's (inherited) splits nothing; the CLI runs alone.
-        code, cli, recorded = run(["--claude"], terminal="t-other")
-        assert code == 0 and cli == [["run", "--", "--effort", "xhigh"], None] and [c[:2] for c in recorded] == [["get", "t-other"]], recorded
+        # A terminal id that is not this terminal's (inherited) splits nothing; the CLI runs alone, says why, and an
+        # inherited TEAMCLAUDE_HUD does not hide the status line's table with no footer to show it.
+        code, cli, recorded, output = run(["--claude"], terminal="t-other", TEAMCLAUDE_HUD="1")
+        assert code == 0 and cli == [["run", "--", "--effort", "xhigh"], None], (code, cli)
+        assert [c[:2] for c in recorded] == [["get", "t-other"]], recorded
+        assert f"teamclaude: {note} (t-other is not this terminal)" in output, output
+        # Herdr core without herdr-app: Claude starts quietly, its status line draws the account table instead.
+        code, cli, recorded, output = run(["--claude"], app=False, TEAMCLAUDE_HUD="1")
+        assert code == 0 and not recorded and note not in output, (code, recorded, output)
+        assert cli == [["run", "--", "--effort", "xhigh"], None], cli
+        # The other pools have no such fallback: they still say why there is no footer, in one line.
+        for pool, command in ((None, "teamcodex"), ("--grok", "teamgrok")):
+            code, cli, recorded, output = run([pool] if pool else [], app=False)
+            assert code == 0 and not recorded and cli[0] == ["run", "--"], (pool, code, cli, recorded)
+            assert output.count(note) == 1 and f"{command}: {note} (herdr-app not installed)" in output, (pool, output)
         # Killing the launcher reaches the CLI and still closes the footer.
-        code, cli, recorded = run([], stop=True)
+        code, cli, recorded, _ = run([], stop=True)
         # The shell that started the launcher is not signalled with it (it exits normally, not by SIGTERM).
         assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
-        code, cli, recorded = run([], stop=True, jobs=False)
+        code, cli, recorded, _ = run([], stop=True, jobs=False)
         assert code >= 0 and recorded[-1][:2] == ["do", "pane.close"], (code, recorded)
 
 
