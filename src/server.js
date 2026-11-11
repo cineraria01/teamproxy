@@ -665,14 +665,18 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // (measured 2026-11-11, Fable 5.1/5.2 and Opus 5.5: that line alone → 200
   // with the same windows, 34 input tokens; no system → a header-less 429).
   // A template carrying the line is replayed with the line alone instead of the
-  // whole prompt (17 KB from Claude Code); any other system is replayed as is.
-  function buildProbeBody(t) {
+  // whole prompt (17 KB from Claude Code); any other system is replayed as is —
+  // except on a model-swapped OAuth probe (`claudeCodeLine`): the template's
+  // own system was accepted for its own model only (150, 2026-11-11: an SDK
+  // Haiku request without the line), so the swapped model gets the line.
+  function buildProbeBody(t, claudeCodeLine = false) {
     const b = { model: t.model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
     const startsWithMarker = s => typeof s === 'string' && s.startsWith(CLAUDE_CODE_SYSTEM_MARKER);
-    if (t.system != null) {
-      b.system = startsWithMarker(t.system)
-        || (Array.isArray(t.system) && t.system.some(block => startsWithMarker(block?.text)))
-        ? CLAUDE_CODE_SYSTEM_MARKER : t.system;
+    if (claudeCodeLine || startsWithMarker(t.system)
+        || (Array.isArray(t.system) && t.system.some(block => startsWithMarker(block?.text)))) {
+      b.system = CLAUDE_CODE_SYSTEM_MARKER;
+    } else if (t.system != null) {
+      b.system = t.system;
     }
     return JSON.stringify(b);
   }
@@ -1765,6 +1769,10 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     // An account already serving requests (the Fable refresh and R reach those)
     // gets a real slot for the probe, or none at all when it is full, so a
     // probe never takes it past its cap. An idle one keeps the no-slot rule.
+    // The price of a real slot: with `overflowQueueTimeoutMs: 0` (no overflow
+    // queue) and every account full, a client that arrives during the probe
+    // (well under a second for max_tokens 1) gets the proxy's own 429; with the
+    // default 15 s queue it waits for the slot instead.
     const reserved = account.inflight > 0;
     if (reserved && !accountManager._hasCapacity(account)) return false;
     if (reserved) account.inflight++;
@@ -1777,7 +1785,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       else headers['x-api-key'] = account.credential;
 
       const res = await fetch(`${upstream}/v1/messages`, {
-        method: 'POST', headers, body: buildProbeBody(template), signal: probe.signal,
+        method: 'POST', headers, body: buildProbeBody(template, !!model && account.type === 'oauth'), signal: probe.signal,
       });
       // A completed 2xx is authoritative proof that this organization can use
       // Claude Code again. Clear the durable quarantine before folding quota so
@@ -1806,6 +1814,15 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       if ((res.ok || accountExhausted429) && Object.keys(rl).length
           && accountManager.accounts[account.index] === account) {
         accountManager.updateQuota(account, rl, { status: res.status });
+        // A Fable-shaped probe rejected for that model's window alone (5h/7d
+        // under the threshold) is not the account's exhaustion: don't leave the
+        // per-response `rejected` that isExhausted() reads (a recovery request
+        // would drop its account pin for it until the next response).
+        if (accountExhausted429 && (model || template._elicitsModelWeekly)
+            && accountManager.isModelExhausted(account, template.model)
+            && !accountManager._isNearQuota(account)) {
+          account.quota.unifiedStatus = null;
+        }
         // Convergence accounting: a probe that leaves the account fully
         // measured resets the fruitless-probe counter; one that leaves it
         // half-measured (a header family missing) counts toward the cap.
@@ -1819,8 +1836,12 @@ export function createProxyServer(accountManager, config, hooks = {}) {
         // clears it; a Fable-shaped probe whose response did NOT (this account
         // just doesn't report it) counts toward the cap so the Fable pass below
         // doesn't probe it forever. A lower-tier probe says nothing either way.
-        if (Object.keys(rl).some(k => k.startsWith('anthropic-ratelimit-unified-7d_'))) account._mwProbes = 0;
-        else if (model || template._elicitsModelWeekly) account._mwProbes = (account._mwProbes || 0) + 1;
+        if (Object.keys(rl).some(k => k.startsWith('anthropic-ratelimit-unified-7d_'))) {
+          account._mwProbes = 0;
+          delete account._mwRefusedLogged; // a later refusal starts a new streak
+        } else if (model || template._elicitsModelWeekly) {
+          account._mwProbes = (account._mwProbes || 0) + 1;
+        }
         console.log(`[TeamClaude] Warm-up measured account "${account.name}"`);
         return true; // quota actually folded — the forced-refresh path counts these
       } else if (accountManager.accounts[account.index] === account
@@ -1838,6 +1859,11 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           // The swapped model was refused (e.g. 400 unknown model): spend the
           // whole Fable top-up budget instead of retrying it every interval.
           account._mwProbes = accountManager.maxWarmupTries;
+          // Once per streak of refusals (until a response brings the window).
+          if (!account._mwRefusedLogged && !warmupClosed) {
+            account._mwRefusedLogged = true;
+            console.error(`[TeamClaude] Fable probe model (modelWeeklyProbeModel) refused for "${account.name}" (HTTP ${res.status}) — Fable weekly refresh paused for this account until R or its weekly reset`);
+          }
         } else {
           account._partialProbes = (account._partialProbes || 0) + 1;
           account._lastFruitlessProbeAt = Date.now(); // paces the slow retry backstop
@@ -1869,7 +1895,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // Fable-shaped probe can run — its responses may never bring that window —
   // and then probes in a real slot (warmupAccount). OAuth accounts get the
   // Fable-shaped probe (one response carries every window), and the template as
-  // committed when that measured nothing (e.g. the swapped model refused). The
+  // committed when that measured nothing (e.g. the swapped model refused) and
+  // the account was idle when R started. The
   // convergence budgets are renewed first — an explicit user action is a fresh
   // reason to probe. Returns { targets, measured }, or -1 when no probe template
   // exists yet (nothing has flowed through the proxy, so there is no
@@ -1885,6 +1912,8 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     const targets = accountManager.accounts.filter(a =>
       (a.status !== 'error' || a.errorReason === 'subscription-disabled')
       && (a.inflight === 0 || fableShaped(a)) && !a._warming);
+    // Busy now: their own responses refresh 5h/7d, so only the Fable probe goes.
+    const busy = new Set(targets.filter(a => a.inflight > 0));
     // Revive lapsed tokens FIRST. Background probes never refresh tokens (a
     // background failure could mark an account 'error' before any real request
     // proved auth), so an account that has sat idle past its token lifetime
@@ -1903,7 +1932,7 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       if (!fableShaped(a)) return warmupAccount(a, { force: true });
       a._mwProbeAt = now; // the timer's Fable pass then waits a full age
       return await warmupAccount(a, { force: true, model: fableModel })
-        || (fableModel !== null && warmupAccount(a, { force: true }));
+        || (fableModel !== null && !busy.has(a) && warmupAccount(a, { force: true }));
     }));
     // Honest accounting: `targets` is what the user asked to refresh, `measured`
     // is what actually got fresh data — the TUI reports M/N, never a blanket
@@ -1947,7 +1976,18 @@ export function createProxyServer(accountManager, config, hooks = {}) {
       && !(a.type === 'oauth' && isTokenExpiringSoon(a.expiresAt))
       && accountManager.needsModelWeekly(a, quotaMaxAgeMs, now));
     for (const a of targets) a._mwProbeAt = now;
-    await Promise.all(targets.map(a => warmupAccount(a, { force: true, model })));
+    await Promise.all(targets.map(async a => {
+      if (await warmupAccount(a, { force: true, model }) || !model || quotaMaxAgeMs <= 0) return;
+      // The swapped probe measured nothing (5xx, a 429 without `rejected`, a
+      // refused model, a timeout). The idle re-measure stood down for it this
+      // tick and, paced by _remeasureAt, would stand down every tick it fails,
+      // so 5h/7d would never refresh: send the template, under that pass's own
+      // conditions (needsRemeasure minus the pacing this tick already set).
+      if (a.inflight === 0 && accountManager._isAvailable(a) && accountManager._fullyMeasured(a)
+          && Date.now() - (a.quota.updatedAt || 0) >= quotaMaxAgeMs) {
+        await warmupAccount(a, { force: true });
+      }
+    }));
   }
 
   // Partial-quota top-up: after a restart the lazy sweep clears an expired
@@ -1998,7 +2038,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
     const targets = accountManager.accounts.filter(a => !a._warming
       && !(a.type === 'oauth' && isTokenExpiringSoon(a.expiresAt))
       && accountManager.needsRemeasure(a, quotaMaxAgeMs, now));
-    for (const a of targets) a._remeasureAt = now;
+    // A template that brings the Fable window makes this probe Fable-shaped
+    // too: count it as the Fable attempt, so a failed one isn't followed by a
+    // second Fable-shaped probe from topUpModelWeekly inside the same age.
+    for (const a of targets) {
+      a._remeasureAt = now;
+      if (probeTemplate._elicitsModelWeekly) a._mwProbeAt = now;
+    }
     await Promise.all(targets.map(a => warmupAccount(a, { force: true })));
   }
 

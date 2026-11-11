@@ -1122,7 +1122,8 @@ test('a non-eliciting template still fills the Fable window via a model-swapped 
     const fable = probes.filter(p => p.model === 'claude-fable-5-1');
     assert.ok(fable.length >= 1);
     assert.equal(fable[0].max_tokens, 1);
-    assert.equal(fable[0].system, 'You are Claude Code', 'same template, only the model swapped');
+    assert.equal(fable[0].system, "You are Claude Code, Anthropic's official CLI for Claude.",
+      'the template with the model swapped, and the Claude Code line as its system (OAuth)');
     assert.equal(am.needsModelWeekly(a), false);
     const settled = probes.length;
     await new Promise(r => setTimeout(r, 200));

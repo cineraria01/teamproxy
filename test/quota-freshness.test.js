@@ -848,3 +848,161 @@ test('a probe replays only the Claude Code identity line of the template system'
     await up.close();
   }
 });
+
+// ── C, audit round: what a Fable probe that measured nothing must not do ─────
+
+const MARKER = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** An upstream whose Fable-tier answer can change between calls (`state.fable(res)`; null = 200 with the window). */
+function switchableFableUpstream(state) {
+  return fakeUpstream((req, res, body) => {
+    const { model } = JSON.parse(body || '{}');
+    if (/fable/.test(model) && state.fable) return state.fable(res);
+    res.writeHead(200, { ...rl(0.5, 0.6), ...(/fable/.test(model) ? oi(0.4) : {}) });
+    res.end('{}');
+  });
+}
+
+test('a Fable probe that measures nothing (500, 429 without rejected) still lets the template re-measure 5h/7d', async () => {
+  const answers = {
+    500: res => { res.writeHead(500); res.end(); },
+    429: res => { res.writeHead(429, { ...rl(0.5, 0.6), ...oi(1) }); res.end('{}'); },
+  };
+  for (const [kind, fable] of Object.entries(answers)) {
+    const up = await fableUpstream(0.4, { fable });
+    const am = measuredManager(1);
+    const a = am.accounts[0];
+    withOldFable(am, 0, 20_000);
+    makeOld(am, 0, 20_000);
+    const proxy = await claudeProxy(am, up.url, { warmupIntervalMs: 20, quotaMaxAgeMs: 10_000, modelWeeklyProbeModel: FABLE });
+    try {
+      assert.ok(await waitFor(() => a.quota.unified5h === 0.5), `${kind}: 5h/7d re-measured`);
+      await settle(300);
+      assert.deepEqual(sentModels(up.seen), [FABLE, 'claude-x'], `${kind}: the template once, right after the Fable probe`);
+      assert.equal(fableOf(a).utilization, 0.1, `${kind}: the Fable value is not taken from it`);
+    } finally {
+      await closeProxy(proxy);
+      await up.close();
+    }
+  }
+});
+
+test('a model-swapped probe sends the Claude Code line even when the template system lacks it', async () => {
+  // 150's template (2026-11-11): an SDK Haiku request — billing header, no Claude Code line.
+  const system = [
+    { type: 'text', text: 'x-anthropic-billing-header: cc_version=1; cc_entrypoint=sdk-ts;' },
+    { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+    { type: 'text', text: 'y'.repeat(3000) },
+  ];
+  const up = await fableUpstream(0.4, { fable: res => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{}'); } });
+  const am = measuredManager(1);
+  const proxy = createProxyServer(am, { upstream: up.url, warmupIntervalMs: 0, modelWeeklyProbeModel: FABLE });
+  await listen(proxy);
+  try {
+    assert.equal(proxy.importProbeTemplate({ model: 'claude-haiku-x', system }), true);
+    await proxy.refreshQuotaAll();
+    const sent = probes(up.seen).map(r => JSON.parse(r.body));
+    assert.deepEqual(sent.map(b => [b.model, b.system]), [[FABLE, MARKER], ['claude-haiku-x', system]],
+      'the swapped model gets the Claude Code line; the template as committed keeps its own system');
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
+test('a Fable probe rejected for the Fable window alone leaves the account unexhausted', async () => {
+  const state = { fable: null };
+  const up = await switchableFableUpstream(state);
+  try {
+    state.fable = res => {
+      res.writeHead(429, { ...rl(0.3, 0.4), ...oi(1), 'anthropic-ratelimit-unified-status': 'rejected', 'retry-after': '3600' });
+      res.end('{}');
+    };
+    const am = measuredManager(1);
+    const a = am.accounts[0];
+    await withClaudeProxy(am, up.url, { modelWeeklyProbeModel: FABLE }, p => p.refreshQuotaAll());
+    assert.equal(fableOf(a).utilization, 1, 'the full Fable window is taken');
+    assert.equal(a.quota.unified5h, 0.3);
+    assert.equal(a.quota.unifiedStatus, null, 'no account-wide rejected left behind');
+    assert.equal(am.isExhausted(a), false);
+    assert.equal(am._isAvailable(a, 'claude-opus-5-5'), true, 'still serves Opus');
+    assert.equal(am._isAvailable(a, 'claude-fable-5-2'), false, 'but not Fable');
+    assert.equal(a.status, 'active');
+
+    // Over the account threshold too: the rejection is the account's, and stays.
+    state.fable = res => {
+      res.writeHead(429, { ...rl(0.99, 0.4), ...oi(1), 'anthropic-ratelimit-unified-status': 'rejected', 'retry-after': '3600' });
+      res.end('{}');
+    };
+    const am2 = measuredManager(1);
+    await withClaudeProxy(am2, up.url, { modelWeeklyProbeModel: FABLE }, p => p.refreshQuotaAll());
+    assert.equal(am2.accounts[0].quota.unifiedStatus, 'rejected');
+    assert.equal(am2.isExhausted(am2.accounts[0]), true);
+  } finally {
+    await up.close();
+  }
+});
+
+test('R: an account busy when R starts gets no template retry after its Fable probe fails', async () => {
+  const up = await fableUpstream(0.4, { fable: res => { res.writeHead(500); res.end(); } });
+  const am = measuredManager(2);
+  am.accounts[0].inflight = 1;               // serving: its own responses refresh 5h/7d
+  try {
+    await withClaudeProxy(am, up.url, { modelWeeklyProbeModel: FABLE }, async proxy => {
+      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 2, measured: 1 });
+    });
+    const byAuth = auth => probes(up.seen).filter(r => r.auth === auth).map(r => JSON.parse(r.body).model);
+    assert.deepEqual(byAuth('Bearer tok-0'), [FABLE], 'busy: the Fable probe only');
+    assert.deepEqual(byAuth('Bearer tok-1'), [FABLE, 'claude-x'], 'idle: the template after it');
+    assert.equal(am.accounts[0].inflight, 1, 'slot given back');
+  } finally {
+    await up.close();
+  }
+});
+
+test('a refused probe model is logged once per streak, without the credential', async () => {
+  const state = { fable: res => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{}'); } };
+  const refuse = state.fable;
+  const up = await switchableFableUpstream(state);
+  const am = measuredManager(1);
+  const lines = [];
+  const { log, error } = console;
+  console.log = console.error = (...m) => lines.push(m.join(' '));
+  const proxy = await claudeProxy(am, up.url, { modelWeeklyProbeModel: FABLE });
+  try {
+    await proxy.refreshQuotaAll();
+    await proxy.refreshQuotaAll();
+    const refused = () => lines.filter(l => /refused/.test(l));
+    assert.equal(refused().length, 1, 'two refusals in a row, one line');
+    assert.match(refused()[0], /"a0"/);
+    assert.match(refused()[0], /400/);
+    assert.ok(!lines.some(l => l.includes('tok-0')), 'no credential in any line');
+    state.fable = null;                      // the model answers again with the window
+    await proxy.refreshQuotaAll();
+    state.fable = refuse;
+    await proxy.refreshQuotaAll();
+    assert.equal(refused().length, 2, 'a new streak, a new line');
+  } finally {
+    Object.assign(console, { log, error });
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
+test('a template that brings the window: a failed re-measure is the Fable attempt for that age too', async () => {
+  const up = await fakeUpstream((req, res) => { res.writeHead(500); res.end(); });
+  const am = measuredManager(1);
+  withOldFable(am, 0, 1500);                 // Fable stamp 1.5 s old: fresh for another 1.5 s
+  makeOld(am, 0, 20_000);                    // 5h/7d old: the idle re-measure sends the (Fable) template
+  const proxy = createProxyServer(am, { upstream: up.url, warmupIntervalMs: 20, quotaMaxAgeMs: 3000 });
+  await listen(proxy);
+  try {
+    assert.equal(proxy.importProbeTemplate({ model: 'claude-fable-top', _elicitsModelWeekly: true }), true);
+    assert.ok(await waitFor(() => probes(up.seen).length === 1));
+    await settle(2250);                      // the Fable stamp ages out at ~1.5 s
+    assert.equal(probes(up.seen).length, 1, 'no second Fable-shaped probe inside the age');
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
