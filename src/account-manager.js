@@ -134,7 +134,9 @@ function emptyQuota() {
     // being tracked without a code change. A complete, fresh, full window
     // pre-blocks only the matching model family; unknown/partial/expired values
     // remain selectable so the request itself can refresh them.
-    modelWeekly: {},       // { '7d_oi': { utilization: 0-1, reset: msTimestamp } }
+    // `at` (ms) is when that window's own headers last arrived; in memory only
+    // like the window itself — no `at` reads as old (needsModelWeekly).
+    modelWeekly: {},       // { '7d_oi': { utilization: 0-1, reset: msTimestamp, at: msTimestamp } }
     resetsAt: null,        // soonest standard reset (session-order fallback)
     // Token and request windows can reset at DIFFERENT times; tracked separately
     // so retry-after can wait for whichever over-threshold window frees last
@@ -895,12 +897,22 @@ export class AccountManager {
    * whose upstream genuinely never reports the window from being probed every
    * interval forever; it resets when the window populates or a quota window is
    * swept (a fresh week is a fresh reason to look).
+   *
+   * With `maxAgeMs` (the idle re-measure age) a window whose own stamp
+   * (`modelWeekly[label].at`, none = old) is older than that counts as missing
+   * too: lower-tier traffic and probes keep quota.updatedAt fresh but never
+   * this window, so a pool without Fable traffic otherwise kept the first
+   * value it saw (2026-11-11: seven machines, two different Fable numbers).
+   * `_mwProbeAt` (set by the caller) paces attempts to one per `maxAgeMs`,
+   * failed ones included.
    */
-  needsModelWeekly(account) {
-    return account.type === 'oauth'
-      && this._fullyMeasured(account)
-      && Object.keys(account.quota.modelWeekly).length === 0
-      && (account._mwProbes || 0) < this.maxWarmupTries;
+  needsModelWeekly(account, maxAgeMs = 0, now = Date.now()) {
+    if (account.type !== 'oauth' || !this._fullyMeasured(account)
+        || (account._mwProbes || 0) >= this.maxWarmupTries) return false;
+    const windows = Object.values(account.quota.modelWeekly);
+    if (!(maxAgeMs > 0)) return windows.length === 0;
+    if (now - (account._mwProbeAt || 0) < maxAgeMs) return false;
+    return windows.length === 0 || windows.some(w => !(now - (w.at || 0) < maxAgeMs));
   }
 
   /**
@@ -1395,6 +1407,9 @@ export class AccountManager {
       }
       if (m[2] === 'utilization') win.utilization = parsedValue;
       else win.reset = parsedValue;
+      // Per-window freshness: these headers arrive only on that tier's
+      // responses, so quota.updatedAt (any window) says nothing about them.
+      win.at = Date.now();
     }
 
     // Standard rate limits (API key accounts)

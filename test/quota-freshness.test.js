@@ -253,17 +253,18 @@ test('the warm-up timer re-measures only the stale account, with the probe R sen
 // The Fable top-up runs earlier on the same tick and wins the account's probe
 // slot, so an account needing both is probed once, with the Fable model, and
 // the top-up's own budget (_mwProbes) is not spent by a plain-model probe.
-test('a stale account the Fable top-up also wants is probed once per tick, by the top-up', async () => {
+// Both passes then wait a full age (a Fable probe is paced like the re-measure).
+test('a stale account the Fable top-up also wants is probed once, by the top-up', async () => {
   const up = await fakeUpstream((req, res) => { res.writeHead(200, rl(0.5, 0.6)); res.end('{}'); });
   const am = measuredManager(1);
   makeOld(am, 0, 20_000);
   const proxy = await claudeProxy(am, up.url, { warmupIntervalMs: 20, quotaMaxAgeMs: 10_000, modelWeeklyProbeModel: 'claude-fable-test' });
   try {
-    assert.ok(await waitFor(() => am.accounts[0]._mwProbes >= am.maxWarmupTries), 'the top-up spent its budget');
-    await settle(100);
+    assert.ok(await waitFor(() => am.accounts[0]._mwProbes === 1), 'the top-up probed');
+    await settle(300); // ~15 more ticks, all inside the 10 s age
     const models = probes(up.seen).map(r => JSON.parse(r.body).model);
-    assert.deepEqual(models, Array(am.maxWarmupTries).fill('claude-fable-test'),
-      'one probe per tick, every one from the top-up');
+    assert.deepEqual(models, ['claude-fable-test'], 'one probe, from the top-up, and none again inside the age');
+    assert.equal(am.accounts[0]._mwProbes, 1, 'the plain-model re-measure stood down');
   } finally {
     await closeProxy(proxy);
     await up.close();
@@ -601,4 +602,249 @@ test('app JSON adds quotaUpdatedAt and quotaStale next to the unchanged fields',
   assert.equal(offline.quotaUpdatedAt, null);
   const [older] = accountViews([{ name: 'old' }], { accounts: [{ name: 'old', quota: {} }] });
   assert.equal(older.quotaStale, null, 'unknown from a server that predates the field');
+});
+
+// ── C: the Fable window's own age ────────────────────────────────────────────
+// 2026-11-11: seven proxies sharing six accounts showed two different sets of
+// Fable weekly numbers. The 7d_oi window rides only Fable-tier responses; a
+// proxy whose template is lower-tier refreshed quota.updatedAt with every
+// response and probe but never that window, so it kept the first value it saw
+// — through R, too.
+
+const FABLE = 'claude-fable-test';
+const oi = u => ({
+  'anthropic-ratelimit-unified-7d_oi-utilization': String(u),
+  'anthropic-ratelimit-unified-7d_oi-reset': String(RESET_7D),
+});
+
+/** Fable-tier models (by name) answer with their 7d_oi window too; `fable` overrides that answer. */
+function fableUpstream(u = 0.4, { fable = null, hold = null } = {}) {
+  return fakeUpstream(async (req, res, body) => {
+    const { model } = JSON.parse(body || '{}');
+    if (/fable/.test(model)) {
+      if (hold) await hold;
+      if (fable) return fable(res);
+      res.writeHead(200, { ...rl(0.5, 0.6), ...oi(u) });
+    } else {
+      res.writeHead(200, rl(0.5, 0.6));
+    }
+    res.end('{}');
+  });
+}
+
+const sentModels = seen => probes(seen).map(r => JSON.parse(r.body).model);
+const fableOf = a => a.quota.modelWeekly['7d_oi'];
+
+/** Measured with a Fable window last seen `ageMs` ago; quota.updatedAt stays fresh (lower-tier traffic). */
+function withOldFable(am, i, ageMs, u = 0.1) {
+  am.updateQuota(i, oi(u), { status: 200 });
+  am.accounts[i].quota.modelWeekly['7d_oi'].at = Date.now() - ageMs;
+}
+
+test('updateQuota stamps each model window with its own time', () => {
+  const am = measuredManager(1);
+  const a = am.accounts[0];
+  const t0 = Date.now();
+  am.updateQuota(a, { ...rl(), ...oi(0.3) }, { status: 200 });
+  assert.ok(fableOf(a).at >= t0 && fableOf(a).at <= Date.now(), 'stamped with the window');
+  fableOf(a).at = t0 - HOUR;
+  am.updateQuota(a, rl(0.2, 0.3), { status: 200 });           // a lower-tier response
+  assert.equal(fableOf(a).at, t0 - HOUR, 'a response without the window leaves its stamp');
+  assert.ok(a.quota.updatedAt >= t0, 'while the account stamp moves on');
+  assert.deepEqual(Object.keys(am.getStatus().accounts[0].quota.modelWeekly['7d_oi']).slice(0, 2),
+    ['utilization', 'reset'], 'the status fields stay as they were (the stamp is added)');
+});
+
+test('needsModelWeekly with an age: an old or unstamped window counts, one attempt per age', () => {
+  const am = measuredManager(1);
+  const a = am.accounts[0];
+  const now = Date.now();
+  withOldFable(am, 0, 0);
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now), false, 'fresh window');
+  withOldFable(am, 0, 16 * MIN);
+  assert.equal(am.needsModelWeekly(a), false, 'without an age only a missing window counts (as before)');
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now), true, 'older than the age');
+  delete fableOf(a).at;
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now), true, 'no stamp reads as old');
+  // An attempt, answered or not, paces the next one to a full age later.
+  a._mwProbeAt = now - 5 * MIN;
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now), false);
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now + 10 * MIN), true);
+  // The budget still caps an account that never reports the window.
+  a._mwProbes = am.maxWarmupTries;
+  assert.equal(am.needsModelWeekly(a, 15 * MIN, now + 10 * MIN), false);
+
+  // A snapshot from before the stamp (or any snapshot): model windows are not
+  // restored, so the first tick measures them.
+  const saved = JSON.parse(JSON.stringify(am.exportQuotaState()));
+  saved[0].quota.modelWeekly = { '7d_oi': { utilization: 0.9, reset: RESET_7D * 1000 } };
+  const restored = new AccountManager(makeAccounts(1), 0.98, 0, 3);
+  restored.importQuotaState(saved);
+  assert.deepEqual(restored.accounts[0].quota.modelWeekly, {});
+  assert.equal(restored.needsModelWeekly(restored.accounts[0], 15 * MIN), true);
+});
+
+test('the timer re-measures an old Fable window with a Fable-model probe on a lower-tier template', async () => {
+  const up = await fableUpstream(0.4);
+  const am = measuredManager(1);
+  const a = am.accounts[0];
+  withOldFable(am, 0, 20_000);
+  const proxy = await claudeProxy(am, up.url, { warmupIntervalMs: 20, quotaMaxAgeMs: 10_000, modelWeeklyProbeModel: FABLE });
+  try {
+    assert.ok(await waitFor(() => fableOf(a).utilization === 0.4), 'the upstream value replaced the old one');
+    assert.ok(Date.now() - fableOf(a).at < 5_000, 'and stamped');
+    await settle(300); // ~15 more ticks, all inside the new 10 s age
+    assert.deepEqual(sentModels(up.seen), [FABLE], 'one Fable probe, none again inside the age');
+    assert.equal(a._mwProbes, 0, 'the window came back: budget clear');
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
+test('R re-measures the Fable window at once: one Fable probe per account, the template when refused', async () => {
+  const up = await fableUpstream(0.4);
+  const refusing = await fableUpstream(0.4, { fable: res => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{}'); } });
+  try {
+    const am = measuredManager(2);
+    withOldFable(am, 0, 0);                  // fresh by its stamp — R measures anyway
+    withOldFable(am, 1, 0);
+    await withClaudeProxy(am, up.url, { modelWeeklyProbeModel: FABLE }, async proxy => {
+      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 2, measured: 2 });
+    });
+    assert.deepEqual(sentModels(up.seen), [FABLE, FABLE], 'one request per account');
+    assert.deepEqual(am.accounts.map(a => fableOf(a).utilization), [0.4, 0.4]);
+    assert.equal(am.needsModelWeekly(am.accounts[0], 15 * MIN), false, 'the timer waits a full age after R');
+
+    // A refused probe model (400) still leaves R measuring the account, with the template.
+    const am2 = measuredManager(1);
+    withOldFable(am2, 0, 0);
+    makeOld(am2, 0, 20 * MIN);
+    await withClaudeProxy(am2, refusing.url, { modelWeeklyProbeModel: FABLE }, async proxy => {
+      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 1, measured: 1 });
+    });
+    assert.deepEqual(sentModels(refusing.seen), [FABLE, 'claude-x']);
+    assert.ok(Date.now() - am2.accounts[0].quota.updatedAt < 5_000, '5h/7d measured by the template');
+    assert.equal(am2.accounts[0]._mwProbes, am2.maxWarmupTries, 'the refused model is not retried by the timer');
+  } finally {
+    await up.close();
+    await refusing.close();
+  }
+});
+
+test('a busy account gets its Fable probe in a real slot; a full one waits for a later tick', async () => {
+  let release;
+  const hold = new Promise(r => { release = r; });
+  const up = await fableUpstream(0.4, { hold });
+  const am = measuredManager(2, { maxConcurrent: 2 });
+  const [a0, a1] = am.accounts;
+  withOldFable(am, 0, 20_000);
+  withOldFable(am, 1, 20_000);
+  a0.inflight = 1;                           // serving Opus, one slot free
+  a1.inflight = 2;                           // full
+  const proxy = await claudeProxy(am, up.url, { warmupIntervalMs: 20, quotaMaxAgeMs: 10_000, modelWeeklyProbeModel: FABLE });
+  try {
+    assert.ok(await waitFor(() => a0._warming === true), 'a0 probed while busy');
+    assert.equal(a0.inflight, 2, 'the probe holds a real slot');
+    assert.equal(await am.acquireAccount(), null, 'so a client finds both accounts full');
+    await settle(100);
+    assert.equal(a1._warming, undefined, 'a full account is not probed');
+    assert.equal(a1._mwProbeAt, undefined, 'nor charged an attempt');
+    release();
+    assert.ok(await waitFor(() => fableOf(a0).utilization === 0.4));
+    assert.ok(await waitFor(() => a0.inflight === 1), 'the slot is given back');
+    a1.inflight = 1;                         // a request finished: a slot frees up
+    assert.ok(await waitFor(() => fableOf(a1).utilization === 0.4), 'a1 measured on a later tick');
+    assert.equal(a1.inflight, 1);
+    assert.deepEqual(probes(up.seen).map(r => r.auth), ['Bearer tok-0', 'Bearer tok-1']);
+    assert.deepEqual(sentModels(up.seen), [FABLE, FABLE]);
+  } finally {
+    release();
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
+test('a failed Fable probe waits a full age; an account that never reports the window stops at the budget', async () => {
+  const up = await fableUpstream(0.4, { fable: res => { res.writeHead(500); res.end(); } });
+  const am = measuredManager(1);
+  withOldFable(am, 0, 20_000);
+  const before = structuredClone(am.getStatus({ includeIdentity: true }).accounts[0]);
+  const proxy = await claudeProxy(am, up.url, { warmupIntervalMs: 20, quotaMaxAgeMs: 10_000, modelWeeklyProbeModel: FABLE });
+  try {
+    assert.ok(await waitFor(() => probes(up.seen).length === 1));
+    await settle(300);
+    assert.deepEqual(sentModels(up.seen), [FABLE], 'not retried inside the age');
+    assert.deepEqual(am.getStatus({ includeIdentity: true }).accounts[0], before, 'nothing changed');
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+
+  // 200 without the window, an age of 30 ms: three attempts, then nothing.
+  const silent = await fableUpstream(0.4, { fable: res => { res.writeHead(200, rl(0.5, 0.6)); res.end('{}'); } });
+  const am2 = measuredManager(1);
+  withOldFable(am2, 0, 20_000);
+  const proxy2 = await claudeProxy(am2, silent.url, { warmupIntervalMs: 10, quotaMaxAgeMs: 30, modelWeeklyProbeModel: FABLE });
+  try {
+    assert.ok(await waitFor(() => am2.accounts[0]._mwProbes === am2.maxWarmupTries));
+    await settle(300);
+    assert.equal(sentModels(silent.seen).filter(m => m === FABLE).length, am2.maxWarmupTries);
+    assert.equal(fableOf(am2.accounts[0]).utilization, 0.1, 'the old value stays until its reset');
+  } finally {
+    await closeProxy(proxy2);
+    await silent.close();
+  }
+});
+
+test('a template that already brings the window: one probe per account, never two', async () => {
+  const up = await fableUpstream(0.4);
+  const am = measuredManager(2);
+  withOldFable(am, 0, 20_000);               // Opus traffic keeps a0's stamp fresh, not its Fable window
+  withOldFable(am, 1, 20_000);
+  makeOld(am, 1, 20_000);                    // a1: everything old
+  const proxy = createProxyServer(am, { upstream: up.url, warmupIntervalMs: 20, quotaMaxAgeMs: 10_000 });
+  await listen(proxy);
+  try {
+    assert.equal(proxy.importProbeTemplate({ model: 'claude-fable-top', _elicitsModelWeekly: true }), true);
+    assert.ok(await waitFor(() => am.accounts.every(a => fableOf(a).utilization === 0.4)));
+    await settle(300);
+    assert.deepEqual(sentModels(up.seen), ['claude-fable-top', 'claude-fable-top'],
+      'the template as committed (no model swap), one request each');
+    assert.deepEqual(probes(up.seen).map(r => r.auth).sort(), ['Bearer tok-0', 'Bearer tok-1']);
+    assert.ok(Date.now() - am.accounts[1].quota.updatedAt < 5_000, "a1's 5h/7d came with it");
+  } finally {
+    await closeProxy(proxy);
+    await up.close();
+  }
+});
+
+test('a probe replays only the Claude Code identity line of the template system', async () => {
+  const MARKER = "You are Claude Code, Anthropic's official CLI for Claude.";
+  const big = 'x'.repeat(17_000);
+  const cases = [
+    [[{ type: 'text', text: 'x-anthropic-billing-header: cc_version=1;' },
+      { type: 'text', text: MARKER, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: big, cache_control: { type: 'ephemeral' } }], MARKER],
+    [`${MARKER}\n${big}`, MARKER],
+    ['You are a helpful assistant.', 'You are a helpful assistant.'],     // not Claude Code: as is
+    [[{ type: 'text', text: 'Be brief.' }], [{ type: 'text', text: 'Be brief.' }]],
+  ];
+  const up = await fableUpstream(0.4);
+  try {
+    for (const [system, expected] of cases) {
+      const am = measuredManager(1);
+      const proxy = createProxyServer(am, { upstream: up.url, warmupIntervalMs: 0, modelWeeklyProbeModel: false });
+      await listen(proxy);
+      try {
+        assert.equal(proxy.importProbeTemplate({ model: 'claude-x', system }), true);
+        await proxy.refreshQuotaAll();
+      } finally {
+        await closeProxy(proxy);
+      }
+      assert.deepEqual(JSON.parse(probes(up.seen).at(-1).body).system, expected);
+    }
+  } finally {
+    await up.close();
+  }
 });

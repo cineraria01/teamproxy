@@ -267,15 +267,22 @@ test('refreshQuotaAll re-probes already-measured accounts with fresh values', as
     assert.equal(am.accounts.every(a => a.quota.unified5h === 0.55), true,
       'measured accounts re-measured with the fresh utilization');
 
-    // An account with a request in flight is skipped — that response will
-    // refresh it anyway, and a probe would just race it.
+    // An account with a request in flight still gets R's Fable-shaped probe
+    // (its own responses may never carry the Fable window), in a real slot —
+    // and none at all when it is full.
     util = '0.80';
     am.accounts[1].inflight = 1;
     try {
-      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 2, measured: 2 },
-        'busy account excluded from the fan-out');
-      assert.equal(am.accounts[1].quota.unified5h, 0.55, 'busy account left untouched');
-      assert.equal(am.accounts[0].quota.unified5h, 0.8, 'idle accounts still refreshed');
+      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 3, measured: 3 },
+        'busy account with a free slot probed');
+      assert.equal(am.accounts[1].quota.unified5h, 0.8, 'busy account refreshed');
+      assert.equal(am.accounts[1].inflight, 1, 'its probe slot given back');
+      util = '0.90';
+      am.accounts[1].inflight = 3;            // full
+      assert.deepEqual(await proxy.refreshQuotaAll(), { targets: 3, measured: 2 },
+        'a full account is not probed (and says so in M/N)');
+      assert.equal(am.accounts[1].quota.unified5h, 0.8, 'full account left untouched');
+      assert.equal(am.accounts[0].quota.unified5h, 0.9, 'idle accounts still refreshed');
     } finally {
       am.accounts[1].inflight = 0;
     }
@@ -993,6 +1000,7 @@ test('a restored probe template lets forced re-measure work before any traffic (
     proxy: { apiKey: 'k' },
     upstream: `http://127.0.0.1:${upstreamPort}`,
     warmupIntervalMs: 0,
+    modelWeeklyProbeModel: false, // which template R replays, without the Fable model swap
   });
   await listen(proxy);
 
@@ -1024,6 +1032,7 @@ test('the first fresh commit replaces a restored template (fresh evidence wins)'
     proxy: { apiKey: 'k' },
     upstream: `http://127.0.0.1:${upstreamPort}`,
     warmupIntervalMs: 0,
+    modelWeeklyProbeModel: false, // which template R replays, without the Fable model swap
   });
   const port = await listen(proxy);
 

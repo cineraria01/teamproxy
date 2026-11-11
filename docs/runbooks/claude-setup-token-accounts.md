@@ -20,7 +20,9 @@ refresh 토큰이 없어 이 만료가 없다(약 1년).
   응답 헤더(`anthropic-ratelimit-unified-7d-*`)로 채워진다 — 장기 토큰에서도 정상이다.
 - 사용량 조회(`refreshAnthropicUsage`, `/api/oauth/usage`)와 프로필 조회는 **403**
   (`scope requirement any_of(user:profile, …)`)이다. 실패는 로그만 남고 계정을 격리하지 않는다. 그 결과
-  모델별 주간 창(Fable `7d_oi`)은 그 계정으로 Fable 요청이 지나가기 전까지 비고, 계정 이메일·
+  모델별 주간 창(Fable `7d_oi`)은 Fable 급 응답으로만 채워진다 — 그 계정으로 Fable 요청이 지나가거나,
+  Fable 모양 probe(틀이 Fable이 아니면 모델만 `modelWeeklyProbeModel`로 바꿈)가 `quotaMaxAgeMs`(기본 15분)마다
+  다시 잰다(2026-11-11부터, 그 전에는 처음 본 값에 멈춰 기계마다 달랐다). 계정 이메일·
   `accountUuid`를 알 수 없어 토큰 ↔ 계정 대응은 발급 순서로 직접 기록해야 한다.
 - 장기 토큰 계정이 401을 받으면 갱신 재시도 없이 오류 계정으로 빠지고 다른 계정으로 넘어간다
   (재시작 전까지 유지). 무효 토큰(복사하다 끝 글자가 빠진 107자)은 이렇게 보인다.

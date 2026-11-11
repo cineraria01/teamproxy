@@ -351,6 +351,12 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 - 다른 기기에서 쓴 사용량은 이 프록시를 지나지 않는다. 그래서 쉬는 계정도 숫자가 `quotaMaxAgeMs`(기본 15분, `0`·`false`면 끔)보다
   오래되면 warm-up 주기(`warmupIntervalMs`, 기본 5분)에 R과 같은 1토큰 요청으로 다시 잰다(Claude 풀). 요청 처리 중·꺼짐·오류·냉각·한도
   근처 계정과 곧 만료될 토큰은 건너뛰고, 계정 선택은 새 숫자로만 바뀐다. 예전 설정에 남은 `quotaProbeSeconds`는 읽지 않는다.
+- Fable 주간(`7d_oi`)은 Fable 급 응답에만 실려 Opus·Haiku 요청과 probe로는 갱신되지 않는다. 그래서 창마다 잰 시각을 따로 두고,
+  `quotaMaxAgeMs`보다 오래된 계정은 다음 주기에 Fable 모양 1토큰 요청(틀이 Fable이면 그대로, 아니면 모델만
+  `modelWeeklyProbeModel`, 기본 `claude-fable-5-1`)으로 다시 잰다. 이 응답이 5h·7d도 함께 주므로 쉬는 계정 재측정과 겹쳐 두 번
+  보내지 않는다. 요청 처리 중인 계정도 빈 자리가 있으면 그 자리를 잡고 재고, R(`teamclaude reload`)은 그 자리에서 잰다.
+  계정당 `quotaMaxAgeMs`에 한 번(실패 포함)이고, 창을 끝내 주지 않는 계정은 세 번 뒤 멈춘다(2026-11-11, 기계마다 Fable 값이
+  달랐던 일). probe는 틀의 system 대신 Claude Code 첫 줄만 보낸다(입력 34토큰).
   `quotaMaxAgeMs`를 바꾸거나 끈 것은 `teamclaude restart`(또는 워커 교체) 뒤에 반영된다(`reload`·SIGHUP은 계정만 다시 읽는다).
 - 그 뒤로는 use-or-lose다. `switchThreshold`(기본 0.98) 아래인 계정 중 주간 한도가 가장 빨리 초기화되는 계정을 먼저 쓴다.
   동률이면 세션 초기화가 빠른 쪽, 그다음 세션 사용률이 낮은 쪽이다. `priority`로 고정한 계정이 이보다 앞선다.
