@@ -572,6 +572,7 @@ teamclaude remote off         # 원격 요청 거절 + serve 끔
    10초마다 새로 고친다(= `<풀> enable|disable|priority|reload`). 공유 → 홈 화면에 추가로 앱처럼 쓸 수 있다.
 3. **API 주소와 키를 바꿀 수 있는 앱**(Anthropic·OpenAI 호환 클라이언트, 셀비 「원격 프록시」)은 주소에
    `https://<기계>.<tailnet>.ts.net:8456`(Codex 풀은 `:8457`), 키 칸에 토큰을 넣는다. `http://` 평문 주소는 쓰지 않는다.
+   원격 `/byok`(셀비 「원격 프록시」의 Claude 글 AI)는 **이 기계 BYOK가 켜져 있어야 한다**(설정 `byok.enabled`·`byok.apiKey` 뒤 `teamclaude restart`). 토큰만 보내면 프록시가 BYOK 키를 넣어 주고, 꺼져 있으면 409 `byok_off`.
 
 자료 API: `GET /teamproxy/status`(토큰. 로컬은 `proxy.apiKey`도 된다) — `{pool, version, accounts:[{n, name, tag, enabled, active, priority,
 state, session, weekly, fable, thirdParty, end, stale}], requests:{active}, updatedAt}`. 막대는 `{pct, resetsAt}`이고

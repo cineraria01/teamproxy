@@ -152,6 +152,18 @@ export function matchByokSurface(url, prefix) {
 export function applyLocalByokKey(req, config) {
   if (!config?.enabled || !config.allowLocalWithoutKey) return false;
   if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress)) return false;
+  return fillByokKey(req, config);
+}
+
+// A request the supervisor admitted through `tailscale serve` already proved the
+// remote token, which it then removed. A phone client holds that token only, so
+// the BYOK key is filled in for it; a client that sent a key of its own keeps it.
+export function applyRemoteByokKey(req, config) {
+  if (!config?.enabled) return false;
+  return fillByokKey(req, config);
+}
+
+function fillByokKey(req, config) {
   const match = matchByokSurface(req.url, config.prefix);
   if (req.method !== 'POST' || match?.path.split('?')[0] !== '/v1/messages') return false;
   const headers = req.headers;

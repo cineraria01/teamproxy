@@ -431,6 +431,7 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 
 **BYOK(선택).** `byok` 설정을 넣었을 때만 `/byok/v1/…` 경로로 외부 "자기 키" 클라이언트를 받는다. Claude Code가 쓰는 `/v1/…`
 요청은 바이트 그대로다. 세부와 위험은 [원본 README 사본](docs/reference/upstream-README.md)의 BYOK 절.
+원격(`tailscale serve`, 폰에서 AI 연결)으로 `/byok`를 쓰려면 이 기계 BYOK가 켜져 있어야 한다 — 원격 토큰을 통과한 요청에 BYOK 키를 넣어 주고, 꺼져 있으면 409 `byok_off`(INSTALL-ALL §9-2).
 
 설정 키 전체 목록은 [원본 README 사본의 Configuration 절](docs/reference/upstream-README.md#configuration),
 이 포크의 운영값은 INSTALL-ALL §3.

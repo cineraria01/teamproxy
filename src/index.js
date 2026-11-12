@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { assertSafeProxyConfig, loadOrCreateConfig, loadConfig, atomicConfigUpdate, getConfigPath, getServerStatePath, writeServerState, readServerState, clearServerState, readQuotaCache, writeQuotaCache, writeQuotaCacheSync, removeQuotaTempFilesSync, normalizeTokenRefreshIntervalMs } from './config.js';
 import { AccountManager } from './account-manager.js';
 import { createProxyServer, keyMatches } from './server.js';
-import { applyLocalByokKey, normalizeByokConfig } from './byok.js';
+import { applyLocalByokKey, applyRemoteByokKey, matchByokSurface, normalizeByokConfig } from './byok.js';
 import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon } from './oauth.js';
 import {
   assertSafeCodexArgs,
@@ -395,6 +395,8 @@ async function superviseServerCommand() {
   const config = await loadOrCreateConfig();
   assertSafeProxyConfig(config);
   const byokConfig = normalizeByokConfig(config.byok);
+  const byokOffMessage = `BYOK is off on this machine. Add "byok": {"enabled": true, "apiKey": "<openssl rand -base64 24>"} `
+    + `to ${getConfigPath().replace(homedir(), '~')}, then run: ${cliName(config)} restart`;
   const port = config?.proxy?.port;
   const proxyApiKey = config?.proxy?.apiKey;
   const existing = await findRunningServer(config);
@@ -692,6 +694,16 @@ async function superviseServerCommand() {
     }
     if (isLocal && !admitLocalTeamproxy(req, res)) return;
     if (!viaServe) applyLocalByokKey(req, byokConfig);
+    else if (byokConfig.enabled) applyRemoteByokKey(req, byokConfig);
+    else if (matchByokSurface(req.url, '/byok')) {
+      // Never let a remote /byok call fall through to the upstream (a 404 there
+      // reads as a broken key). 409 byok_off is a contract with the Selvi client.
+      rejectPublicRequest(req, res, 409, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'byok_off', message: byokOffMessage },
+      });
+      return;
+    }
     if (!isLocal) delete req.headers['x-teamcodex-status-identity'];
     if (consumeDeploymentDrain(req, res, isLocal)) return;
     if (consumeCodexRecoveryReceipt(req, res, isLocal)) return;

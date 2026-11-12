@@ -8,6 +8,7 @@ import {
   hasUnsafeSegments,
   applyByokRequest,
   applyLocalByokKey,
+  applyRemoteByokKey,
   answerByokPreflight,
   admitByok,
 } from '../src/byok.js';
@@ -345,4 +346,34 @@ test('admitByok rejects when the byok concurrency cap is reached', () => {
 test('admitByok admits when there is headroom and a free slot', () => {
   const config = { minUsableAccounts: 1, maxConcurrent: 2 };
   assert.equal(admitByok({ usableCount: 4, byokInflight: 1, config }).ok, true);
+});
+
+// --- applyRemoteByokKey ----------------------------------------------------
+
+test('remote (serve-admitted) Messages requests get the stored BYOK key without allowLocalWithoutKey', () => {
+  const config = normalizeByokConfig({ enabled: true, apiKey: VALID_KEY });
+  const req = makeReq({ 'tailscale-user-login': 'me@example.com' }, 'POST', '/byok/v1/messages?beta=true');
+  assert.equal(applyRemoteByokKey(req, config), true);
+  assert.equal(req.headers['x-api-key'], VALID_KEY);
+  assert.equal(applyRemoteByokKey(makeReq({}, 'POST', '/byok/v1/messages'), normalizeByokConfig(undefined)), false);
+});
+
+test('remote BYOK fill keeps supplied credentials and refuses browser or non-Messages requests', () => {
+  const config = normalizeByokConfig({ enabled: true, apiKey: VALID_KEY });
+  const cases = [
+    { headers: { 'x-api-key': 'own-key' } },
+    { headers: { authorization: 'Bearer own-key' } },
+    { headers: { origin: 'https://example.test' } },
+    { headers: { 'sec-fetch-site': 'cross-site' } },
+    { headers: { 'content-type': 'text/plain' } },
+    { method: 'GET' },
+    { url: '/v1/messages' },
+    { url: '/byok/v1/models' },
+  ];
+  for (const c of cases) {
+    const req = makeReq(c.headers, c.method || 'POST', c.url || '/byok/v1/messages');
+    const before = req.headers['x-api-key'];
+    assert.equal(applyRemoteByokKey(req, config), false, JSON.stringify(c));
+    assert.equal(req.headers['x-api-key'], before, JSON.stringify(c));
+  }
 });

@@ -183,7 +183,7 @@ const accounts = () => [
   { name: 'account-b', type: 'apikey', apiKey: 'fixture-b' },
 ];
 
-async function startServer(t, { remote, upstream = 'http://127.0.0.1:9', host = '127.0.0.1', cursor = null } = {}) {
+async function startServer(t, { remote, upstream = 'http://127.0.0.1:9', host = '127.0.0.1', cursor = null, byok = null } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'teamproxy-remote-'));
   const configPath = join(dir, 'config.json');
   const port = await unusedPort();
@@ -194,6 +194,7 @@ async function startServer(t, { remote, upstream = 'http://127.0.0.1:9', host = 
     activeWarmup: false,
     tokenRefreshIntervalMs: 0,
     ...(remote ? { remote } : {}),
+    ...(byok ? { byok } : {}),
     accounts: cursor
       ? [{ name: 'cursor-1', provider: 'cursor', type: 'oauth', accountUuid: 'u-1',
         accessToken: 'tok-1', refreshToken: 'tok-1', expiresAt: Date.now() + 3_600_000 }]
@@ -318,6 +319,75 @@ test('remote requests reach the upstream without the token or Tailscale identity
   assert.ok(!forwarded.includes(LOGIN));
   assert.equal(seen[0]['x-forwarded-for'], undefined);
   assert.equal(seen[0]['x-api-key'], 'fixture-a');
+});
+
+// Selvi's phone app holds the remote token only and calls <remote>/byok/v1/messages.
+const BYOK_KEY = 'byok-remote-test-secret-0123456789';
+async function byokUpstream(t) {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    seen.push({ url: req.url, headers: req.headers });
+    req.resume();
+    req.once('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'msg', type: 'message', content: [] }));
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  return { seen, url: `http://127.0.0.1:${upstreamPort}` };
+}
+const byokCall = (port, headers) => request(port, '/byok/v1/messages', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...headers },
+  body: JSON.stringify({ model: 'claude-test', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+});
+
+test('remote /byok: the remote token stands in for the BYOK key; the client\'s own key is kept', { timeout: 20000 }, async t => {
+  const up = await byokUpstream(t);
+  const { port, log } = await startServer(t, {
+    remote: remoteOn, upstream: up.url, byok: { enabled: true, apiKey: BYOK_KEY, minUsableAccounts: 0 },
+  });
+  const ok = await byokCall(port, serve({ 'x-api-key': TOKEN }));
+  assert.equal(ok.status, 200, ok.body);
+  assert.equal(up.seen.length, 1);
+  assert.equal(up.seen[0].url, '/v1/messages');
+  const forwarded = JSON.stringify(up.seen[0].headers);
+  assert.ok(!forwarded.includes(TOKEN) && !forwarded.includes(BYOK_KEY) && !forwarded.includes(LOGIN));
+  assert.equal(up.seen[0].headers['x-api-key'], 'fixture-a');
+  assert.equal((await byokCall(port, serve({ authorization: `Bearer ${TOKEN}` }))).status, 200);
+
+  // A key the client sent itself is checked as sent, never replaced.
+  assert.equal((await byokCall(port, serve({ authorization: `Bearer ${TOKEN}`, 'x-api-key': BYOK_KEY }))).status, 200);
+  assert.equal((await byokCall(port, serve({ authorization: `Bearer ${TOKEN}`, 'x-api-key': 'not-the-byok-key' }))).status, 401);
+  assert.equal((await byokCall(port, serve({ 'x-api-key': 'wrong-token' }))).status, 401);
+  assert.equal(up.seen.length, 3);
+
+  // Locally nothing changed: no automatic key without allowLocalWithoutKey.
+  assert.equal((await byokCall(port, {})).status, 401);
+  assert.equal((await byokCall(port, { 'x-api-key': BYOK_KEY })).status, 200);
+  assert.equal(up.seen.length, 4);
+  assert.ok(!log().includes(TOKEN) && !log().includes(BYOK_KEY), 'neither secret reaches a log line');
+});
+
+test('remote /byok with BYOK off: 409 byok_off, nothing reaches the upstream', { timeout: 20000 }, async t => {
+  const up = await byokUpstream(t);
+  const { port } = await startServer(t, { remote: remoteOn, upstream: up.url });
+  const off = await byokCall(port, serve({ 'x-api-key': TOKEN }));
+  assert.equal(off.status, 409, off.body);
+  const body = JSON.parse(off.body);
+  assert.equal(body.type, 'error');
+  assert.equal(body.error.type, 'byok_off');
+  assert.match(body.error.message, /"enabled": true/);
+  assert.match(body.error.message, /teamclaude restart/);
+  assert.equal((await byokCall(port, serve({ 'x-api-key': 'wrong-token' }))).status, 401);
+  assert.equal(up.seen.length, 0);
+  // Non-BYOK remote paths are untouched.
+  const plain = await request(port, '/v1/messages', {
+    method: 'POST', headers: serve({ 'x-api-key': TOKEN, 'content-type': 'application/json' }), body: '{}',
+  });
+  assert.equal(plain.status, 200);
+  assert.equal(up.seen.length, 1);
 });
 
 test('account actions change the config exactly like the CLI', { timeout: 30000 }, async t => {
