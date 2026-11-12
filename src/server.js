@@ -86,6 +86,7 @@ import {
   peekConnectFrame,
 } from './cursor.js';
 import { createCursorOpenAI, cursorPoolProblem, isCursorOpenAIPath, stripCursorLane } from './cursor-openai.js';
+import { HUD_HTML, buildTeamproxyStatus, isTeamproxyPath, parsePriority } from './remote.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -385,6 +386,26 @@ export function keyMatches(given, expected) {
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+
+const TEAMPROXY_POOLS = { anthropic: 'claude', codex: 'codex', agy: 'agy', grok: 'grok', cursor: 'cursor' };
+
+function readSmallJson(req, limit = 1024) {
+  return new Promise(resolve => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > limit) { resolve(undefined); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.once('end', () => {
+      if (!size) { resolve(null); return; }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { resolve(undefined); }
+    });
+    req.once('error', () => resolve(undefined));
+  });
 }
 
 export function createProxyServer(accountManager, config, hooks = {}) {
@@ -1901,6 +1922,95 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   // reason to probe. Returns { targets, measured }, or -1 when no probe template
   // exists yet (nothing has flowed through the proxy, so there is no
   // known-accepted request shape to replay).
+  const sendJson = (res, status, payload) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(payload));
+  };
+  const teamproxyError = (res, status, type, message) => sendJson(res, status, { type: 'error', error: { type, message } });
+
+  // GET /teamproxy/status | /teamproxy/hud, POST /teamproxy/reload,
+  // POST /teamproxy/accounts/<n>/{enable,disable,priority}. Actions write the
+  // config exactly like `<pool> enable|disable|priority` and reload the accounts
+  // the same way (hooks.onAccountAction); reload is the `<pool> reload` probe.
+  async function handleTeamproxy(req, res) {
+    const path = req.url.split('?', 1)[0];
+    const pool = TEAMPROXY_POOLS[provider];
+    if (req.method === 'GET' && path === '/teamproxy/status') {
+      sendJson(res, 200, buildTeamproxyStatus(accountManager.getStatus({ includeIdentity: true }),
+        { pool, version: hooks.teamproxyVersion ?? null }));
+      return;
+    }
+    if (req.method === 'GET' && path === '/teamproxy/hud') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      });
+      res.end(HUD_HTML);
+      return;
+    }
+    if (req.method !== 'POST') {
+      teamproxyError(res, path === '/teamproxy/status' || path === '/teamproxy/hud' ? 405 : 404, 'not_found_error', 'Unknown teamproxy resource.');
+      return;
+    }
+    if (path === '/teamproxy/reload') {
+      const result = await refreshQuotaAll();
+      if (result === -1 || result == null) {
+        teamproxyError(res, 409, 'quota_reload_unavailable',
+          'No request has flowed through the proxy yet, so there is nothing to re-measure with.');
+        return;
+      }
+      sendJson(res, 200, { ...result, total: accountManager.accounts.length });
+      return;
+    }
+    const match = /^\/teamproxy\/accounts\/([1-9]\d{0,3})\/(enable|disable|priority)$/.exec(path);
+    if (!match) {
+      teamproxyError(res, 404, 'not_found_error', 'Unknown teamproxy resource.');
+      return;
+    }
+    const account = accountManager.accounts[Number(match[1]) - 1];
+    if (!account) {
+      teamproxyError(res, 404, 'not_found_error', `No account number ${match[1]}.`);
+      return;
+    }
+    const action = match[2];
+    const body = await readSmallJson(req);
+    let priority = null;
+    if (action === 'priority') {
+      priority = body && typeof body === 'object' ? parsePriority(body.priority ?? null) : null;
+      if (!priority || body?.priority === undefined) {
+        teamproxyError(res, 400, 'invalid_request_error', 'Send {"priority": <number|"auto">}.');
+        return;
+      }
+    } else if (body === undefined) {
+      teamproxyError(res, 400, 'invalid_request_error', 'Invalid body.');
+      return;
+    }
+    if (!hooks.onAccountAction) {
+      teamproxyError(res, 404, 'not_found_error', 'Account actions are not available here.');
+      return;
+    }
+    try {
+      const found = await hooks.onAccountAction(account.name, action, priority);
+      if (!found) {
+        teamproxyError(res, 404, 'not_found_error', `Account "${account.name}" is not in the config.`);
+        return;
+      }
+      const after = accountManager.accounts.find(a => a.name === account.name);
+      sendJson(res, 200, {
+        ok: true,
+        n: Number(match[1]),
+        name: account.name,
+        enabled: after ? after.enabled !== false : null,
+        priority: after?.priority ?? null,
+      });
+    } catch (err) {
+      teamproxyError(res, 500, 'account_action_failed', err.message);
+    }
+  }
+
   async function refreshQuotaAll() {
     if (provider === 'codex') return refreshCodexQuotaAll();
     if (provider === 'agy') return refreshAgyQuotaAll();
@@ -2323,6 +2433,13 @@ export function createProxyServer(accountManager, config, hooks = {}) {
           type: 'error',
           error: { type: 'authentication_error', message: 'Invalid proxy API key' },
         });
+        return;
+      }
+
+      // Phone status surface (src/remote.js). The supervisor already checked the
+      // remote token / local action key; this worker only sees loopback.
+      if (isTeamproxyPath(req.url)) {
+        await handleTeamproxy(req, res);
         return;
       }
 

@@ -530,6 +530,65 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'anthropic-version: 2023-06-01' http
 
 확인이 실패하면 `src`·`package.json`을 `.pre-$d`로 되돌리고 같은 방법으로 다시 띄운다.
 
+## 9. 원격 접속 — 아이폰·다른 기기에서 풀 쓰기 (`<풀> remote`)
+
+프록시는 `127.0.0.1`에서만 받고, 원격은 `tailscale serve`(tailnet 안에서만 열리는 HTTPS, 인증서 정상)가 앞에 선다.
+Funnel(공개 주소)은 쓰지 않는다. 풀마다 원격 포트가 정해져 있다.
+
+| 풀 | 로컬 | 원격 주소 |
+|---|---|---|
+| teamclaude | 3456 | `https://<기계>.<tailnet>.ts.net:8456` |
+| teamcodex | 3457 | `…:8457` |
+| teamagy | 3458 | `…:8458` |
+| teamgrok | 3459 | `…:8459` |
+| teamcursor | 3460 | `…:8460` |
+
+### 9-1. 켜기·끄기·토큰
+
+```sh
+teamclaude remote on          # 토큰(32바이트)을 만들고, 허용 로그인 = 이 기계의 Tailscale 로그인, serve를 켠다
+teamclaude remote status      # 켬/끔, 주소, serve 상태, 허용 로그인 (토큰은 찍지 않는다)
+teamclaude remote token       # 토큰 보기 — 이 기계 터미널에서만
+teamclaude remote token --rotate   # 새 토큰. 옛 토큰은 바로 막힌다(재시작 없음)
+teamclaude remote off         # 원격 요청 거절 + serve 끔
+```
+
+- 원격 요청(serve가 붙이는 `Tailscale-User-Login`·`X-Forwarded-For`가 있는 요청)은 **토큰**(`x-api-key: <토큰>` 또는
+  `Authorization: Bearer <토큰>`)과 **허용 로그인**(`remote.allowLogins`, 설정 파일에서 더할 수 있다)이 둘 다 맞아야 한다.
+  틀리면 401/403이고 연속 실패는 점점 늦게 답한다. 헤더 없는 루프백 요청은 예전 그대로다.
+- 원격 토큰을 가져도 운영 경로(`/teamclaude/reload`·`rotate`·`accounts/sync`·reset-credit·drain)는 로컬에서만 된다.
+- `remote on`은 원격을 모르는 옛 서버가 떠 있으면 거절한다. 먼저 `<풀> update`로 올린다.
+- 설정의 `proxy.host`가 없거나 `0.0.0.0`이면 `remote status`가 경고한다. `"proxy.host": "127.0.0.1"`로 두고 `<풀> restart`.
+- 맥의 `tailscale` 명령은 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`을 쓴다(`TEAMPROXY_TAILSCALE_BIN`으로 바꿀 수 있다).
+
+### 9-2. 아이폰에서
+
+1. 아이폰에 **Tailscale 앱**을 깔고 프록시 PC와 **같은 계정**으로 로그인한다(둘 다 로그인돼 있어야 한다).
+2. 사파리에서 `https://<기계>.<tailnet>.ts.net:8456/teamproxy/hud`를 연다. 처음 한 번 토큰을 넣으면 그 브라우저에만
+   저장된다. 계정마다 5h·7d·Fable 막대, 상태, 켜기·끄기·우선 1·자동 순서 단추, 「사용량 다시 불러오기」가 있고
+   10초마다 새로 고친다(= `<풀> enable|disable|priority|reload`). 공유 → 홈 화면에 추가로 앱처럼 쓸 수 있다.
+3. **API 주소와 키를 바꿀 수 있는 앱**(Anthropic·OpenAI 호환 클라이언트, 셀비 「원격 프록시」)은 주소에
+   `https://<기계>.<tailnet>.ts.net:8456`(Codex 풀은 `:8457`), 키 칸에 토큰을 넣는다. `http://` 평문 주소는 쓰지 않는다.
+
+자료 API: `GET /teamproxy/status`(토큰. 로컬은 `proxy.apiKey`도 된다) — `{pool, version, accounts:[{n, name, tag, enabled, active, priority,
+state, session, weekly, fable, thirdParty, end, stale}], requests:{active}, updatedAt}`. 막대는 `{pct, resetsAt}`이고
+풀에 없는 칸은 `null`(grok·cursor는 `session` 하나, Fable은 Claude만, `thirdParty`는 agy의 Claude/GPT 묶음,
+`end`는 기록된 구독 끝 날짜). 동작: `POST /teamproxy/accounts/<n>/enable|disable`,
+`POST /teamproxy/accounts/<n>/priority` 본문 `{"priority": 1}` 또는 `{"priority": "auto"}`, `POST /teamproxy/reload`
+(로컬에서도 `proxy.apiKey`나 토큰이 필요하다. 키가 하나도 없는 설정에서만 로컬은 키 없이 된다). `<n>`은 `<풀> accounts`의 번호다.
+
+### 9-3. Ovis 탭으로 하단 표시줄 보기
+
+Ovis(폰 화면)는 Herdr 터미널을 탭으로 보여 준다. tmux 없이 도는 하단 표시줄을 hc 터미널로 띄운다:
+
+```sh
+hc run --bg --no-parent --name teamproxy-hud -- \
+  python3 ~/.local/share/teamclaude-global/src/hud/statusline.py --claude --plain --watch
+# Codex 풀: … statusline.py --plain --watch   (agy·grok·cursor는 --agy·--grok·--cursor)
+```
+
+`--plain --watch`는 tmux 없이 2초마다 다시 그린다. 이 기계의 `hc-sweep`이 닫지 않게 이름을 `~/.claude-tasks/keep`에 넣는다.
+
 ## 하지 말 것
 
 - 업스트림(sangrokjung·jung-wan-kim·karpeleslab)에서 설치하거나 그쪽에 PR·이슈를 보내지 않는다.

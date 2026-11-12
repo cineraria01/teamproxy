@@ -2,7 +2,7 @@
 
 import { fork, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync, realpathSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import { homedir } from 'node:os';
@@ -111,6 +111,10 @@ import {
   resolveCursorBin,
 } from './cursor.js';
 import { isCursorLanePath } from './cursor-openai.js';
+import {
+  SERVE_HEADERS, applyAccountAction, failureDelayMs, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
+  remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
+} from './remote.js';
 
 const SUPERVISED_WORKER_ENV = 'TEAMCLAUDE_SUPERVISED_WORKER';
 const SUPERVISOR_PID_ENV = 'TEAMCLAUDE_SUPERVISOR_PID';
@@ -355,6 +359,9 @@ switch (command) {
     await uninstallClaudeWrapperCommand();
     process.exit(0);
     break;
+  case 'remote':
+    process.exit(await remoteCommand());
+    break;
   case 'update':
     process.exit(await updateCommand({ pool: cliName(), configPath: getConfigPath(), argv: args.slice(1) }));
     break;
@@ -593,6 +600,65 @@ async function superviseServerCommand() {
     return true;
   }
 
+  // Remote access settings are re-read when the config file changes, so
+  // `remote on|off|token --rotate` applies without a restart.
+  const configPath = getConfigPath();
+  let remoteCache = { mtimeMs: null, remote: config.remote };
+  const currentRemote = () => {
+    try {
+      const { mtimeMs } = statSync(configPath);
+      if (mtimeMs !== remoteCache.mtimeMs) {
+        remoteCache = { mtimeMs, remote: JSON.parse(readFileSync(configPath, 'utf8')).remote };
+      }
+    } catch { /* unreadable mid-write: keep the last good settings */ }
+    return remoteCache.remote;
+  };
+  let remoteFailures = 0;
+
+  // A request through `tailscale serve`: remote token + allowed login, then the
+  // token and the Tailscale headers are dropped so neither reaches the worker
+  // (and from there an upstream API). The token never appears in a log line.
+  function admitServeRequest(req, res) {
+    const remote = currentRemote();
+    const shellOnly = req.method === 'GET' && req.url.split('?', 1)[0] === '/teamproxy/hud';
+    const verdict = remoteVerdict(req.headers, remote, { shellOnly });
+    if (!verdict.ok) {
+      const reject = () => rejectPublicRequest(req, res, verdict.status, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: verdict.type, message: verdict.message },
+      });
+      if (!verdict.counts) reject();
+      else {
+        remoteFailures += 1;
+        req.pause();
+        setTimeout(reject, failureDelayMs(remoteFailures)).unref?.();
+      }
+      return false;
+    }
+    if (!shellOnly) remoteFailures = 0;
+    for (const name of SERVE_HEADERS) delete req.headers[name];
+    if (tokenMatches(req.headers['x-api-key'], remote.token)) delete req.headers['x-api-key'];
+    if (tokenMatches(presentedKeys(req.headers)[1], remote.token)) delete req.headers.authorization;
+    return true;
+  }
+
+  // Locally the surface needs a key whenever one is configured, like the
+  // identity-bearing /teamclaude/status (and a web page the user merely visits
+  // could otherwise POST to the loopback port). Only the static HUD shell is open.
+  function admitLocalTeamproxy(req, res) {
+    if (!isTeamproxyPath(req.url)) return true;
+    if (req.method === 'GET' && req.url.split('?', 1)[0] === '/teamproxy/hud') return true;
+    const proxyKey = config.proxy?.apiKey;
+    const remoteToken = currentRemote()?.token;
+    if (!proxyKey && !remoteToken) return true;
+    if (presentedKeys(req.headers).some(key => keyMatches(key, proxyKey) || tokenMatches(key, remoteToken))) return true;
+    rejectPublicRequest(req, res, 401, { 'content-type': 'application/json' }, {
+      type: 'error',
+      error: { type: 'authentication_error', message: 'The teamproxy surface needs the proxy API key or the remote token.' },
+    });
+    return false;
+  }
+
   const listener = http.createServer((req, res) => {
     const clientKey = req.headers['x-api-key'];
     const authorization = req.headers.authorization;
@@ -602,10 +668,23 @@ async function superviseServerCommand() {
       ? authorization.slice('Bearer '.length)
       : null;
     const remoteAddr = req.socket.remoteAddress;
-    const isLocal = remoteAddr === '127.0.0.1'
+    // `tailscale serve` dials from loopback but marks the request with Tailscale
+    // headers: such a request is remote, so every local-only fence below applies.
+    const viaServe = isServeRequest(req.headers);
+    const isLocal = !viaServe && (remoteAddr === '127.0.0.1'
       || remoteAddr === '::1'
-      || remoteAddr === '::ffff:127.0.0.1';
-    applyLocalByokKey(req, byokConfig);
+      || remoteAddr === '::ffff:127.0.0.1');
+    const remoteAuthorized = viaServe && admitServeRequest(req, res);
+    if (viaServe && !remoteAuthorized) return;
+    if (isTeamproxyPath(req.url) && !isLocal && !remoteAuthorized) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'Teamproxy remote surface is served through tailscale serve only.' },
+      });
+      return;
+    }
+    if (isLocal && !admitLocalTeamproxy(req, res)) return;
+    if (!viaServe) applyLocalByokKey(req, byokConfig);
     if (!isLocal) delete req.headers['x-teamcodex-status-identity'];
     if (consumeDeploymentDrain(req, res, isLocal)) return;
     if (consumeCodexRecoveryReceipt(req, res, isLocal)) return;
@@ -663,7 +742,7 @@ async function superviseServerCommand() {
       return;
     }
     if (config.proxy?.apiKey && !keyMatches(clientKey, config.proxy.apiKey)
-      && !keyMatches(bearerKey, config.proxy.apiKey) && !isLocal) {
+      && !keyMatches(bearerKey, config.proxy.apiKey) && !isLocal && !remoteAuthorized) {
       rejectPublicRequest(req, res, 401, { 'content-type': 'application/json' }, {
         type: 'error',
         error: { type: 'authentication_error', message: 'Invalid proxy API key' },
@@ -674,6 +753,8 @@ async function superviseServerCommand() {
       res.setHeader('x-teamcodex-active-requests', String(activeRequests()));
       res.setHeader('x-teamcodex-source-hash', RUNTIME_SOURCE_HASH);
       res.setHeader('x-teamcodex-deployment-draining', deploymentDraining ? '1' : '0');
+      // `remote on` refuses to open tailscale serve in front of a server without the remote gate.
+      res.setHeader('x-teamproxy-remote', '1');
     }
     const contentLength = req.headers['content-length'];
     const bypassAdmission = req.method === 'GET'
@@ -1798,6 +1879,17 @@ async function proxyWorkerCommand() {
   };
   // POST /teamclaude/accounts/sync runs the same account-only reload as SIGHUP (Windows has no SIGHUP).
   hooks.onAccountsSync = () => liveSync();
+  // POST /teamproxy/accounts/<n>/… : the same config edit as the CLI, then the same live reload.
+  hooks.onAccountAction = async (name, action, priority) => {
+    let found = false;
+    await atomicConfigUpdate(cfg => {
+      const acct = cfg.accounts.find(a => a.name === name);
+      if (acct) { found = true; applyAccountAction(acct, action, priority); }
+    });
+    if (found) await liveSync();
+    return found;
+  };
+  hooks.teamproxyVersion = installedCommit();
   const server = createProxyServer(accountManager, config, hooks);
   let liveSyncChain = Promise.resolve();
   let queuedSync = null; // a sync that has not started yet already covers any later request
@@ -2771,12 +2863,11 @@ async function machineCommand() {
   let update;
   if (command === 'enable' || command === 'disable') {
     const enabled = command === 'enable';
-    update = acct => { acct.enabled = enabled; result = { enabled }; };
+    update = acct => { applyAccountAction(acct, command); result = { enabled }; };
   } else if (command === 'priority') {
-    const clearing = ['auto', 'clear', 'none', 'null'].includes(rawPriority);
-    const n = Math.floor(Number(rawPriority));
-    if (rawPriority === undefined || (!clearing && !Number.isFinite(n))) machineFail('usage', 'priority needs a number or "auto"');
-    update = acct => { if (clearing) delete acct.priority; else acct.priority = n; result = { priority: clearing ? null : n }; };
+    const priority = rawPriority === undefined ? null : parsePriority(rawPriority);
+    if (!priority) machineFail('usage', 'priority needs a number or "auto"');
+    update = acct => { applyAccountAction(acct, 'priority', priority); result = { priority: priority.clear ? null : priority.value }; };
   }
   const saved = await atomicConfigUpdate(cfg => {
     const idx = cfg.accounts.findIndex(a => a.name === name);
@@ -3958,7 +4049,7 @@ async function setEnabledCommand(enabled) {
   let found = false;
   const config = await atomicConfigUpdate(cfg => {
     const acct = cfg.accounts.find(a => a.name === name);
-    if (acct) { acct.enabled = enabled; found = true; }
+    if (acct) { applyAccountAction(acct, enabled ? 'enable' : 'disable'); found = true; }
   });
   if (!found) { console.error(`Account "${name}" not found`); process.exit(1); }
   console.log(`${enabled ? 'Enabled' : 'Disabled'} account "${name}"`);
@@ -3975,22 +4066,17 @@ async function setPriorityCommand() {
     console.error('  account to automatic ordering: weekly reset soonest is drained first.');
     process.exit(1);
   }
-  const clearing = raw === 'auto' || raw === 'clear' || raw === 'none' || raw === 'null';
-  let value = null;
-  if (!clearing) {
-    const n = Number(raw);
-    if (!Number.isFinite(n)) { console.error(`Invalid priority "${raw}" — expected a number or "auto"`); process.exit(1); }
-    value = Math.floor(n);
-  }
+  const priority = parsePriority(raw);
+  if (!priority) { console.error(`Invalid priority "${raw}" — expected a number or "auto"`); process.exit(1); }
   let found = false;
   const config = await atomicConfigUpdate(cfg => {
     const acct = cfg.accounts.find(a => a.name === name);
-    if (acct) { found = true; if (clearing) delete acct.priority; else acct.priority = value; }
+    if (acct) { found = true; applyAccountAction(acct, 'priority', priority); }
   });
   if (!found) { console.error(`Account "${name}" not found`); process.exit(1); }
-  console.log(clearing
+  console.log(priority.clear
     ? `Set "${name}" to auto (use-or-lose ordering: weekly reset soonest first)`
-    : `Set priority of "${name}" to ${value} (lower = preferred first)`);
+    : `Set priority of "${name}" to ${priority.value} (lower = preferred first)`);
   await noteRunningServerReload(config);
 }
 
@@ -4073,6 +4159,7 @@ Commands:
   enable <name>       Re-enable an account
   priority <name> <n> Set selection priority ("auto" clears it)
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
   help                Show this help
 
 agy itself must be signed in once (run \`agy\` and log in); the proxy replaces
@@ -4110,6 +4197,7 @@ Commands:
   enable <name>       Re-enable an account
   priority <name> <n> Set selection priority ("auto" clears it)
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
   help                Show this help
 
 grok itself must be signed in once (run \`grok\` and log in, any account); the
@@ -4147,6 +4235,7 @@ Commands:
   enable <name>       Re-enable an account
   priority <name> <n> Set selection priority ("auto" clears it)
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
   help                Show this help
 
 cursor-agent itself must be signed in once (cursor-agent login, any account); the
@@ -4190,6 +4279,7 @@ Commands:
   install-claude-wrapper   Install the transparent Claude launcher
   uninstall-claude-wrapper Remove it and restore the prior launchers
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
   help                Show this help
 
 Options:
@@ -4234,6 +4324,7 @@ Commands:
   install-claude-wrapper   Install the transparent Claude launcher
   uninstall-claude-wrapper Remove it and restore the prior launchers
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
+  remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
   help                Show this help
 
 Options:
@@ -5136,6 +5227,125 @@ function isCursorMode(config) {
 }
 
 /** The wrapper command of this pool, for "run this next" hints. */
+// Commit of this install (`<pool> update` records it), else of the checkout.
+function installedCommit() {
+  const root = dirname(dirname(RUNTIME_ENTRY_PATH));
+  try {
+    const commit = readFileSync(join(root, '.teamproxy-commit'), 'utf8').trim();
+    if (commit) return commit.slice(0, 8);
+  } catch { /* not an updated install */ }
+  const git = spawnSync('git', ['-C', root, 'rev-parse', '--short=8', 'HEAD'], { encoding: 'utf8', timeout: 2000 });
+  return git.status === 0 ? git.stdout.trim() || null : null;
+}
+
+// ── remote (tailscale serve) ────────────────────────────────
+
+function runTailscale(tsArgs) {
+  const result = spawnSync(tailscaleBin(), tsArgs, { encoding: 'utf8', timeout: 20_000 });
+  if (result.error) return { ok: false, out: '', err: result.error.code === 'ENOENT' ? 'tailscale command not found' : result.error.message };
+  return { ok: result.status === 0, out: result.stdout || '', err: (result.stderr || '').trim() };
+}
+
+function tailscaleJson(tsArgs) {
+  const result = runTailscale(tsArgs);
+  if (!result.ok) return { error: result.err || `tailscale ${tsArgs.join(' ')} failed` };
+  try { return { value: JSON.parse(result.out) }; } catch { return { error: `tailscale ${tsArgs.join(' ')}: unreadable JSON` }; }
+}
+
+async function remoteCommand() {
+  const sub = args[1];
+  const cli = cliName();
+  const pool = cli.replace(/^team/, '');
+  const config = await loadOrCreateConfig();
+  const port = remotePort(pool, config.remote);
+  const localPort = config.proxy.port;
+  const urlFor = dnsName => (dnsName ? `https://${dnsName}:${port}` : `https://<this machine>.ts.net:${port}`);
+  // Remote access is meant to arrive through serve only; a wider bind is the old default.
+  const host = typeof config.proxy?.host === 'string' ? config.proxy.host.trim() : '';
+  const bindNote = ['127.0.0.1', 'localhost', '::1'].includes(host) ? null
+    : `Note: proxy.host is ${host ? `"${host}"` : 'unset'}, so the proxy also listens beyond loopback (guarded by proxy.apiKey only). `
+      + `Set "proxy.host": "127.0.0.1" and restart (${cli} restart) so tailscale serve is the only way in.`;
+
+  if (sub === 'token') {
+    if (args.includes('--rotate')) {
+      let token;
+      await atomicConfigUpdate(cfg => { cfg.remote = { ...cfg.remote, token: newRemoteToken() }; token = cfg.remote.token; });
+      console.log(token);
+      console.error('New remote token saved; the old one stops working now. Update the phone/app key.');
+      return 0;
+    }
+    if (!config.remote?.token) {
+      console.error(`No remote token yet. Run: ${cli} remote on   (or ${cli} remote token --rotate)`);
+      return 1;
+    }
+    console.log(config.remote.token);
+    return 0;
+  }
+
+  if (sub === 'on') {
+    const status = tailscaleJson(['status', '--json']);
+    if (status.error) { console.error(`Tailscale is not usable here: ${status.error}`); return 1; }
+    const self = selfFromStatus(status.value);
+    if (!self.login) { console.error('Tailscale is not logged in on this machine. Log in, then retry.'); return 1; }
+    const running = await findRunningServer(config);
+    if (running) {
+      const res = await fetch(`http://127.0.0.1:${running.port}/teamclaude/status`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
+      if (res?.headers.get('x-teamproxy-remote') !== '1') {
+        console.error(`The running ${cli} server predates remote access; it would treat tailnet requests as local.`);
+        console.error(`Update and restart it first (${cli} update), then run ${cli} remote on again.`);
+        return 1;
+      }
+    }
+    const updated = await atomicConfigUpdate(cfg => {
+      const remote = { ...cfg.remote, enabled: true };
+      if (!remote.token) remote.token = newRemoteToken();
+      if (!Array.isArray(remote.allowLogins) || !remote.allowLogins.length) remote.allowLogins = [self.login];
+      cfg.remote = remote;
+    });
+    const served = runTailscale(serveArgs(true, port, localPort));
+    if (!served.ok) {
+      console.error(`tailscale serve failed: ${served.err || 'unknown error'}`);
+      console.error('Remote access is enabled in the config, but nothing is served yet.');
+      return 1;
+    }
+    console.log(`Remote on: ${urlFor(self.dnsName)} → http://127.0.0.1:${localPort} (tailnet only, no Funnel)`);
+    console.log(`  Allowed Tailscale logins: ${updated.remote.allowLogins.join(', ')}`);
+    console.log(`  Phone page: ${urlFor(self.dnsName)}/teamproxy/hud`);
+    console.log(`  Token:      ${cli} remote token`);
+    if (!running) console.log(`  The proxy is not running; start it with: ${cli} server`);
+    if (bindNote) console.log(bindNote);
+    return 0;
+  }
+
+  if (sub === 'off') {
+    await atomicConfigUpdate(cfg => { cfg.remote = { ...cfg.remote, enabled: false }; });
+    const served = runTailscale(serveArgs(false, port, localPort));
+    console.log(`Remote off: requests through tailscale serve are refused${served.ok ? '; serve on :' + port + ' removed' : ''}.`);
+    if (!served.ok) console.log(`  tailscale serve --https=${port} off: ${served.err || 'failed'} (nothing to remove, or remove it by hand)`);
+    return 0;
+  }
+
+  if (sub === 'status' || sub == null) {
+    const remote = config.remote || {};
+    const self = selfFromStatus(tailscaleJson(['status', '--json']).value);
+    const serve = tailscaleJson(['serve', 'status', '--json']);
+    const state = serve.value ? serveState(serve.value, port, localPort) : null;
+    console.log(`Remote:   ${remote.enabled === true ? 'on' : 'off'}`);
+    console.log(`Address:  ${urlFor(self.dnsName)} → http://127.0.0.1:${localPort}`);
+    console.log(`Serve:    ${state ? (state.served ? `on → ${state.target}${state.matches ? '' : ' (NOT this proxy)'}` : 'off') : `unknown (${serve.error})`}`);
+    if (state?.funnel) console.log(`WARNING:  Funnel is on for :${port} — the pool is public. Run: tailscale funnel --https=${port} off`);
+    console.log(`Token:    ${remote.token ? `set (show: ${cli} remote token)` : 'none'}`);
+    console.log(`Logins:   ${(remote.allowLogins || []).join(', ') || '(none)'}`);
+    if (remote.enabled === true && state && !state.served) console.log(`  Enabled but not served. Run: ${cli} remote on`);
+    if (remote.enabled !== true && state?.served) console.log(`  Served but disabled: requests are refused. Remove it: ${cli} remote off`);
+    if (bindNote) console.log(bindNote);
+    return 0;
+  }
+
+  console.error(`Usage: ${cli} remote on|off|status|token [--rotate]`);
+  return 1;
+}
+
 function cliName(config) {
   if (isAgyMode(config)) return 'teamagy';
   if (isGrokMode(config)) return 'teamgrok';
