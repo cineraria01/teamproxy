@@ -1,15 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import http2 from 'node:http2';
+import net from 'node:net';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  HUD_HTML, REMOTE_PORTS, accountState, buildTeamproxyStatus, failureDelayMs, isServeRequest, parsePriority,
+  HUD_HTML, REMOTE_PORTS, accountState, buildTeamproxyStatus, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest,
+  parsePriority,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tokenMatches,
 } from '../src/remote.js';
 
@@ -39,6 +42,17 @@ test('small helpers', () => {
   assert.equal(isServeRequest({ 'tailscale-user-login': 'x' }), true);
   assert.equal(isServeRequest({ 'x-forwarded-for': '1.2.3.4' }), true);
   assert.equal(isServeRequest({ 'x-api-key': 'k' }), false);
+  assert.equal(isServeRequest({ 'tailscale-user-name': 'x' }), true);
+  assert.equal(isServeRequest({ 'tailscale-future-header': 'x' }), true);
+  assert.equal(isServeRequest({ 'x-forwarded-proto': 'https' }), true);
+  for (const host of ['127.0.0.1:3456', 'localhost:3456', '[::1]:3456', 'LOCALHOST']) assert.equal(isLoopbackHost(host), true, host);
+  for (const host of ['evil.example:3456', '127.0.0.1.evil.example', undefined]) assert.equal(isLoopbackHost(host), false, host);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1' }), false);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1', origin: 'http://127.0.0.1:1', 'sec-fetch-site': 'same-origin' }), false);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1', origin: 'http://evil.example' }), true);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1', origin: 'null' }), true);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1', 'sec-fetch-site': 'cross-site' }), true);
+  assert.equal(isCrossSite({ host: '127.0.0.1:1', 'sec-fetch-site': 'same-site' }), true);
   assert.equal(tokenMatches(TOKEN, TOKEN), true);
   assert.equal(tokenMatches(TOKEN.slice(1), TOKEN), false);
   assert.equal(tokenMatches(undefined, TOKEN), false);
@@ -169,21 +183,26 @@ const accounts = () => [
   { name: 'account-b', type: 'apikey', apiKey: 'fixture-b' },
 ];
 
-async function startServer(t, { remote, upstream = 'http://127.0.0.1:9' } = {}) {
+async function startServer(t, { remote, upstream = 'http://127.0.0.1:9', host = '127.0.0.1', cursor = null } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'teamproxy-remote-'));
   const configPath = join(dir, 'config.json');
   const port = await unusedPort();
   await writeFile(configPath, JSON.stringify({
-    proxy: { port, host: '127.0.0.1', apiKey: 'tc-proxy-key-for-tests' },
+    ...(cursor ? { provider: 'cursor', cursorUpstream: cursor, cursorAgentUpstream: cursor, cursorUsageRefresh: false } : {}),
+    proxy: { port, host, apiKey: 'tc-proxy-key-for-tests' },
     upstream,
     activeWarmup: false,
     tokenRefreshIntervalMs: 0,
     ...(remote ? { remote } : {}),
-    accounts: accounts(),
+    accounts: cursor
+      ? [{ name: 'cursor-1', provider: 'cursor', type: 'oauth', accountUuid: 'u-1',
+        accessToken: 'tok-1', refreshToken: 'tok-1', expiresAt: Date.now() + 3_600_000 }]
+      : accounts(),
   }), { mode: 0o600 });
   const env = { ...process.env, TEAMCLAUDE_CONFIG: configPath };
   delete env.TEAMCLAUDE_PROVIDER;
-  const child = spawn(process.execPath, [entry, 'server'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (cursor) env.TEAMCLAUDE_PROVIDER = 'cursor';
+  const child = spawn(process.execPath, [entry, ...(cursor ? ['cursor'] : []), 'server'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   child.stdout.on('data', chunk => { log += chunk; });
   child.stderr.on('data', chunk => { log += chunk; });
@@ -390,4 +409,125 @@ esac
   assert.match(calls, new RegExp(`serve --bg --https=8456 http://127.0.0.1:${port}`));
   assert.match(calls, /serve --https=8456 off/);
   assert.doesNotMatch(calls, /funnel/);
+});
+
+function h2Request(port, headers, body = Buffer.alloc(0)) {
+  return new Promise((resolve, reject) => {
+    const session = http2.connect(`http://127.0.0.1:${port}`);
+    session.once('error', reject);
+    const stream = session.request({ ':method': 'POST', ...headers });
+    const chunks = [];
+    let status = null;
+    stream.once('response', h => { status = h[':status']; });
+    stream.on('data', chunk => chunks.push(chunk));
+    stream.once('end', () => { session.close(); resolve({ status, body: Buffer.concat(chunks) }); });
+    stream.once('error', err => { session.close(); reject(err); });
+    stream.end(body);
+  });
+}
+
+test('cursor h2c through tailscale serve is refused before any account or upstream (H1)', { timeout: 30000 }, async t => {
+  const seen = [];
+  const upstream = http2.createServer();
+  upstream.on('stream', (stream, headers) => {
+    seen.push(headers);
+    stream.resume();
+    stream.once('end', () => {
+      const payload = Buffer.from('{}');
+      const frame = Buffer.concat([Buffer.from([0x02, 0, 0, 0, payload.length]), payload]);
+      stream.respond({ ':status': 200, 'content-type': 'application/connect+proto' });
+      stream.end(frame);
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  const { port } = await startServer(t, { remote: remoteOn, cursor: `http://127.0.0.1:${upstreamPort}` });
+  const run = { ':path': '/agent.v1.AgentService/Run', 'content-type': 'application/connect+proto' };
+
+  for (const marker of [
+    { 'tailscale-user-login': 'stranger@evil.example', 'x-forwarded-for': '100.64.0.66' },
+    { 'tailscale-user-login': LOGIN, 'x-api-key': TOKEN }, // even with the token: h2 is local-only
+    { 'x-forwarded-for': '100.64.0.66' },
+    { 'tailscale-user-name': 'Someone' },
+  ]) {
+    const refused = await h2Request(port, { ...run, ...marker });
+    assert.equal(refused.status, 200);
+    assert.equal(refused.body[0], 0x02, 'Connect end-of-stream frame');
+    assert.match(refused.body.subarray(5).toString(), /permission_denied/);
+    const grpc = await h2Request(port, { ...run, 'content-type': 'application/grpc', ...marker });
+    assert.equal(grpc.status, 403);
+  }
+  assert.equal(seen.length, 0, 'nothing reached the upstream');
+
+  // Control: the same stream from this machine's cursor-agent (no serve markers) still relays.
+  const local = await h2Request(port, run);
+  assert.equal(local.status, 200);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].authorization, 'Bearer tok-1');
+});
+
+test('Upgrade and CONNECT requests carrying serve markers never pass the remote gate', { timeout: 20000 }, async t => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => { seen.push(req.url); res.end('{}'); });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  const { port } = await startServer(t, { remote: remoteOn, upstream: `http://127.0.0.1:${upstreamPort}` });
+  const raw = text => new Promise(resolve => {
+    const socket = net.connect(port, '127.0.0.1', () => socket.write(text));
+    let out = '';
+    socket.on('data', chunk => { out += chunk; });
+    socket.once('close', () => resolve(out));
+    socket.once('error', () => resolve(out));
+    setTimeout(() => socket.destroy(), 3000).unref();
+  });
+  const upgrade = await raw(`GET /v1/models HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n`
+    + `Tailscale-User-Login: stranger@evil.example\r\nX-Forwarded-For: 100.64.0.66\r\n\r\n`);
+  assert.doesNotMatch(upgrade, /^HTTP\/1\.1 (101|200)/);
+  const connect = await raw(`CONNECT 127.0.0.1:${upstreamPort} HTTP/1.1\r\nHost: 127.0.0.1:${upstreamPort}\r\n`
+    + `Tailscale-User-Login: ${LOGIN}\r\n\r\n`);
+  assert.doesNotMatch(connect, /^HTTP\/1\.1 200/);
+  assert.equal(seen.length, 0);
+});
+
+function externalIPv4() {
+  return Object.values(networkInterfaces()).flat()
+    .find(a => a && (a.family === 'IPv4' || a.family === 4) && !a.internal)?.address;
+}
+
+test('a direct non-loopback request to /teamproxy/* is refused even with the proxy key (L1)', { timeout: 20000 }, async t => {
+  const address = externalIPv4();
+  if (!address) { t.skip('no non-loopback IPv4 address on this machine'); return; }
+  const { port } = await startServer(t, { remote: remoteOn, host: '0.0.0.0' });
+  const direct = (path, opts = {}) => new Promise((resolve, reject) => {
+    const out = http.request({ host: address, port, path, ...opts }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.once('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+    });
+    out.once('error', reject);
+    out.end();
+  });
+  const key = { 'x-api-key': 'tc-proxy-key-for-tests' };
+  for (const [path, method] of [['/teamproxy/status', 'GET'], ['/teamproxy/hud', 'GET'], ['/teamproxy/accounts/1/disable', 'POST']]) {
+    const res = await direct(path, { method, headers: key });
+    assert.equal(res.status, 403, path);
+    assert.doesNotMatch(res.body, /account-a/);
+  }
+  // The legacy direct path itself still works with the proxy key (unchanged behavior).
+  assert.equal((await direct('/teamclaude/status', { headers: key })).status, 200);
+});
+
+test('local /teamproxy/* refuses cross-site POSTs and non-loopback Host names (L2)', { timeout: 20000 }, async t => {
+  const { port, configPath } = await startServer(t, { remote: remoteOn });
+  const key = { 'x-api-key': 'tc-proxy-key-for-tests' };
+  const post = headers => request(port, '/teamproxy/accounts/2/disable', { method: 'POST', headers: { ...key, ...headers } });
+  assert.equal((await post({ origin: 'http://evil.example' })).status, 403);
+  assert.equal((await post({ origin: 'null' })).status, 403);
+  assert.equal((await post({ 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await post({ host: `evil.example:${port}` })).status, 403);
+  assert.equal((await request(port, '/teamproxy/status', { headers: { ...key, host: `rebound.example:${port}` } })).status, 403);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).accounts[1].enabled, undefined, 'nothing was written');
+  // Same-origin (the local HUD page) and plain CLI-style calls still work.
+  assert.equal((await post({ origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' })).status, 200);
+  assert.equal((await post({ host: `localhost:${port}` })).status, 200);
 });

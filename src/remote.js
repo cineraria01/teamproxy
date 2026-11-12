@@ -31,8 +31,33 @@ export function newRemoteToken() {
   return randomBytes(32).toString('base64url');
 }
 
+// Any serve marker, or any other `tailscale-*` header, makes the request remote.
 export function isServeRequest(headers) {
-  return headers['tailscale-user-login'] != null || headers['x-forwarded-for'] != null;
+  return Object.keys(headers).some(name => {
+    const lower = name.toLowerCase();
+    return SERVE_HEADERS.includes(lower) || lower.startsWith('tailscale-');
+  });
+}
+
+// L2 (local cross-site requests): a POST to the loopback port is local only when
+// it names a loopback host (no DNS rebinding) and no browser says it came from
+// another site. Non-browser clients send neither Origin nor Sec-Fetch-Site.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+export function isLoopbackHost(host) {
+  if (typeof host !== 'string') return false;
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':', 1)[0];
+  return LOOPBACK_HOSTS.has(name.toLowerCase());
+}
+export function isCrossSite(headers) {
+  const site = headers['sec-fetch-site'];
+  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') return true;
+  const origin = headers.origin;
+  if (origin == null) return false;
+  try {
+    return new URL(origin).host !== headers.host;
+  } catch {
+    return true; // "null" and other opaque origins
+  }
 }
 
 // Constant time whatever the lengths: both sides are hashed first.

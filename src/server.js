@@ -86,7 +86,7 @@ import {
   peekConnectFrame,
 } from './cursor.js';
 import { createCursorOpenAI, cursorPoolProblem, isCursorOpenAIPath, stripCursorLane } from './cursor-openai.js';
-import { HUD_HTML, buildTeamproxyStatus, isTeamproxyPath, parsePriority } from './remote.js';
+import { HUD_HTML, buildTeamproxyStatus, isServeRequest, isTeamproxyPath, parsePriority } from './remote.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -1162,6 +1162,21 @@ export function createProxyServer(accountManager, config, hooks = {}) {
   }
 
   function handleCursorStream(stream, headers) {
+    // h2 is this machine's cursor-agent only. A stream carrying `tailscale serve`
+    // markers came from the tailnet (serve dials loopback and proxies gRPC-typed
+    // HTTP/2 as h2c, which the supervisor's sniffer tunnels here byte for byte,
+    // past the HTTP/1.1 remote gate): refuse it before any account is touched.
+    if (isServeRequest(headers)) {
+      const message = 'Remote HTTP/2 is not served; use the HTTP/1.1 surface with the remote token.';
+      if (String(headers['content-type'] || '').startsWith('application/connect+')) {
+        stream.respond({ ':status': 200, 'content-type': headers['content-type'] });
+        stream.end(connectErrorFrame('permission_denied', message));
+      } else {
+        stream.respond({ ':status': 403, 'content-type': 'application/json' });
+        stream.end(JSON.stringify({ code: 'permission_denied', message }));
+      }
+      return;
+    }
     // The OpenAI lane's children carry its prefix; upstream gets the plain path.
     const { path, lane } = stripCursorLane(headers[':path'] || '/');
     const agent = isCursorAgentPath(path);

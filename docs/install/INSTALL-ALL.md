@@ -557,6 +557,9 @@ teamclaude remote off         # 원격 요청 거절 + serve 끔
   `Authorization: Bearer <토큰>`)과 **허용 로그인**(`remote.allowLogins`, 설정 파일에서 더할 수 있다)이 둘 다 맞아야 한다.
   틀리면 401/403이고 연속 실패는 점점 늦게 답한다. 헤더 없는 루프백 요청은 예전 그대로다.
 - 원격 토큰을 가져도 운영 경로(`/teamclaude/reload`·`rotate`·`accounts/sync`·reset-credit·drain)는 로컬에서만 된다.
+- serve 표시가 붙은 HTTP/2(cursor 풀의 h2c 길)는 토큰이 있어도 거절한다 — h2는 이 기계의 cursor-agent 전용이다.
+- 로컬에서도 `/teamproxy/*`는 `Host`가 루프백 이름(`127.0.0.1`·`localhost`·`[::1]`)일 때만 받고, 다른 사이트에서 온
+  POST(`Origin`·`Sec-Fetch-Site`)는 거절한다.
 - `remote on`은 원격을 모르는 옛 서버가 떠 있으면 거절한다. 먼저 `<풀> update`로 올린다.
 - 설정의 `proxy.host`가 없거나 `0.0.0.0`이면 `remote status`가 경고한다. `"proxy.host": "127.0.0.1"`로 두고 `<풀> restart`.
 - 맥의 `tailscale` 명령은 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`을 쓴다(`TEAMPROXY_TAILSCALE_BIN`으로 바꿀 수 있다).

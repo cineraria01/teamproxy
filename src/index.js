@@ -112,7 +112,7 @@ import {
 } from './cursor.js';
 import { isCursorLanePath } from './cursor-openai.js';
 import {
-  SERVE_HEADERS, applyAccountAction, failureDelayMs, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
+  SERVE_HEADERS, applyAccountAction, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
 } from './remote.js';
 
@@ -647,6 +647,13 @@ async function superviseServerCommand() {
   // could otherwise POST to the loopback port). Only the static HUD shell is open.
   function admitLocalTeamproxy(req, res) {
     if (!isTeamproxyPath(req.url)) return true;
+    if (!isLoopbackHost(req.headers.host) || (req.method !== 'GET' && isCrossSite(req.headers))) {
+      rejectPublicRequest(req, res, 403, { 'content-type': 'application/json' }, {
+        type: 'error',
+        error: { type: 'permission_error', message: 'Cross-site or non-loopback-host request to the teamproxy surface.' },
+      });
+      return false;
+    }
     if (req.method === 'GET' && req.url.split('?', 1)[0] === '/teamproxy/hud') return true;
     const proxyKey = config.proxy?.apiKey;
     const remoteToken = currentRemote()?.token;
