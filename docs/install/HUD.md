@@ -75,7 +75,7 @@ Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이
 
 ### Herdr 안에서는 그 터미널에서 바로 (2026-11-02)
 
-Herdr 터미널(`HC_TERMINAL_ID`가 있음) 안에서 다섯 명령은 CLI는 그 터미널에서 바로 돌고, 하단 줄은
+Herdr 터미널(`HC_TERMINAL_ID`가 있음) 안에서 다섯 명령의 CLI는 그 터미널에서 바로 돌고, 하단 줄은
 그 아래 Herdr 분할 창(`herdr-app do pane.split`)으로 붙어 표 줄 수만큼 높이를 맞춘 뒤 초점을 CLI로 돌려줍니다. CLI가 끝나거나 창이
 닫히거나 실행기가 신호를 받으면 하단 줄 창도 닫습니다(신호는 작업 프로세스 그룹 전체로 넘겨 `run` 감독자 아래의 진짜 CLI까지 끝냅니다).
 tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 Herdr가 작업 중·질문 대기·끝남을 보지 못했기 때문입니다(사용자
@@ -90,7 +90,7 @@ Herdr 경로는 물려받은 `TEAMCLAUDE_HUD`를 늘 지우고, 하단 줄을 �
 ### tmux 하단 줄 제거 (2026-11-13)
 
 사용자 요청 "Teamproxy 에 tmux 도 제거하자"로 `hc`가 없는 기계용 tmux 하단 줄(소켓 `<풀>-hud`, `src/hud/tmux.conf`, Shift+Enter 매핑,
-`--keep-alive`, 표 줄 수에 맞춰 칸 높이 바꾸기)을 지웠습니다. `hc`가 없으면 하단 줄 없이 CLI만 뜨고 이유를 한 줄 찍습니다
+`--keep-alive`, 표 줄 수에 맞춰 칸 높이 바꾸기)을 지웠습니다. `hc`나 `herdr-app`이 없으면 하단 줄 없이 CLI만 뜨고 없는 프로그램 이름을 한 줄 찍습니다
 (Claude는 상태줄이 계정 표를 그리니 조용히). 실행 순서는 Herdr 터미널 안이면 위 분할 창, 밖이고 `hc`가 있으면 아래 새 hc 터미널,
 `hc`도 없으면 CLI만입니다.
 

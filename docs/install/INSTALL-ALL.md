@@ -302,7 +302,7 @@ PY
 launchd가 감독 스크립트 `teamproxy-hc-server <풀>`을 띄우고, 그 스크립트가 프록시(`<풀> server`, TUI 대시보드)를
 Herdr core(`hc`) 터미널 `<풀>-proxy` 안에서 돌린다. `hc`가 먼저 설치돼 있어야 한다(`command -v hc`).
 2026-11-13부터 tmux는 쓰지 않는다(옛 `<풀>-tmux-server`·tmux 세션 `proxy`는 `update`가 감독자로 보지 않는다).
-`hc`가 없는 맥은 대시보드 없이 `ProgramArguments`를 `[~/.local/bin/<풀>, server, --headless]`로 두고, 갱신은
+`hc`가 없는 맥은 대시보드 없이 `ProgramArguments`를 `[<홈 절대 경로>/.local/bin/<풀>, server]`로 두고, 갱신은
 `<풀> update --no-restart` 뒤 `launchctl kickstart -k gui/$(id -u)/<라벨>`로 한다.
 
 ```sh

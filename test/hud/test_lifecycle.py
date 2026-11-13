@@ -166,6 +166,10 @@ def herdr_footer():
         code, cli, recorded, output = run(["--claude"], app=False, core=False)
         assert code == 0 and not recorded and note not in output, (code, recorded, output)
         assert cli == [["run", "--", "--effort", "xhigh"], None], cli
+        # Codex on a machine with neither (no Herdr at all): the note names hc, the first thing missing.
+        code, cli, recorded, output = run([], app=False, core=False)
+        assert code == 0 and not recorded and cli[0] == ["run", "--"], (code, cli, recorded)
+        assert output.count(note) == 1 and f"teamcodex: {note} (hc not installed)" in output, output
         # herdr-app but no hc on PATH (an inherited HC_TERMINAL_ID): the note names the program that is missing, and
         # Claude says it too.
         for pool, command, argv in (("--claude", "teamclaude", ["--effort", "xhigh"]), (None, "teamcodex", [])):

@@ -41,8 +41,9 @@ def install():
     print("Add an account: teamcodex login --name codex-1")
     if not shutil.which("codex"):
         print("Install codex before launching teamcodex.")
-    if not shutil.which("hc"):
-        print("Without hc (herdr-core) teamcodex runs without the account footer.")
+    for footer in ("hc", "herdr-app"):
+        if not shutil.which(footer):
+            print(f"Without {footer} (Herdr) teamcodex runs without the account footer.")
 
 
 if __name__ == "__main__":

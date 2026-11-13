@@ -99,13 +99,10 @@ and never fall back to private Codex history as proof of an empty prompt.
 The per-surface cooldown is 120 seconds, so a repeated capacity warning cannot
 produce a send storm even though launchd scans every 60 seconds.
 
-If your surfaces live on a second machine, export `QJC_WORKER_HOST` with that
-host's SSH name before the watchdog runs (in its launchd plist, not just your
-shell). It has no default on purpose — a hostname baked into the script would
-point at whoever wrote it. Left unset, the remote health probe fails its own
-hostname validation and reports "not healthy", so the watchdog logs
-`proxy-unhealthy` and attempts no remote recovery. That is the intended
-fail-closed behaviour, and it is also what a missing variable looks like.
+Since 2026-11-13 (tmux removed) the watchdog takes no remote surfaces: remote
+qjc-agent tmux bindings are never candidates, `QJC_WORKER_HOST` and the SSH
+health probe are gone, and only a local binding (`remote: "false"`) is health
+checked. Anything else reports "not healthy" and is never recovered.
 
 Watchdog diagnostics:
 

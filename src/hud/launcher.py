@@ -97,10 +97,10 @@ def herdr_footer(mode, cli):
     env.pop("TEAMCLAUDE_HUD", None)
     try:
         try:
-            if not app:
-                raise RuntimeError("herdr-app not installed")
             if not hc:
                 raise RuntimeError("hc not installed")
+            if not app:
+                raise RuntimeError("herdr-app not installed")
             me = os.environ.get("HC_TERMINAL_ID")
             if not me:
                 raise RuntimeError("not in a Herdr terminal")

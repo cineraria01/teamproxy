@@ -105,7 +105,13 @@ if (args.includes('restart')) require('./restart.js');
 `;
 const FAKE_LAUNCHCTL = `#!/bin/sh
 echo "PID	Status	Label"
-[ -n "$FAKE_NO_LAUNCHD" ] || echo "4242	0	com.example.teamclaude"
+[ -n "$FAKE_NO_LAUNCHD" ] || echo "4242	0	\${FAKE_LAUNCHD_LABEL:-com.example.teamclaude}"
+`;
+// ps for the launchd job 4242 shows the hc supervisor; every other ps call is the real one.
+const FAKE_PS = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.at(-1) === '4242') { console.log(process.env.FAKE_LAUNCHD_COMMAND || '/bin/sh /x/other'); process.exit(0); }
+process.exit(require('child_process').spawnSync('/bin/ps', args, { stdio: 'inherit' }).status ?? 1);
 `;
 
 function sh(cwd, cmd, args) {
@@ -172,7 +178,7 @@ async function makeWorld({ installAt = 'A' } = {}) {
   };
   const bin = join(root, 'bin');
   mkdirSync(bin);
-  for (const [name, body] of [['restart.js', FAKE_RESTART], ['tmux', FAKE_TMUX], ['hc', FAKE_HC], ['systemctl', FAKE_SYSTEMCTL], ['launchctl', FAKE_LAUNCHCTL]]) {
+  for (const [name, body] of [['restart.js', FAKE_RESTART], ['tmux', FAKE_TMUX], ['hc', FAKE_HC], ['systemctl', FAKE_SYSTEMCTL], ['launchctl', FAKE_LAUNCHCTL], ['ps', FAKE_PS]]) {
     writeFileSync(join(bin, name), body);
     chmodSync(join(bin, name), 0o755);
   }
@@ -389,6 +395,20 @@ test('macOS: a launchd-supervised hc terminal <pool>-proxy is restarted with hc 
   assert.match(log, /^hc kill teamclaude-proxy$/m);
   assert.doesNotMatch(log, /^tmux /m);
   assert.equal(await liveVersion(w), 'B');
+});
+
+test('macOS: a launchd label not ending in .<pool> is found by its teamproxy-hc-server <pool> process (server-150)', { skip: process.platform !== 'darwin' }, async () => {
+  const w = await makeWorld();
+  await startServer(w, w.claude);
+  const env = { FAKE_LAUNCHD_LABEL: 'com.teamclaude.server', FAKE_LAUNCHD_COMMAND: '/bin/sh /Users/x/.local/bin/teamproxy-hc-server teamclaude' };
+  const { status, result, stderr } = await update(w, [], env);
+  assert.equal(status, 0, stderr);
+  assert.equal(result.installs[0].result, 'updated');
+  assert.match(stderr, /hc kill teamclaude-proxy \(launchd com\.teamclaude\.server\)/);
+  const w2 = await makeWorld();
+  await startServer(w2, w2.claude);
+  const other = await update(w2, ['--dry-run'], { ...env, FAKE_LAUNCHD_COMMAND: '/bin/sh /Users/x/.local/bin/teamproxy-hc-server teamclaudex' });
+  assert.equal(other.result.installs[0].result, 'no_restart_method');
 });
 
 test('macOS: without the hc terminal an old tmux session is not a supervisor any more (tmux removed 2026-11-13)', { skip: process.platform !== 'darwin' }, async () => {
