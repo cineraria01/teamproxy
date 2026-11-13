@@ -44,7 +44,8 @@ Cache last: 98.9% | 148,864/150,566 in | new 1,702
 (`claude mcp list`)처럼 하단 줄 없이 실행됩니다. `claude N`은 N번 계정에 고정하고 하단 줄에도 그 계정에 `>`가 붙습니다.
 같은 셀렉터가 `codex`·`grok`·`agy`·`cursor`도 같은 규칙으로 `teamcodex`·`teamgrok`·`teamagy`·`teamcursor`에 넘깁니다
 (2026-11-13, 그 풀 래퍼가 있는 기계에서만). `update`·`login`·`logout`은 진짜 CLI(`cursor`는 `cursor-agent`)로 가고,
-`cursor agent`(옵션만)는 `cursor`와 같습니다. Herdr `+` 메뉴의 Codex·Grok·Antigravity도 이 함수를 거쳐 하단 줄이 붙습니다.
+`cursor agent`(옵션만)와 `cursor-agent`는 `cursor`와 같습니다. Herdr `+` 메뉴의 Codex·Grok·Antigravity·Cursor(`cursor-agent`)도
+이 함수를 거쳐 하단 줄이 붙습니다. `sh`·`bash --posix`는 이름에 `-`가 든 함수를 못 만들어 거기서는 `cursor-agent`만 그대로입니다.
 
 ```text
      FLEET         x5      pooled  Ses    2% 9m     Wk   51% 4h9m   Fbl      -

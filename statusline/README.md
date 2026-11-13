@@ -4,7 +4,7 @@
 
 > 2026-10-10부터 [cineraria01/teamproxy](https://github.com/cineraria01/teamproxy) 포크의 `statusline/` 폴더다(옛 `cineraria01/teamclaude-statusline` 저장소를 합침). Codex·agy 하단 줄은 같은 포크의 `src/hud/`([docs/install/HUD.md](../docs/install/HUD.md)).
 > `teamclaude`·`claude`로 띄우면 이 표가 Claude Code 아래 하단 줄(Herdr 분할 창, 2026-11-13 tmux 제거)로 옮겨 가고(2초마다 갱신), Claude 안의 상태줄에는 모델 줄만 남는다(`TEAMCLAUDE_HUD=1`). `claude`는 인자 없음·옵션이면 하단 줄로, 첫 낱말(`claude mcp list`)이면 하단 줄 없이 실행한다.
-> 같은 셀렉터가 풀 래퍼가 있는 기계에서 `codex`·`grok`·`agy`·`cursor`도 같은 규칙으로 `teamcodex`·`teamgrok`·`teamagy`·`teamcursor`에 넘긴다(`update`·`login`·`logout`은 진짜 CLI, 2026-11-13).
+> 같은 셀렉터가 풀 래퍼가 있는 기계에서 `codex`·`grok`·`agy`·`cursor`·`cursor-agent`도 같은 규칙으로 `teamcodex`·`teamgrok`·`teamagy`·`teamcursor`에 넘긴다(`update`·`login`·`logout`은 진짜 CLI, 2026-11-13).
 
 [teamclaude](https://github.com/jung-wan-kim/teamclaude) 다계정 Claude 프록시의 계정별 사용량을 Claude Code 상태줄에 실시간으로 표시합니다.
 
@@ -238,7 +238,7 @@ The installer:
 
 1. copies the TeamClaude status line and its small compatibility wrapper to `~/.claude/`
 2. registers the wrapper as `statusLine` in `~/.claude/settings.json` (backing the file up to `settings.json.bak` first); an existing status line such as Orca is preserved and rendered before TeamClaude
-3. installs the numbered account selector and sources it from `~/.bashrc` or `~/.zshrc` without removing existing aliases/settings; where the pool wrappers `teamcodex`/`teamgrok`/`teamagy`/`teamcursor` exist, it also routes `codex`/`grok`/`agy`/`cursor` to them by the same rule (`update`/`login`/`logout` go to the real CLI)
+3. installs the numbered account selector and sources it from `~/.bashrc` or `~/.zshrc` without removing existing aliases/settings; where the pool wrappers `teamcodex`/`teamgrok`/`teamagy`/`teamcursor` exist, it also routes `codex`/`grok`/`agy`/`cursor`/`cursor-agent` to them by the same rule (`update`/`login`/`logout` go to the real CLI)
 4. enables `teamclaude probe 300` so idle accounts' quota stays fresh — the probe only reads the usage endpoint and **does not spend quota** (skip with `NO_PROBE=1`)
 
 Restart Claude Code (or start a new session) and the status line appears.

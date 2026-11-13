@@ -84,8 +84,10 @@ print(accounts[index].get("name", "") if 0 <= index < len(accounts) else "")
 # The other pools' short names, by the same rule: no arguments or CLI flags open the CLI with the account
 # footer (`teamcodex …`), a first word (a CLI subcommand) runs without it (`teamcodex -- …`).
 # update/login/logout manage the CLI itself (codex, grok and cursor-agent all list them, agy lists update),
-# so they go to the real CLI. Each is defined only where its pool wrapper is installed; elsewhere `codex`
-# and the others stay as they are. The wrappers run the real CLI by absolute path, so nothing recurses.
+# so they go to the real CLI. `cursor-agent` too, so Herdr's Cursor menu entry (it runs `cursor-agent`)
+# gets the footer. Each is defined only where its pool wrapper is installed; elsewhere `codex` and the
+# others stay as they are. The wrappers and the pool run the real CLI by absolute path or without a shell
+# (TEAMCURSOR_CURSOR_BIN, node spawn), so nothing recurses into these functions.
 _teamproxy_short() {
     local pool=$1 cli=$2
     shift 2
@@ -100,9 +102,14 @@ _teamproxy_short() {
     esac
 }
 
-for _tp_entry in codex:teamcodex:codex grok:teamgrok:grok agy:teamagy:agy cursor:teamcursor:cursor-agent; do
+for _tp_entry in codex:teamcodex:codex grok:teamgrok:grok agy:teamagy:agy cursor:teamcursor:cursor-agent \
+        cursor-agent:teamcursor:cursor-agent; do
     _tp_name=${_tp_entry%%:*}
     _tp_rest=${_tp_entry#*:}
+    # sh and `bash --posix` reject `-` in a function name, and that eval error would abort the sourcing shell.
+    case $_tp_name in
+        *-*) [ -n "${ZSH_VERSION:-}" ] || { [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix; } || continue ;;
+    esac
     if command -v "${_tp_rest%%:*}" >/dev/null 2>&1; then
         unalias "$_tp_name" 2>/dev/null || true
         # eval: the function name comes from the loop, and an alias of that name is gone before this parses.

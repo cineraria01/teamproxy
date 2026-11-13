@@ -92,7 +92,8 @@ chmod +x "$TEST_BIN"/team* "$TEST_BIN"/codex "$TEST_BIN"/grok "$TEST_BIN"/agy "$
 short_calls='codex; codex --no-daemon; codex resume ID; codex update; codex login
 grok; grok -p hi; grok models; grok logout
 agy; agy -c; agy mcp list; agy update
-cursor; cursor --yolo; cursor agent; cursor agent --yolo; cursor agent fix it; cursor ls; cursor update'
+cursor; cursor --yolo; cursor agent; cursor agent --yolo; cursor agent fix it; cursor ls; cursor update
+cursor-agent; cursor-agent -p hi; cursor-agent agent --yolo; cursor-agent ls; cursor-agent login'
 short_expected='teamcodex
 teamcodex --no-daemon
 teamcodex -- resume ID
@@ -112,7 +113,12 @@ teamcursor
 teamcursor --yolo
 teamcursor -- agent fix it
 teamcursor -- ls
-REAL cursor-agent update'
+REAL cursor-agent update
+teamcursor
+teamcursor -p hi
+teamcursor --yolo
+teamcursor -- ls
+REAL cursor-agent login'
 short_bash=$(HOME="$TEST_HOME" PATH="$TEST_BIN:$PATH" \
   bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic "$short_calls" 2>/dev/null)
 test "$short_bash" = "$short_expected"
@@ -127,13 +133,21 @@ ONLY_CODEX_BIN="$TEST_DIR/only-codex-bin"
 mkdir -p "$ONLY_CODEX_BIN"
 cp "$TEST_BIN/teamcodex" "$ONLY_CODEX_BIN/"
 test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" bash -c \
-  "source '$TEST_HOME/.claude/teamclaude-selector.sh'; type -t codex; type -t grok agy cursor || echo none")" = "function
+  "source '$TEST_HOME/.claude/teamclaude-selector.sh'; type -t codex; type -t grok agy cursor cursor-agent || echo none")" = "function
 none"
 test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" zsh -fc \
-  "grok() { echo mine; }; source '$TEST_HOME/.claude/teamclaude-selector.sh'; whence -w codex agy cursor; grok")" = "codex: function
+  "grok() { echo mine; }; source '$TEST_HOME/.claude/teamclaude-selector.sh'; whence -w codex agy cursor cursor-agent; grok")" = "codex: function
 agy: none
 cursor: none
+cursor-agent: none
 mine"
+
+# POSIX shells cannot name a function `cursor-agent`: sourcing still finishes, `cursor` routes, `cursor-agent` is the CLI.
+for posix_sh in "bash --posix" sh; do
+  test "$(PATH="$TEST_BIN:$PATH" $posix_sh -c \
+    ". '$TEST_HOME/.claude/teamclaude-selector.sh'; cursor ls; cursor-agent -p hi")" = "teamcursor -- ls
+REAL cursor-agent -p hi"
+done
 
 HOME="$TEST_HOME" SHELL=/bin/zsh CLAUDE_DIR="$TEST_HOME/.claude" \
   PATH="$TEST_BIN:$PATH" \
