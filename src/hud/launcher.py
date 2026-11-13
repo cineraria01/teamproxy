@@ -130,34 +130,49 @@ def herdr_footer(mode, cli):
             call(app, "do", "pane.focus", json.dumps({"pane": pane}))
             # Herdr sizes panes in pixels: 60 px of chrome plus 20 px a row, then corrected from the rows the footer
             # terminal really got. ponytail: three corrections, a rows API if Herdr adds one.
-            # What hc reports can lag (2026-11-13, measured on a Mac): a new split first showed placeholder rows (120) for
-            # about 60 ms, and a resize, usually in place by the next read, once showed only 0.3 s later. Correcting
-            # from such a read once shrank the footer to 40 px, one row. So a read is trusted when it is the target,
-            # or when it repeats.
+            # What hc reports can lag (2026-11-13, measured on a Mac): a new split first showed placeholder rows (120)
+            # for about 60 ms, and a resize, usually in place by the next read, showed once 0.3 s later (longer under
+            # load). Correcting from such a read shrank the footer to 40 px, one row. So the rows from before a resize
+            # mean "not applied yet" and never correct anything: a failure leaves the footer too tall, not too short.
             def footer_rows():
-                return call(hc, "get", footer["terminal"]).get("rows") or rows
+                got = call(hc, "get", footer["terminal"]).get("rows")
+                if not got:
+                    raise RuntimeError(f"no rows for {footer['terminal']}")
+                return got
 
-            def settled():
-                last, deadline = None, time.monotonic() + 1
+            def steady():
+                """The split's rows once two reads in a row agree (up to a second)."""
+                last, deadline = footer_rows(), time.monotonic() + 1
                 while True:
+                    time.sleep(0.05)
                     got = footer_rows()
-                    now = time.monotonic()
-                    # A read that never repeats still ends a second later: the next correction starts from it.
-                    if got == rows or (got == last and now >= deadline) or now >= deadline + 1:
+                    if got == last or time.monotonic() >= deadline:
+                        return got
+                    last = got
+
+            def moved(before):
+                """Where a resize took the footer: the target, or another value than before read twice in a row;
+                None when for a second it showed only before (not applied yet) or kept changing."""
+                last, deadline = None, time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    got = footer_rows()
+                    if got == rows or (got != before and got == last):
                         return got
                     last = got
                     time.sleep(0.05)
+                return None
 
-            first = footer_rows()
-            time.sleep(0.05)
-            if not first == rows == footer_rows():
+            before = steady()
+            if before != rows:
                 px = 60 + 20 * rows
                 for _ in range(4):
                     call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
-                    got = settled()
+                    got = moved(before)
                     if got == rows:
                         break
-                    px = max(40, px + 20 * (rows - got))
+                    # Not applied yet: the same px again. Applied elsewhere: correct from there.
+                    if got is not None:
+                        px, before = max(40, px + 20 * (rows - got)), got
             if mode == "claude":
                 # The Claude Code status line drops the table the footer already shows.
                 env["TEAMCLAUDE_HUD"] = "1"

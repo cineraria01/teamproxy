@@ -59,15 +59,20 @@ def herdr_footer():
             " if a == ['ls'] else {'pane': 'p-foot', 'terminal': 't-foot'} if a[1:2] == ['pane.split']"
             " else {'ok': True}))\n"
             # The footer's size, like Herdr: a split starts at half the pane (FOOT_FIRST: placeholder rows shown
-            # once before that), and a resize lands only after hc has answered once more with the old rows.
+            # once before that), and a resize lands only after hc has answered once more with the old rows, or
+            # FOOT_LAG seconds later (load), or never (FOOT_DROP).
             # 20 px a row plus FOOT_CHROME px (60, as measured; more makes the first resize fall a row short).
             f"state = {str(folder / 'foot.json')!r}\n"
             "if a[1:2] == ['pane.split']:\n"
             "    first = os.environ.get('FOOT_FIRST')\n"
-            "    json.dump({'rows': int(first), 'steps': [15]} if first else {'rows': 15, 'steps': []}, open(state, 'w'))\n"
-            "if a[1:2] == ['layout.resize']:\n"
+            "    json.dump({'rows': int(first) if first else 15, 'steps': [15] if first else [], 'late': []},"
+            " open(state, 'w'))\n"
+            "if a[1:2] == ['layout.resize'] and not os.environ.get('FOOT_DROP'):\n"
+            "    import time\n"
             "    foot = json.load(open(state))\n"
-            "    foot['steps'].append(max(0, (json.loads(a[2])['px'] - int(os.environ.get('FOOT_CHROME', '60'))) // 20))\n"
+            "    target = max(0, (json.loads(a[2])['px'] - int(os.environ.get('FOOT_CHROME', '60'))) // 20)\n"
+            "    lag = float(os.environ.get('FOOT_LAG', '0'))\n"
+            "    foot['late'].append([time.time() + lag, target]) if lag else foot['steps'].append(target)\n"
             "    json.dump(foot, open(state, 'w'))\n")
         (folder / "core/hc").write_text(
             f"#!{sys.executable}\nimport json, os, sys\n{log}"
@@ -75,8 +80,10 @@ def herdr_footer():
             "a = sys.argv[2]\n"
             "if a == 't-foot':\n"
             "    if os.environ.get('FOOT_FAIL'): sys.exit('core down')\n"
+            "    import time\n"
             f"    foot = json.load(open({str(folder / 'foot.json')!r}))\n"
-            "    print(json.dumps({'rows': foot['rows']}))\n"
+            "    while foot['late'] and foot['late'][0][0] <= time.time(): foot['rows'] = foot['late'].pop(0)[1]\n"
+            "    print(json.dumps({} if os.environ.get('FOOT_NOROWS') else {'rows': foot['rows']}))\n"
             "    if foot['steps']: foot['rows'] = foot['steps'].pop(0)\n"
             f"    json.dump(foot, open({str(folder / 'foot.json')!r}, 'w'))\n"
             "else: print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}))\n")
@@ -152,9 +159,17 @@ def herdr_footer():
         # The footer gets its two rows even though hc reports the old rows once after each resize: corrected from
         # that stale answer, it used to end at 40 px, one row or none (seen on Cursor 2026-11-13).
         assert [c[:2] for c in recorded] == [["get", "t-me"], ["ls"], ["do", "pane.split"], ["do", "pane.focus"],
-                                             ["get", "t-foot"], ["do", "layout.resize"], ["get", "t-foot"],
-                                             ["get", "t-foot"], ["do", "pane.close"]], recorded
-        assert json.loads((folder / "foot.json").read_text()) == {"rows": 2, "steps": []}
+                                             ["get", "t-foot"], ["get", "t-foot"], ["do", "layout.resize"],
+                                             ["get", "t-foot"], ["get", "t-foot"], ["do", "pane.close"]], recorded
+        def foot():
+            return json.loads((folder / "foot.json").read_text())
+
+        def final():
+            """The rows the footer ends with, once every resize Herdr still holds has landed."""
+            held = [rows for _, rows in foot()["late"]] or foot()["steps"]
+            return held[-1] if held else foot()["rows"]
+
+        assert final() == 2, foot()
         assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
         # Codex's footer reads the cache usage of the CLI under this launcher.
         assert json.loads(recorded[2][2])["argv"][-2:] == ["--codex-pid", (folder / "launcher.pid").read_text()]
@@ -164,13 +179,25 @@ def herdr_footer():
         # A new split that first reports placeholder rows: the first read after the resize differs from it but is
         # still the split's own size, so it must not be taken as the resize's result (that path ended at 40 px).
         code, cli, recorded, output = run(["--yolo"], FOOT_FIRST="120")
-        assert code == 0 and resizes(recorded) == [100], recorded
-        assert json.loads((folder / "foot.json").read_text()) == {"rows": 2, "steps": []}
-        # When the target is out of reach the correction starts after a second, from a read that repeated.
-        started = time.monotonic()
+        assert code == 0 and resizes(recorded) == [100] and final() == 2, (recorded, foot())
+        # A size formula that is off moves the footer to another row count than before: corrected from there.
         code, cli, recorded, output = run(["--yolo"], FOOT_CHROME="80")
-        assert code == 0 and resizes(recorded) == [100, 120] and time.monotonic() - started >= 1, recorded
-        assert json.loads((folder / "foot.json").read_text()) == {"rows": 2, "steps": []}
+        assert code == 0 and resizes(recorded) == [100, 120] and final() == 2, (recorded, foot())
+        # A resize that lands later than a second (load) is not corrected from the rows it had not changed yet:
+        # the same px goes again, never 40 px (that ended as one row once the queued resize landed).
+        for lag in ("1.2", "2.5"):
+            code, cli, recorded, output = run(["--yolo"], FOOT_LAG=lag)
+            px = resizes(recorded)
+            assert code == 0 and set(px) == {100} and len(px) > 1 and final() == 2, (lag, recorded, foot())
+            assert note not in output, output
+        # A resize Herdr drops: the same px four times, the footer stays too tall, and the CLI starts as usual.
+        code, cli, recorded, output = run(["--yolo"], FOOT_DROP="1")
+        assert code == 0 and resizes(recorded) == [100] * 4 and final() == 15 and note not in output, (recorded, output)
+        assert cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
+        # hc without rows for the footer is a failure, not the target: the footer is closed, the CLI starts alone.
+        code, cli, recorded, output = run(["--yolo"], FOOT_NOROWS="1")
+        assert code == 0 and cli[0] == ["run", "--", "--dangerously-bypass-approvals-and-sandbox"], cli
+        assert recorded[-1][:2] == ["do", "pane.close"] and output.count(note) == 1, (recorded, output)
         # hc failing while the footer is sized: the footer is closed and the CLI starts alone, saying why.
         code, cli, recorded, output = run(["--yolo"], FOOT_FAIL="1")
         assert code == 0 and cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
