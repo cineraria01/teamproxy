@@ -128,12 +128,13 @@ def herdr_footer(mode, cli):
                 "argv": [sys.executable, statusline, "--watch",
                          *(["--codex-pid", str(os.getpid())] if mode == "codex" else ["--" + mode])]}))
             call(app, "do", "pane.focus", json.dumps({"pane": pane}))
-            # Herdr sizes panes in pixels: 60 px of chrome plus 20 px a row, then corrected from the rows the footer
-            # terminal really got. ponytail: three corrections, a rows API if Herdr adds one.
+            # Herdr sizes panes in pixels: 60 px of chrome plus 20 px a row, then grown from the rows the footer
+            # terminal really got. ponytail: four checks, a rows API if Herdr adds one.
             # What hc reports can lag (2026-11-13, measured on a Mac): a new split first showed placeholder rows (120)
             # for about 60 ms, and a resize, usually in place by the next read, showed once 0.3 s later (longer under
-            # load). Correcting from such a read shrank the footer to 40 px, one row. So the rows from before a resize
-            # mean "not applied yet" and never correct anything: a failure leaves the footer too tall, not too short.
+            # load). Correcting from such reads shrank the footer to 40 px, one row. So no correction ever shrinks:
+            # a late resize or a placeholder read wrongly cannot make the footer smaller. The price is a row or two
+            # more on a screen whose rows are shorter than the formula.
             def footer_rows():
                 got = call(hc, "get", footer["terminal"]).get("rows")
                 if not got:
@@ -165,14 +166,20 @@ def herdr_footer(mode, cli):
             before = steady()
             if before != rows:
                 px = 60 + 20 * rows
+                call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
                 for _ in range(4):
-                    call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
                     got = moved(before)
-                    if got == rows:
+                    if got is None:
+                        # Still the rows from before: not applied yet or dropped. Too tall is fine (a waiting resize
+                        # lands on the formula); too short means it landed short, so grow.
+                        if before >= rows:
+                            break
+                        px += 20
+                    elif got >= rows:
                         break
-                    # Not applied yet: the same px again. Applied elsewhere: correct from there.
-                    if got is not None:
-                        px, before = max(40, px + 20 * (rows - got)), got
+                    else:
+                        px, before = px + 20 * (rows - got), got
+                    call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
             if mode == "claude":
                 # The Claude Code status line drops the table the footer already shows.
                 env["TEAMCLAUDE_HUD"] = "1"
