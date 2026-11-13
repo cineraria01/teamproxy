@@ -1,7 +1,7 @@
 // `<pool> update` against a fake world: a local bare repo as the fork, npm-style
 // installs under a temporary HOME, fake proxy servers (separate processes whose
 // command line points into an install, like the real ones) and fake systemctl /
-// tmux / launchctl on PATH. The machine's real proxies are never touched.
+// hc / launchctl on PATH (and a tmux that only records calls: update must never use it). The machine's real proxies are never touched.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -12,8 +12,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CLI = fileURLToPath(new URL('../src/teamclaude.js', import.meta.url));
-// Linux accepts only a systemd user unit; macOS the launchd-supervised tmux session.
+// Linux accepts only a systemd user unit; macOS the launchd-supervised hc terminal <pool>-proxy.
 const SYSTEMD = process.platform === 'darwin' ? '0' : '1';
+const HC_LIVE = process.platform === 'darwin' ? '1' : '0';
 const worlds = [];
 after(() => {
   for (const w of worlds) {
@@ -81,16 +82,16 @@ const until = Date.now() + 5000;
 while (Date.now() < until) { try { process.kill(pid, 0); } catch { break; } }
 if (!process.env.FAKE_NO_RESPAWN) spawn(process.execPath, command.slice(1), { detached: true, stdio: 'ignore' }).unref();
 `;
+// tmux was removed (2026-11-13): it only records that it was called, and answers every query yes.
 const FAKE_TMUX = `#!/usr/bin/env node
-const args = process.argv.slice(2);
-require('fs').appendFileSync(process.env.FAKE_LOG, 'tmux ' + args.join(' ') + '\\n');
-if (args.includes('kill-session')) require('./restart.js');
+require('fs').appendFileSync(process.env.FAKE_LOG, 'tmux ' + process.argv.slice(2).join(' ') + '\\n');
 `;
-// Herdr core: \`<pool>-proxy\` is live only with FAKE_HC_LIVE, so the real hc (and a real proxy terminal) is never reached.
+// Herdr core: \`<pool>-proxy\` is live only with FAKE_HC_LIVE=1 (the macOS default here), so the real hc (and a real
+// proxy terminal) is never reached.
 const FAKE_HC = `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === 'get') {
-  if (!process.env.FAKE_HC_LIVE) process.exit(3);
+  if (process.env.FAKE_HC_LIVE !== '1') process.exit(3);
   console.log(JSON.stringify({ address: 't9', name: args[1], state: 'live', status: null }));
 } else if (args[0] === 'kill') {
   require('fs').appendFileSync(process.env.FAKE_LOG, 'hc ' + args.join(' ') + '\\n');
@@ -198,7 +199,7 @@ async function startServer(w, installDir, configPath = w.config) {
 function update(w, args, extraEnv = {}, onStderr = () => {}) {
   const env = {
     ...process.env, HOME: w.home, PATH: `${w.bin}:${process.env.PATH}`, TEAMCLAUDE_CONFIG: w.config,
-    FAKE_LOG: w.log, FAKE_SYSTEMD: SYSTEMD, TEAMPROXY_UPDATE_POLL_MS: '100', TEAMPROXY_UPDATE_URL: w.origin, ...extraEnv,
+    FAKE_LOG: w.log, FAKE_SYSTEMD: SYSTEMD, FAKE_HC_LIVE: HC_LIVE, TEAMPROXY_UPDATE_POLL_MS: '100', TEAMPROXY_UPDATE_URL: w.origin, ...extraEnv,
   };
   for (const k of ['XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'TEAMCLAUDE_PROVIDER', 'TEAMCLAUDE_SESSION_SUPERVISED']) delete env[k];
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
@@ -260,7 +261,7 @@ test('--dry-run reports the plan without touching files or the server; a non-for
   assert.equal(status, 0, stderr);
   assert.equal(result.installs[0].result, 'dry_run');
   assert.deepEqual(result.warnings, ['origin_not_fork']);
-  assert.match(stderr, /dry-run.*(kill-session|systemctl)/);
+  assert.match(stderr, /dry-run.*(hc kill|systemctl)/);
   assert.equal(version(w.claude), 'A');
   assert.deepEqual(backups(w.claude), []);
   assert.equal(restarts(w), 0);
@@ -381,13 +382,23 @@ test('a live lock blocks a second update; a dead one is taken over', async () =>
 test('macOS: a launchd-supervised hc terminal <pool>-proxy is restarted with hc kill, not tmux', { skip: process.platform !== 'darwin' }, async () => {
   const w = await makeWorld();
   await startServer(w, w.claude);
-  const { status, result, stderr } = await update(w, [], { FAKE_HC_LIVE: '1' });
+  const { status, result, stderr } = await update(w, []);
   assert.equal(status, 0, stderr);
   assert.equal(result.installs[0].result, 'updated');
   const log = readFileSync(w.log, 'utf8');
   assert.match(log, /^hc kill teamclaude-proxy$/m);
-  assert.doesNotMatch(log, /^tmux .*kill-session/m);
+  assert.doesNotMatch(log, /^tmux /m);
   assert.equal(await liveVersion(w), 'B');
+});
+
+test('macOS: without the hc terminal an old tmux session is not a supervisor any more (tmux removed 2026-11-13)', { skip: process.platform !== 'darwin' }, async () => {
+  const w = await makeWorld();
+  await startServer(w, w.claude);
+  const { status, result } = await update(w, [], { FAKE_HC_LIVE: '0' });
+  assert.equal(status, 1);
+  assert.equal(result.installs[0].result, 'no_restart_method');
+  assert.equal(version(w.claude), 'A');
+  assert.ok(!existsSync(w.log) || !/^tmux /m.test(readFileSync(w.log, 'utf8')), 'tmux is never asked');
 });
 
 test('no supervisor to restart the pool: stop before changing anything', async () => {

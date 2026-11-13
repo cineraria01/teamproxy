@@ -207,17 +207,15 @@ def account_state(account, now):
     return "ready"
 
 
-def session_log(pane):
-    """Find this pane's CLI log, excluding subagents and other terminal windows."""
-    pid = int(subprocess.check_output(
-        ["tmux", "-L", "teamcodex-hud", "display-message", "-p", "-t", pane, "#{pane_pid}"],
-        text=True, timeout=2).strip())
+def session_log(pid):
+    """Find the CLI log of the Codex CLI under process `pid` (the launcher), excluding subagents and other
+    terminal windows."""
     processes = subprocess.check_output(["ps", "-axo", "pid=,ppid=,comm="], text=True, timeout=2)
     entries = [line.split(None, 2) for line in processes.splitlines() if line.strip()]
     codex_pids = {int(p) for p, _, command in entries if Path(command).name == "codex"}
     descendants = {pid}
     while True:
-        # Stop at the pane's CLI: nested exec/login processes are not its session.
+        # Stop at the launcher's CLI: nested exec/login processes are not its session.
         children = {int(p) for p, parent, _ in entries
                     if int(parent) in descendants and int(parent) not in codex_pids}
         if children <= descendants:
@@ -227,7 +225,7 @@ def session_log(pane):
     if not codex:
         return None
     if len(codex) != 1:
-        raise ValueError("ambiguous pane CLI")
+        raise ValueError("ambiguous launcher CLI")
     opened = subprocess.run(["lsof", "-n", "-P", "-p", codex[0], "-Fn"],
                             capture_output=True, text=True, timeout=2)
     candidates = set()
@@ -377,7 +375,8 @@ def main():
                              "teamcursor.json with --cursor")
     parser.add_argument("--watch", action="store_true", help="refresh every two seconds")
     parser.add_argument("--plain", action="store_true", help="disable ANSI colors")
-    parser.add_argument("--codex-pane", help="tmux pane whose latest request cache usage is shown")
+    parser.add_argument("--codex-pid", type=int,
+                        help="process (the launcher) whose Codex CLI's latest request cache usage is shown")
     args = parser.parse_args()
     command = ("teamclaude" if args.claude else "teamagy" if args.agy else "teamgrok" if args.grok
                else "teamcursor" if args.cursor else "teamcodex")
@@ -386,9 +385,7 @@ def main():
                           else NAMES["agy" if args.agy else "grok" if args.grok else "cursor" if args.cursor else "codex"])
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and not args.plain
     watching = args.watch and sys.stdout.isatty()
-    # In the tmux footer the pane height follows the row count, so adding or removing an account resizes it.
-    # A resized pane (window resize, client attach) sends SIGWINCH, which wakes the loop at once.
-    pane = watching and os.environ.get("TMUX_PANE")
+    # A resized pane sends SIGWINCH, which wakes the loop at once.
     if watching:
         wake, notify = os.pipe()
         os.set_blocking(wake, False)
@@ -402,8 +399,7 @@ def main():
                 rows = (claude_rows(color) if args.claude else
                         render(read_status(config), color=color, width=shutil.get_terminal_size().columns,
                                agy=args.agy, grok=args.grok, cursor=args.cursor))
-                # The Claude status line prints one "TC down"/"not installed" row instead of raising. The account
-                # count is unknown then, so the footer keeps its height (a proxy restart must not resize the CLI).
+                # The Claude status line prints one "TC down"/"not installed" row instead of raising: a failure too.
                 failed = args.claude and len(rows) == 1 and re.sub(r"\033\[[0-9;]*m", "", rows[0]).endswith(
                     ("TC down", "teamclaude not installed"))
             except FileNotFoundError:
@@ -413,22 +409,16 @@ def main():
                 # Keep account credentials and HTTP exception details out of the display.
                 rows = [f"{title}: proxy unavailable or invalid status. Run: {command} server"]
                 failed = True
-            if args.codex_pane:
+            if args.codex_pid:
                 try:
-                    path = session_log(args.codex_pane)
+                    path = session_log(args.codex_pid)
                     cache = cache_row(last_usage(path) if path else None)
                 except (OSError, ValueError, subprocess.SubprocessError):
                     cache = "Cache last: unavailable"
                 rows.append(cache[:shutil.get_terminal_size().columns])
             if watching:
-                height = os.get_terminal_size(sys.stdout.fileno()).lines
-                if pane and not failed and height != len(rows):
-                    subprocess.run([shutil.which("tmux") or "tmux", "resize-pane", "-t", pane, "-y", str(len(rows))],
-                                   capture_output=True)
                 # Autowrap off: in a narrow pane a long row is clipped instead of pushing rows out of view.
-                # Bottom-aligned in the footer until the resize lands, or when tmux cannot give it that many rows.
-                pad = "\n" * max(0, height - len(rows)) if pane else ""
-                sys.stdout.write("\033[?7l\033[H\033[J" + pad + "\n".join(rows))
+                sys.stdout.write("\033[?7l\033[H\033[J" + "\n".join(rows))
                 sys.stdout.flush()
             else:
                 print("\n".join(rows), flush=True)

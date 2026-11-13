@@ -42,7 +42,6 @@ Cache last: 98.9% | 148,864/150,566 in | new 1,702
 하단 줄 안에서 뜬 Claude Code에는 `TEAMCLAUDE_HUD=1`이 붙어, Claude 안의 상태줄은 표를 숨기고 모델 줄만 보입니다.
 인쇄 모드(`-p`·`--print`)·`--version`, 터미널이 아닌 실행은 하단 줄 없이 바로 가고, Claude 하위 명령은 `teamclaude -- mcp list`
 (`claude mcp list`)처럼 하단 줄 없이 실행됩니다. `claude N`은 N번 계정에 고정하고 하단 줄에도 그 계정에 `>`가 붙습니다.
-tmux 소켓은 `teamclaude-hud`입니다.
 
 ```text
      FLEET         x5      pooled  Ses    2% 9m     Wk   51% 4h9m   Fbl      -
@@ -59,7 +58,7 @@ tmux 소켓은 `teamclaude-hud`입니다.
 `teamclaude --yolo`·`claude --yolo`·`teamcodex --yolo`·`teamagy --yolo`는 승인 없이 실행합니다(2026-10-10 사용자 요청 "--yolo 로 하자 3개모두").
 실행기가 Claude Code·agy에는 `--dangerously-skip-permissions`, Codex에는 `--dangerously-bypass-approvals-and-sandbox`로 바꿔 넘깁니다.
 `teamgrok --yolo`는 grok의 `--always-approve`가 됩니다(2026-10-15). `teamcursor --yolo`는 cursor-agent의 `--yolo` 그대로입니다(2026-10-24).
-인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. `--keep-alive`도 이제 인자 어디에 두어도 됩니다.
+인쇄 모드(`teamagy --yolo -p …`)에도 적용됩니다. 옛 tmux 하단 줄의 `--keep-alive`는 2026-11-13부터 받아서 버립니다(hc 터미널은 늘 떼어도 남음).
 
 2026-10-31부터 승인 없는 실행이 기본입니다(사용자 요청 "teamproxy 모드는 기본 yolo"). `<풀> run`(`src/index.js`)이 위 플래그를 맨 앞에 붙이므로
 하단 줄 실행, `teamclaude -- PROMPT`, `teamcodex run -- exec …`, 인쇄·비터미널 실행이 모두 같습니다. 명시한 플래그는 한 번만 넘어갑니다.
@@ -74,16 +73,9 @@ Claude 자동 재개(`autoResumeClaude`)가 다시 띄우는 세션에는 붙이
 
 `teamclaude`로 띄운 Claude Code 대화 세션에는 `--effort`가 없으면 실행기가 `--effort xhigh`를 더합니다. 실행기는 `--model`을 붙이지 않습니다. `teamclaude run`이 `--model`이 없으면 `~/.config/teamclaude.json`의 `launchModel`을 붙이므로, 지휘 기본 모델을 바꿀 때는 `launchModel`을 `~/.claude/settings.json`의 `model`과 같게 둡니다(2026-11-10 둘 다 `claude-fable-5-2`). `CLAUDE_CODE_EFFORT_LEVEL`은 서브에이전트까지 덮어써서 쓰지 않고 실행기가 맡습니다. `--effort max` 같은 값을 주면 그대로 두며, 인쇄 모드와 `--` 하위 명령에는 더하지 않습니다. 2026-10-12(068bf62)에 max로 넣었다가 2026-10-15(cba0ee5)에 뺐고, 2026-11-04 사용자 결정 "teamclaude 기본이 effort max"로 다시 넣었으며, 2026-11-10 사용자 결정(지휘 기본 Fable 5.2 xhigh, 코드 작성·조사·감사 worker는 `teamclaude run -- --model claude-opus-5-5 --effort max`)으로 xhigh로 바꿨습니다.
 
-### 세 하단 줄 공통 tmux 설정
+### Herdr 안에서는 그 터미널에서 바로 (2026-11-02)
 
-하단 줄 tmux 서버는 [`src/hud/tmux.conf`](../../src/hud/tmux.conf)로 뜹니다(평소 tmux 설정과 무관). Esc가 바로 CLI에 가고
-(`escape-time 0`), 스크롤 기록은 5만 줄입니다. Shift+Enter는 tmux가 CLI 쪽 방식 그대로 넘기지 못해 풀마다 그 CLI가 줄바꿈으로 읽는
-키로 바꿔 보냅니다(Claude Code·agy·grok은 Alt+Enter, Codex·cursor-agent는 Ctrl+J). 바깥 터미널이 Shift+Enter를 따로 보내야(확장 키) 동작합니다.
-마우스로 글자를 고를 때는 option(macOS)이나 shift를 누른 채 끕니다.
-
-### Herdr 안에서는 tmux 없이 (2026-11-02)
-
-Herdr 터미널(`HC_TERMINAL_ID`가 있고 tmux 밖) 안에서 다섯 명령은 tmux를 쓰지 않습니다. CLI는 그 터미널에서 바로 돌고, 하단 줄은
+Herdr 터미널(`HC_TERMINAL_ID`가 있음) 안에서 다섯 명령은 CLI는 그 터미널에서 바로 돌고, 하단 줄은
 그 아래 Herdr 분할 창(`herdr-app do pane.split`)으로 붙어 표 줄 수만큼 높이를 맞춘 뒤 초점을 CLI로 돌려줍니다. CLI가 끝나거나 창이
 닫히거나 실행기가 신호를 받으면 하단 줄 창도 닫습니다(신호는 작업 프로세스 그룹 전체로 넘겨 `run` 감독자 아래의 진짜 CLI까지 끝냅니다).
 tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 Herdr가 작업 중·질문 대기·끝남을 보지 못했기 때문입니다(사용자
@@ -91,20 +83,27 @@ tmux 안에서는 CLI가 Herdr에 보내는 상태 질의(OSC 7501)가 막혀 He
 ID), 창이 `표 줄 수 + 10`행보다 낮거나, `herdr-app`·`hc`가 없거나 pane이 없으면(배경 `hc run`) 하단 줄 없이 CLI만 띄우고 이유를
 한 줄 찍습니다(없는 프로그램 이름을 적음). 다만 `herdr-app`이 없는 기계(Herdr 코어만 둔 리눅스 서버)의 Claude는 그 줄 없이
 조용히 뜹니다. `TEAMCLAUDE_HUD`가 없으니 Claude Code 상태줄이 계정 표를 직접 그려 잃는 것이 없기 때문입니다(2026-11-11).
-Herdr 경로는 물려받은 `TEAMCLAUDE_HUD`를 늘 지우고, 하단 줄을 붙인 Claude에만 1을 넣습니다. Codex 캐시 사용량 줄은 tmux 창에서
-읽던 것이라 이 경로에는 없습니다.
+Herdr 경로는 물려받은 `TEAMCLAUDE_HUD`를 늘 지우고, 하단 줄을 붙인 Claude에만 1을 넣습니다. Codex 하단 줄은
+`statusline.py --codex-pid <실행기 pid>`로 그 실행기 아래 Codex CLI의 `Cache last` 줄을 함께 그립니다(2026-11-13, 옛 tmux 하단 줄의
+`--codex-pane`을 옮김).
+
+### tmux 하단 줄 제거 (2026-11-13)
+
+사용자 요청 "Teamproxy 에 tmux 도 제거하자"로 `hc`가 없는 기계용 tmux 하단 줄(소켓 `<풀>-hud`, `src/hud/tmux.conf`, Shift+Enter 매핑,
+`--keep-alive`, 표 줄 수에 맞춰 칸 높이 바꾸기)을 지웠습니다. `hc`가 없으면 하단 줄 없이 CLI만 뜨고 이유를 한 줄 찍습니다
+(Claude는 상태줄이 계정 표를 그리니 조용히). 실행 순서는 Herdr 터미널 안이면 위 분할 창, 밖이고 `hc`가 있으면 아래 새 hc 터미널,
+`hc`도 없으면 CLI만입니다.
 
 ### Herdr core 밖에서는 새 hc 터미널로 (2026-11-02)
 
 모든 기계에서 tmux를 지우면서(사용자 요청 "다른곳들도 모두 tmux 은 종료 제거하고 허더 코어로 옮겨"), 다섯 명령을 hc 밖(일반 SSH·터미널)에서
-인자 없이 대화형으로 실행하면 tmux 대신 `hc run --bg --no-parent --name <cli>-<8자리> --cwd <현재 폴더>`로 **새 Herdr core 터미널**을 만들고
+인자 없이 대화형으로 실행하면 `hc run --bg --no-parent --name <cli>-<8자리> --cwd <현재 폴더>`로 **새 Herdr core 터미널**을 만들고
 실행기를 같은 인자로 그 안에서 다시 띄운 뒤 `hc attach`로 지금 터미널을 붙입니다. 그 안에서는 위 Herdr 경로를 탑니다(창이 없는
 배경 터미널이라 하단 줄 없이 CLI만, 이유 한 줄. 위 예외대로 `herdr-app` 없는 기계의 Claude는 조용히). `Ctrl+\`로 떼면 계속 돌고
 `hc attach <주소>` 안내가 나오며, CLI가 끝나면 그 종료 코드를 돌려주고 터미널을 지웁니다(0이 아니면 마지막 20줄을 먼저 보여 줌).
 새 터미널은 core의 환경을 받으므로 `PATH`와 `CODEX_HOME`·`TC_ACCT`·`TEAMCLAUDE_STATUSLINE_INDEX`만 넘기고,
 `TEAMPROXY_HUD_HC_STARTED=1`을 붙여 그 안의 실행이 터미널을 또 만들지 않게 합니다.
-`-p`·`--version` 같은 한 번 실행, `--` 하위 명령, 터미널 밖 실행은 예전처럼 바로 `<명령> run -- …`입니다. tmux 하단 줄은 `hc`가
-없는 기계에서만 쓰입니다.
+`-p`·`--version` 같은 한 번 실행, `--` 하위 명령, 터미널 밖 실행은 예전처럼 바로 `<명령> run -- …`입니다.
 
 ### teamagy (Antigravity agy 풀)
 
@@ -112,7 +111,7 @@ Herdr 경로는 물려받은 `TEAMCLAUDE_HUD`를 늘 지우고, 하단 줄을 �
 계정 줄이 붙습니다. 5h·7d 막대는 Gemini 그룹, `3p`는 Claude/GPT 그룹에서 더 찬 창(5h·주간 중)입니다.
 agy에는 구독 종료일이 없어 `End` 칸과 `Cache last` 줄이 없습니다. 인쇄 모드(`-p`·`--print`·`--prompt`)와
 터미널이 아닌 실행은 하단 줄 없이 `teamagy run -- …`으로 바로 넘어가고, agy 하위 명령은 `teamagy -- models`처럼
-`--` 뒤에 두면 하단 줄 없이 실행됩니다. tmux 소켓은 `teamagy-hud`입니다.
+`--` 뒤에 두면 하단 줄 없이 실행됩니다.
 
 ```text
 TeamAgy | 1 accounts | switch 98% | 5h 7d Gemini, 3p Claude/GPT | > selected, * busy
@@ -125,7 +124,6 @@ TeamAgy | 1 accounts | switch 98% | 5h 7d Gemini, 3p Claude/GPT | > selected, * 
 `x-ratelimit-{limit,remaining}-{requests,tokens}`에서 요청·토큰 중 더 찬 쪽입니다(초기화 시각은 모름). 플랜 칸은 구독 등급
 (`SuperGrokPro` 등)이고 `End` 칸은 없습니다. 인쇄·버전 옵션(`-p`·`--single`·`--prompt-file`·`--prompt-json`·`-v`·`--version`)과
 하위 명령 `agent`·`models`·`version`, 터미널이 아닌 실행은 하단 줄 없이 `teamgrok run -- …`으로 바로 넘어갑니다.
-탭 제목은 `Grok`, tmux 소켓은 `teamgrok-hud`입니다.
 
 ```text
 TeamGrok | 1 accounts | switch 98% | RL rate limit | > selected, * busy
@@ -138,8 +136,7 @@ TeamGrok | 1 accounts | switch 98% | RL rate limit | > selected, * busy
 (`GetCurrentPeriodUsage`의 지출/한도와 Auto·API 사용률 중 가장 찬 값)이고 초기화 시각은 주기 끝입니다. 플랜 칸은 요금제(`Ultra` 등),
 `End` 칸은 없습니다. 인쇄·버전 옵션(`-p`·`--print`·`--list-models`·`-v`·`--version`)과 설정·관리 하위 명령(`status`·`models`·`mcp`·
 `login`·`logout`·`about` 등), 터미널이 아닌 실행은 하단 줄 없이 `teamcursor run -- …`으로 바로 넘어갑니다. 대화 명령(`agent`·`ls`·
-`resume`)은 하단 줄이 붙습니다. Shift+Enter는 Ctrl+J(cursor-agent가 어느 터미널에서나 줄바꿈으로 읽는 키)로 보냅니다.
-탭 제목은 `Cursor`, tmux 소켓은 `teamcursor-hud`입니다.
+`resume`)은 하단 줄이 붙습니다. 줄바꿈은 Ctrl+J(cursor-agent가 어느 터미널에서나 줄바꿈으로 읽는 키)입니다.
 
 ```text
 TeamCursor | 1 accounts | switch 98% | Use included usage | > selected, * busy
@@ -175,10 +172,9 @@ TeamClaude의 구독 인증 요청에는 일반 API 키 요청과 다른 헤더�
 ### Codex CLI 설치
 
 macOS의 기존 실행기와 Linux의 로그인·상시 서비스를 검증했습니다. Python 3.9 이상과 공식 Codex CLI가 필요하며, Codex 실행 화면에는 실행 중인 TeamCodex가 필요합니다.
-설치기는 TeamCodex가 없으면 포크 `cineraria01/teamproxy`(브랜치 `main`)의 최신 커밋을 별도 경로에 함께 설치합니다. Node.js/npm과 Git이 필요하며, 대화형 실행에는 Herdr core(`hc`)가, `hc`가 없는 기계에서는 tmux가 필요합니다. 자세한 안내는 [설치 및 계정 등록](SETUP.md)을 참고하세요.
+설치기는 TeamCodex가 없으면 포크 `cineraria01/teamproxy`(브랜치 `main`)의 최신 커밋을 별도 경로에 함께 설치합니다. Node.js/npm과 Git이 필요하며, 하단 줄에는 Herdr core(`hc`)가 필요합니다(없으면 CLI만 뜹니다). 자세한 안내는 [설치 및 계정 등록](SETUP.md)을 참고하세요.
 
 ```sh
-# hc(Herdr core)가 없는 기계만: brew install tmux
 git clone https://github.com/cineraria01/teamproxy.git
 cd teamproxy
 python3 scripts/install.py       # 없는 경우 TeamCodex(프록시 + 실행기) 설치
@@ -191,7 +187,7 @@ teamcodex                        # Codex와 계정 상태줄을 같은 화면에
 teamcodex -- resume SESSION_ID          # 지정한 기존 대화 재개
 ```
 
-`teamcodex login`은 tmux나 실행 중인 프록시 없이 사용할 수 있습니다. 출력된 인증 링크를
+`teamcodex login`은 hc나 실행 중인 프록시 없이 사용할 수 있습니다. 출력된 인증 링크를
 브라우저에서 열고 로그인하세요. 다른 계정은 시크릿 창을 사용하면 편합니다.
 원격 서버에서 마지막 `localhost` 페이지가 열리지 않으면 주소창의
 `http://localhost:1455/auth/callback?...` 전체를 **로그인 중인 터미널에 붙여넣고 Enter**를 누릅니다.
@@ -208,35 +204,22 @@ Linux의 `--service`는 `teamcodex.service`를 활성화하고 `Restart=always`�
 자동 시작을 설정하지 않은 경우 별도 터미널에서 `teamcodex server`를 켜두세요.
 
 `~/.local/bin`이 PATH에 있어야 합니다. 인자 없는 `teamcodex`는 현재 폴더에서 `teamcodex run`을
-실행합니다. `hc`가 있으면 위 "Herdr core 밖에서는" 절에 적은 대로 hc 터미널에서 돌고, 아래 tmux 설명은 `hc`가 없는 기계의 경우입니다.
-실제 Codex 화면 아래에 tmux 패널을 배치하며, 기존 Codex·Claude 설정 파일을
-수정하지 않습니다. 기본적으로 터미널을 닫거나 `Ctrl-b d`로 마지막 연결을 끊으면
-해당 세션도 종료되며 진행 중인 작업은 중단됩니다. 저장된 대화는
+실행합니다. Herdr 터미널 안이면 그 아래 분할 창에, 밖이면 위 "Herdr core 밖에서는" 절대로 새 hc 터미널에서 돌며, 기존 Codex·Claude
+설정 파일을 수정하지 않습니다. hc 터미널은 `Ctrl+\`로 떼어도 계속 돌고 `hc attach <주소>`로 다시 붙습니다. 저장된 대화는
 `teamcodex -- resume SESSION_ID`로 재개할 수 있습니다.
-
-창을 닫아도 작업을 계속 실행하려면 시작할 때 `--keep-alive`를 첫 인수로 지정하세요.
-이 경우에만 `Ctrl-b d`로 분리한 뒤 다시 연결할 수 있습니다.
-
-```sh
-teamcodex --keep-alive               # 명시적으로 백그라운드 유지
-tmux -L teamcodex-hud attach
-```
 
 Codex 인수는 그대로 전달됩니다. 예: `teamcodex -m MODEL`,
 `teamcodex --dangerously-bypass-approvals-and-sandbox`. 마지막 옵션은 승인 확인과 샌드박스를
 해제합니다. 실행기가 기본으로 추가하지 않으며, 생략 시 기존 Codex 설정을 따릅니다.
 
-Codex를 종료하면 해당 tmux 세션도 종료됩니다. 기존 일반 tmux 세션은 별도 소켓으로
-분리됩니다. 창 폭은 상관없습니다(좁으면 계정 줄의 오른쪽이 잘립니다). 높이가 계정 수 + 12행보다 낮으면
+Codex를 종료하면 하단 줄 창도 닫힙니다. 창 폭은 상관없습니다(좁으면 계정 줄의 오른쪽이 잘립니다). 높이가 표 줄 수 + 10행보다 낮으면
 하단 줄 없이 CLI만 띄웁니다(2026-10-10, 예전에는 70열·12행 미만이면 실행을 거절했습니다).
-하단 줄 높이는 표의 줄 수(계정 수)를 따라 저절로 바뀌고, 창 크기를 바꿔도 그 높이로 돌아가 표가 창 바닥에 붙습니다
-(2026-10-15. 예전에는 시작할 때 줄 수로 고정됐고, 창 크기를 바꾸면 하단 줄이 늘어나 표 아래가 비었습니다).
 
 ### 명령은 `teamcodex` 하나 (2026-10-10)
 
 예전의 `tcodex` 명령은 `teamcodex`로 합쳤습니다. 래퍼가 첫 인수를 보고 나눕니다.
 
-- 인수 없음, Codex 옵션(`-`로 시작, `--keep-alive` 포함), 터미널에서 친 `login` → 상태줄 실행기
+- 인수 없음, Codex 옵션(`-`로 시작), 터미널에서 친 `login` → 상태줄 실행기
 - 그 밖의 명령(`run`, `server`, `status`, `resume` …)과 `-h`/`--help` → 프록시
 - Codex 하위 명령을 상태줄과 함께 쓰려면 `--` 뒤에 둡니다. 예: `teamcodex -- resume SESSION_ID`
 
@@ -362,7 +345,7 @@ Codex CLI의 기본 `tui.status_line`은 내장 항목만 지원합니다. 이 �
 설치 재실행 및 기존 명령 보존을 확인합니다.
 
 ```sh
-npm run test:hud                  # test/hud/*.py + statusline/ 검사. tmux 하단 줄 검사(test_lifecycle·test_footer_height)는 tmux가 없으면 SKIP을 찍고 넘어간다
+npm run test:hud                  # test/hud/*.py + statusline/ 검사(가짜 hc·herdr-app으로 하단 줄 수명 검사)
 ```
 
 기존 TeamCodex가 있으면 그대로 사용합니다(래퍼에 실행기 분기가 없으면 위 블록을 넣으라고 안내합니다).

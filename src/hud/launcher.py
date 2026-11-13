@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Launch Claude Code (teamclaude --claude), Codex (teamcodex), agy (teamagy --agy), grok (teamgrok --grok) or
 cursor-agent (teamcursor --cursor) with a read-only account footer: a Herdr split inside Herdr core, a new
-Herdr core terminal outside it, an isolated tmux session only where hc is not installed."""
+Herdr core terminal outside it. Without hc the CLI runs alone (tmux footer removed 2026-11-13)."""
 
 import json
 import os
-import shlex
 import shutil
 import signal
 import subprocess
@@ -18,17 +17,14 @@ from codex_login import login
 
 # Each wrapper names its pool with the first argument (teamcodex passes none). `oneshot` flags print once and
 # exit, so a footer would vanish with them; those runs, and runs without a terminal, skip the footer.
-# `newline` is the key the CLI reads as a newline in its prompt: tmux cannot pass the CLI's own Shift+Enter
-# protocol through, so the footer's tmux server maps Shift+Enter to it. `yolo` is the CLI's own flag that skips
-# every approval; `--yolo` stands for it in every pool.
+# `yolo` is the CLI's own flag that skips every approval; `--yolo` stands for it in every pool.
 MODES = {
-    "claude": ("teamclaude", "Claude", ("p", "print", "v", "version"), "M-Enter", "--dangerously-skip-permissions"),
-    "agy": ("teamagy", "agy", ("p", "print", "prompt", "version"), "M-Enter", "--dangerously-skip-permissions"),
-    "codex": ("teamcodex", "Codex", ("V", "version"), "C-j", "--dangerously-bypass-approvals-and-sandbox"),
-    "grok": ("teamgrok", "Grok", ("p", "single", "prompt-file", "prompt-json", "v", "version"), "M-Enter",
-             "--always-approve"),
-    # cursor-agent's newline that works in every terminal is Ctrl+J; --yolo is its own flag already.
-    "cursor": ("teamcursor", "Cursor", ("p", "print", "list-models", "v", "version", "h"), "C-j", "--yolo"),
+    "claude": ("teamclaude", "Claude", ("p", "print", "v", "version"), "--dangerously-skip-permissions"),
+    "agy": ("teamagy", "agy", ("p", "print", "prompt", "version"), "--dangerously-skip-permissions"),
+    "codex": ("teamcodex", "Codex", ("V", "version"), "--dangerously-bypass-approvals-and-sandbox"),
+    "grok": ("teamgrok", "Grok", ("p", "single", "prompt-file", "prompt-json", "v", "version"), "--always-approve"),
+    # --yolo is cursor-agent's own flag already.
+    "cursor": ("teamcursor", "Cursor", ("p", "print", "list-models", "v", "version", "h"), "--yolo"),
 }
 # Subcommands that print and exit (or manage settings), so they skip the footer like the oneshot flags.
 # cursor-agent's chat commands (agent, ls, resume) keep it.
@@ -38,8 +34,8 @@ ONESHOT_SUBCOMMANDS = {
                "logout", "mcp", "models", "persist", "plugin", "rule", "status", "team",
                "uninstall-shell-integration", "update", "whoami", "worker"),
 }
-# The caller's choices that must reach the CLI even when the HUD tmux server was started by an earlier launch
-# (its panes get that server's environment): Codex home, and `claude N`'s pinned account.
+# The caller's choices that must reach the CLI in a new hc terminal (it gets the core's environment, not ours):
+# Codex home, and `claude N`'s pinned account.
 FORWARD = ("CODEX_HOME", "TC_ACCT", "TEAMCLAUDE_STATUSLINE_INDEX")
 # Set in the terminal hc_terminal starts: that launch must never start another one.
 HC_STARTED = "TEAMPROXY_HUD_HC_STARTED"
@@ -105,14 +101,16 @@ def herdr_footer(mode, cli):
                 raise RuntimeError("herdr-app not installed")
             if not hc:
                 raise RuntimeError("hc not installed")
+            me = os.environ.get("HC_TERMINAL_ID")
+            if not me:
+                raise RuntimeError("not in a Herdr terminal")
             data = read_status(Path.home() / f".config/{MODES[mode][0]}.json")
-            # No cache-usage row for Codex here: it reads the CLI's tmux pane.
+            # Codex adds a cache-usage row under the accounts, read from the CLI under this launcher.
             rows = len(claude_rows()) if mode == "claude" else len(
-                render(data, agy=mode == "agy", grok=mode == "grok", cursor=mode == "cursor"))
+                render(data, agy=mode == "agy", grok=mode == "grok", cursor=mode == "cursor")) + (mode == "codex")
             if shutil.get_terminal_size().lines < rows + 10:
                 raise RuntimeError(f"under {rows + 10} rows")
-            me = os.environ["HC_TERMINAL_ID"]
-            # HC_TERMINAL_ID can be inherited from another terminal (tmux, a pty an agent opened): split only
+            # HC_TERMINAL_ID can be inherited from another terminal (a multiplexer, a pty an agent opened): split only
             # when that terminal's program is on this launcher's own tty.
             program = str(call(hc, "get", me).get("pid") or 0)
             tty = subprocess.run(["ps", "-o", "tty=", "-p", program], stdin=subprocess.DEVNULL, capture_output=True,
@@ -126,7 +124,8 @@ def herdr_footer(mode, cli):
             statusline = str(Path(__file__).resolve().with_name("statusline.py"))
             footer = call(app, "do", "pane.split", json.dumps({
                 "direction": "down", "pane": pane,
-                "argv": [sys.executable, statusline, "--watch", *([] if mode == "codex" else ["--" + mode])]}))
+                "argv": [sys.executable, statusline, "--watch",
+                         *(["--codex-pid", str(os.getpid())] if mode == "codex" else ["--" + mode])]}))
             call(app, "do", "pane.focus", json.dumps({"pane": pane}))
             # Herdr sizes panes in pixels; about 20 px a row plus the pane's own chrome, then corrected from
             # the rows the footer terminal really got. ponytail: three corrections, a rows API if Herdr adds one.
@@ -188,8 +187,8 @@ def launch(arguments):
     mode = arguments[0][2:] if arguments and arguments[0] in ("--claude", "--agy", "--grok", "--cursor") else "codex"
     if mode != "codex":
         arguments = arguments[1:]
-    command, cli, flags, newline, yolo = MODES[mode]
-    keep_alive = "--keep-alive" in arguments
+    command, cli, flags, yolo = MODES[mode]
+    # --keep-alive (the old tmux footer's) is still taken and dropped: an hc terminal always outlives a detach.
     arguments = [yolo if a == "--yolo" else a for a in arguments if a != "--keep-alive"]
     if arguments and arguments[0] == "login" and mode == "codex":
         return login(arguments[1:])
@@ -202,16 +201,15 @@ def launch(arguments):
                  f"  {command} -- SUBCOMMAND      {cli} subcommand, no footer\n")
               + (f"  {command}                  … (Claude: --effort xhigh by default)\n" if mode == "claude" else "")
               + f"  {command} --yolo               {cli} without approval prompts ({yolo})\n"
-              + f"  {command} --keep-alive [{cli} arguments]  Keep running after detach\n"
-              "  Outside Herdr core it runs in a new hc terminal: Ctrl+\\ detaches, hc attach ADDRESS reattaches.\n"
-              f"  Without hc (tmux): Ctrl-b d stops the session by default, tmux -L {command}-hud attach reattaches.\n"
-              f"Requires: hc (herdr-core) or tmux, Python 3, running {command} proxy")
+              + "  Outside Herdr core it runs in a new hc terminal: Ctrl+\\ detaches, hc attach ADDRESS reattaches.\n"
+              "  Without hc (herdr-core) it runs without the footer.\n"
+              f"Requires: Python 3, running {command} proxy; the footer needs hc (herdr-core)")
         return 0
     # `teamcodex -- resume ID`: the `--` only gets Codex subcommands past the teamcodex wrapper.
     subcommand = bool(arguments) and arguments[0] == "--"
     if subcommand:
         arguments = arguments[1:]
-    tmux, proxy = shutil.which("tmux"), shutil.which(command)
+    proxy = shutil.which(command)
     if not proxy:
         sys.exit(f"Requires {command} on PATH")
     if (oneshot(arguments, flags) or (arguments[:1] and arguments[0] in ONESHOT_SUBCOMMANDS.get(mode, ()))
@@ -219,100 +217,12 @@ def launch(arguments):
         os.execv(proxy, [proxy, "run", "--", *arguments])
     if mode == "claude" and not subcommand:
         arguments = with_effort(arguments)
-    # Inside a Herdr terminal the CLI runs in it directly and the footer is a Herdr split below it: Herdr then
-    # sees the CLI's working/question/done status, which tmux hides (the CLI's status query never reaches Herdr
-    # through tmux).
-    if os.environ.get("HC_TERMINAL_ID") and not os.environ.get("TMUX"):
-        return herdr_footer(mode, [proxy, "run", "--", *arguments])
     hc = shutil.which("hc")
     if hc and not os.environ.get("HC_TERMINAL_ID") and not os.environ.get(HC_STARTED):
         return hc_terminal(hc, cli, raw)
-    if not tmux:
-        sys.exit("Requires hc (herdr-core) or tmux")
-    try:
-        data = read_status(Path.home() / f".config/{command}.json")
-    except Exception:
-        sys.exit(f"{command} proxy unavailable. Start it with: {command} server")
-    size = shutil.get_terminal_size()
-    # Claude rows come from the Claude Code status line; Codex adds a cache-usage row under the accounts.
-    rows = (len(claude_rows()) if mode == "claude"
-            else len(render(data, agy=mode == "agy", grok=mode == "grok", cursor=mode == "cursor")) + (mode == "codex"))
-    # Width is free: the footer clips long rows. Too short for a footer, run the CLI alone instead of refusing.
-    if size.lines < rows + 10:
-        print(f"{command}: under {rows + 10} rows, starting without the account footer", file=sys.stderr)
-        os.execv(proxy, [proxy, "run", "--", *arguments])
-    session = cli.lower() + "-" + uuid.uuid4().hex[:8]
-    # Own socket and config (src/hud/tmux.conf): the user's normal tmux server and settings stay untouched.
-    base = [tmux, "-L", command + "-hud", "-f", str(Path(__file__).resolve().with_name("tmux.conf"))]
-    env = dict(os.environ)
-    env.pop("TMUX", None)
-    env.pop("TMUX_PANE", None)
-    statusline = Path(__file__).resolve().with_name("statusline.py")
-    cwd = os.getcwd()
-    # Every tmux client runs from the home directory so a freshly spawned HUD
-    # server never inherits a project directory. tmux 3.7 keeps the server's
-    # start directory forever; once that directory is deleted, new panes ignore
-    # `-c` and start in the dead directory, and Codex exits with ENOENT.
-    home = str(Path.home())
-    def run(*args):
-        return subprocess.run([*base, *args], check=True, env=env, cwd=home,
-                              capture_output=True, text=True).stdout.strip()
-
-    # Codex starts in its own pane process once the layout is ready. Replacing a
-    # placeholder with `respawn-pane -k` closes one PTY and opens another at once,
-    # which macOS intermittently rejects with "fork failed: Device not configured"
-    # (ENXIO from a /dev/ptmx slot race near a 16-PTY boundary).
-    gate = "hud-" + session
-    # Exiting the CLI also closes the footer, including in keep-alive mode.
-    # The explicit cd keeps the caller's directory even on a HUD server whose
-    # own start directory no longer exists (see the note above).
-    script = (shlex.join([*base, "wait-for", gate]) + " && cd " + shlex.quote(cwd) + " && "
-               # TEAMCLAUDE_HUD tells the Claude Code status line that the footer already shows the table.
-               + shlex.join([*(["env", "TEAMCLAUDE_HUD=1"] if mode == "claude" else []), proxy, "run", "--", *arguments]) + "; "
-               + shlex.join([*base, "kill-session", "-t", session]))
-    created = False
-    try:
-        if mode == "codex":
-            env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
-        forward = [arg for name in FORWARD if name in env for arg in ("-e", f"{name}={env[name]}")]
-        top = run("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
-                  "-n", cli, "-c", cwd, "-x", str(size.columns), "-y", str(size.lines),
-                  *forward, "/bin/sh", "-c", script)
-        created = True
-        run("set-option", "-t", session, "status", "off")
-        run("set-option", "-t", session, "mouse", "on")
-        run("bind-key", "-n", "S-Enter", "send-keys", newline)
-        run("set-window-option", "-t", session, "pane-border-style", "fg=colour238")
-        # The terminal tab shows the CLI's own title instead of the launcher process (Python). A pane without a
-        # title of its own (the footer, or the CLI before it sets one) shows the window name: Claude, Codex, agy, Grok,
-        # Cursor.
-        run("set-option", "-t", session, "set-titles", "on")
-        run("set-option", "-t", session, "set-titles-string",
-            "#{?#{==:#{pane_title},#{host}},#{window_name},#{pane_title}}")
-        # The footer keeps its own height equal to its row count (statusline.py --watch), including after a
-        # window resize. A fixed client-resized hook ran before tmux resized the window and the footer grew
-        # to 15 rows for a 6-row table.
-        run("split-window", "-d", "-v", "-l", str(rows), "-t", top,
-            sys.executable, str(statusline), "--watch", *(["--codex-pane", top] if mode == "codex" else ["--" + mode]))
-        if not keep_alive:
-            # Setting this before the first attachment destroys the new session immediately.
-            run("set-hook", "-a", "-t", session, "client-attached",
-                f"set-option -t {session} destroy-unattached on")
-        run("select-pane", "-t", top)
-        run("wait-for", "-S", gate)
-    except subprocess.CalledProcessError as error:
-        if created:
-            subprocess.run([*base, "kill-session", "-t", session], env=env, cwd=home, capture_output=True)
-        sys.exit(f"Could not start the {cli} footer: " + (error.stderr or str(error)).strip())
-    try:
-        return subprocess.call([*base, "attach-session", "-t", session], env=env, cwd=home)
-    finally:
-        # Failed attachment must not orphan a new session or stop another attached client.
-        state = subprocess.run([*base, "display-message", "-p", "-t", session,
-                                "#{session_attached} #{session_last_attached}"],
-                               env=env, cwd=home, capture_output=True, text=True).stdout.split()
-        if state and state[0] == "0" and (not keep_alive or len(state) == 1):
-            subprocess.run([*base, "kill-session", "-t", session], env=env, cwd=home, capture_output=True)
+    # Inside a Herdr terminal the CLI runs in it directly and the footer is a Herdr split below it, so Herdr sees
+    # the CLI's working/question/done status. Without hc (or herdr-app) the CLI runs alone and says why.
+    return herdr_footer(mode, [proxy, "run", "--", *arguments])
 
 
 if __name__ == "__main__":

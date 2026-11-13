@@ -39,9 +39,10 @@ def install():
     if "--service" in arguments:
         install_service(command)
     print("Add an account: teamcodex login --name codex-1")
-    for dependency in ("codex", "tmux"):
-        if not shutil.which(dependency):
-            print(f"Install {dependency} before launching teamcodex.")
+    if not shutil.which("codex"):
+        print("Install codex before launching teamcodex.")
+    if not shutil.which("hc"):
+        print("Without hc (herdr-core) teamcodex runs without the account footer.")
 
 
 if __name__ == "__main__":

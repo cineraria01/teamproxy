@@ -636,7 +636,7 @@ test('lane env: no proxy variables — cursor-agent sends the localhost lane thr
   assert.equal(env.NODE_EXTRA_CA_CERTS, '/ca.pem', 'a corporate CA still reaches its direct (telemetry) calls');
 });
 
-// The worker in TUI mode (tmux) has no SIGTERM handler, so it ends without an 'exit' event. A real process, since
+// The worker in TUI mode (in a terminal: the hc terminal <pool>-proxy) has no SIGTERM handler, so it ends without an 'exit' event. A real process, since
 // the signal path cannot be driven inside the test runner.
 async function signalRun({ otherHandler }) {
   const script = `

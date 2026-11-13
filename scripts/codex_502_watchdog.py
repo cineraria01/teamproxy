@@ -71,10 +71,6 @@ assert "\\" not in RECOVERY_MESSAGE, "RECOVERY_MESSAGE must not contain backslas
 CMUX = os.environ.get(
     "CMUX_BIN", "/Applications/cmux.app/Contents/Resources/bin/cmux"
 )
-# No default: this is your own worker's SSH host, and a hostname baked in here
-# would point at whoever wrote the script. Unset means the remote health probe
-# below fails its own hostname validation and reports "not healthy".
-REMOTE_HOST = os.environ.get("QJC_WORKER_HOST", "")
 STATE_DIR = Path(
     os.environ.get("CODEX_WATCHDOG_STATE_DIR", str(Path.home() / ".codex" / "state"))
 )
@@ -120,12 +116,9 @@ STATUS_RE = re.compile(
     r"^\s*(?:gpt-[\w.-]+(?:\s+[\w.-]+)*\s+·\s+\S.*|\d+% context left)\s*$",
     re.IGNORECASE,
 )
-TMUX_STATUS_RE = re.compile(
-    r"^\s*\S+\s+\|\s+\S+\s+\d+:\S+.*\b\d{2}/\d{2}\s+\d{2}:\d{2}\s*$"
-)
 # 에러와 프롬프트 사이에 떠도 "새 출력"이 아닌 codex TUI 상주 안내줄
 # (2026-08-14 실측: background terminal 알림 때문에 실제 걸린 세션이 게이트됨).
-# before_prompt에만 적용한다 — after_prompt는 STATUS_RE/TMUX_STATUS_RE가
+# before_prompt에만 적용한다 — after_prompt는 STATUS_RE가
 # 이미 엄격한 상태줄 계약을 강제하므로 이 완화가 필요 없다(비대칭 의도).
 AMBIENT_LINE_RE = re.compile(
     r"^\d+ background terminals? running · /ps to view · /stop to close$"
@@ -173,7 +166,6 @@ CHECKPOINT_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-7[0-9A-Fa-f]{3}-"
     r"[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$"
 )
-REMOTE_CHECKPOINT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -284,13 +276,12 @@ def detect_waiting_502(
     after_prompt = [line.strip() for line in trailing[prompt_index + 1 :] if line.strip()]
     if before_prompt:
         return None
-    if not 1 <= len(after_prompt) <= 2:
+    # 2026-11-13 tmux 제거: 상태줄 밑 원격 tmux 하단 줄(옛 TMUX_STATUS_RE)은 더 받지 않는다.
+    if len(after_prompt) != 1:
         return None
     if not STATUS_RE.fullmatch(after_prompt[0]):
         return None
     if port is None and not after_prompt[0].lower().startswith("gpt-"):
-        return None
-    if len(after_prompt) == 2 and not TMUX_STATUS_RE.fullmatch(after_prompt[1]):
         return None
 
     context_start = max(0, error_index - 6)
@@ -409,28 +400,8 @@ def resume_candidate(
     checkpoint = binding.get("checkpoint_id")
     if not isinstance(checkpoint, str):
         return None
-    if kind == "tmux":
-        attach_command = (
-            len(command_tokens) == 3
-            and Path(command_tokens[0]).name == "qjc-agent"
-            and command_tokens[1:] == ["attach", checkpoint]
-        )
-        qjc_agent_command = (
-            len(command_tokens) == 2
-            and Path(command_tokens[0]).name == "qjc-agent"
-            and command_tokens[1] == "codex"
-        )
-        qjc_worker_command = (
-            len(command_tokens) == 3
-            and Path(command_tokens[0]).name == "qjc-worker"
-            and command_tokens[1:] == ["agent", "codex"]
-        )
-        if not REMOTE_CHECKPOINT_RE.fullmatch(checkpoint) or not (
-            attach_command or qjc_agent_command or qjc_worker_command
-        ):
-            return None
-        remote = "true"
-    elif kind == "codex":
+    # 2026-11-13 tmux 제거: 원격 qjc-agent tmux 세션(kind "tmux")은 더 후보로 받지 않는다.
+    if kind == "codex":
         resume_targets = [
             index
             for index in range(len(command_tokens) - 2)
@@ -677,33 +648,9 @@ def valid_proxy_status(body: bytes) -> bool:
 
 def proxy_healthy(port: int, remote: str) -> bool:
     url = f"http://127.0.0.1:{port}/teamclaude/status"
-    if remote == "unknown":
+    # 원격("true") 후보는 2026-11-13 tmux 제거로 없어졌다: 로컬로 확인된 것만 건강 검사한다.
+    if remote != "false":
         return False
-    if remote == "true":
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", REMOTE_HOST):
-            return False
-        try:
-            completed = subprocess.run(
-                [
-                    "/usr/bin/ssh",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=4",
-                    REMOTE_HOST,
-                    "/usr/bin/curl",
-                    "-fsS",
-                    "--max-time",
-                    "2",
-                    url,
-                ],
-                check=False,
-                capture_output=True,
-                timeout=8,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return completed.returncode == 0 and valid_proxy_status(completed.stdout)
     try:
         with urllib.request.urlopen(url, timeout=5) as response:
             if response.status != 200:

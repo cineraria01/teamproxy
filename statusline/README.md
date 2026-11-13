@@ -3,7 +3,7 @@
 한국어 · [English](#english)
 
 > 2026-10-10부터 [cineraria01/teamproxy](https://github.com/cineraria01/teamproxy) 포크의 `statusline/` 폴더다(옛 `cineraria01/teamclaude-statusline` 저장소를 합침). Codex·agy 하단 줄은 같은 포크의 `src/hud/`([docs/install/HUD.md](../docs/install/HUD.md)).
-> `teamclaude`·`claude`로 띄우면 이 표가 Claude Code 아래 tmux 하단 줄로 옮겨 가고(2초마다 갱신), Claude 안의 상태줄에는 모델 줄만 남는다(`TEAMCLAUDE_HUD=1`). `claude`는 인자 없음·옵션이면 하단 줄로, 첫 낱말(`claude mcp list`)이면 하단 줄 없이 실행한다.
+> `teamclaude`·`claude`로 띄우면 이 표가 Claude Code 아래 하단 줄(Herdr 분할 창, 2026-11-13 tmux 제거)로 옮겨 가고(2초마다 갱신), Claude 안의 상태줄에는 모델 줄만 남는다(`TEAMCLAUDE_HUD=1`). `claude`는 인자 없음·옵션이면 하단 줄로, 첫 낱말(`claude mcp list`)이면 하단 줄 없이 실행한다.
 
 [teamclaude](https://github.com/jung-wan-kim/teamclaude) 다계정 Claude 프록시의 계정별 사용량을 Claude Code 상태줄에 실시간으로 표시합니다.
 

@@ -1,5 +1,7 @@
 # cmux renderer 및 agent session 안전 복구 runbook
 
+> 2026-11-13 tmux 제거: teamproxy는 tmux를 더 쓰지 않는다(하단 줄은 Herdr 분할 창·hc 터미널, 맥 상시 실행은 launchd + hc 터미널 `<풀>-proxy`). 아래의 tmux 이야기는 그때의 기록이다.
+
 > 메인 cmux와 별도 worker tmux 사이의 SSH 단절, hidden local tmux, duplicate
 > client, exact native UUID 복구는
 > [메인 cmux ↔ worker Codex 세션 복구 및 재발 방지](./main-worker-codex-session-recovery.md)를

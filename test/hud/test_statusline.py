@@ -76,7 +76,7 @@ def check():
         assert any("48;5;239" in line for line in colored)
 
     # A new CLI may not have opened its rollout yet; this is normal startup.
-    with patch("sys.argv", ["statusline.py", "--plain", "--codex-pane", "%0"]), \
+    with patch("sys.argv", ["statusline.py", "--plain", "--codex-pid", "1"]), \
             patch("statusline.read_status", return_value=data), \
             patch("statusline.session_log", return_value=None), \
             patch("builtins.print") as displayed:
@@ -117,25 +117,25 @@ def check():
         assert "unavailable" in cache_row({"input_tokens": 10})
         child_log = Path(temporary) / "rollout-child.jsonl"
         child_log.write_text(json.dumps({"type": "session_meta", "payload": {"source": {"subagent": {}}}}) + "\n")
-        with patch("statusline.subprocess.check_output", side_effect=["10", "10 1 sh\n11 10 node\n12 11 /bin/codex\n99 1 /bin/codex"]), patch("statusline.subprocess.run") as opened:
+        with patch("statusline.subprocess.check_output", return_value="10 1 sh\n11 10 node\n12 11 /bin/codex\n99 1 /bin/codex"), patch("statusline.subprocess.run") as opened:
             opened.return_value.stdout = f"n{child_log}\nn{log}\n"
-            assert session_log("%0") == log
+            assert session_log(10) == log
             assert opened.call_args.args[0][4] == "12"
         # Login/exec children must not hide the outer CLI or select their usage.
         processes = "10 1 sh\n11 10 node\n12 11 /bin/codex\n13 12 sh\n14 13 /bin/codex\n99 1 /bin/codex"
-        for pane_pid in ("10", "12"):
-            with patch("statusline.subprocess.check_output", side_effect=[pane_pid, processes]), patch("statusline.subprocess.run") as opened:
+        for launcher_pid in (10, 12):
+            with patch("statusline.subprocess.check_output", return_value=processes), patch("statusline.subprocess.run") as opened:
                 opened.return_value.stdout = f"n{log}\n"
-                assert session_log("%0") == log
+                assert session_log(launcher_pid) == log
                 assert opened.call_args.args[0][4] == "12"
         for processes, paths in (
                 ("10 1 sh\n12 10 /bin/codex\n14 10 /bin/codex", f"n{log}\n"),
                 ("10 1 sh\n12 10 /bin/codex", f"n{log}\nn{child_log}\n")):
             child_log.write_text(json.dumps({"type": "session_meta", "payload": {"source": "cli"}}) + "\n")
-            with patch("statusline.subprocess.check_output", side_effect=["10", processes]), patch("statusline.subprocess.run") as opened:
+            with patch("statusline.subprocess.check_output", return_value=processes), patch("statusline.subprocess.run") as opened:
                 opened.return_value.stdout = paths
                 try:
-                    session_log("%0")
+                    session_log(10)
                 except ValueError:
                     pass
                 else:

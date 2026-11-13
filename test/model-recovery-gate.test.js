@@ -34,9 +34,9 @@ test("model recovery gate includes the Python watchdog regressions", () => {
     0,
     `Python watchdog regressions failed:\n${result.stdout}\n${result.stderr}`,
   );
-  assert.match(result.stderr, /Ran 102 tests/);
+  assert.match(result.stderr, /Ran 101 tests/);
   assert.match(result.stderr, /OK/);
-  console.log("Python watchdog regression suite: 102/102 PASS");
+  console.log("Python watchdog regression suite: 101/101 PASS");
 });
 
 test("model recovery gate executes the pinned full recovery verifier", () => {

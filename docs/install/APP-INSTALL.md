@@ -5,14 +5,14 @@
 
 ## 하는 일과 하지 않는 일
 
-필요한 것은 **Node 하나**다(Python·tmux·git 불필요). 설치기도 Node 스크립트이고, 앱이 전용 Node를 내려받아 `--node`로 넘기면 시스템 Node가 없어도 된다.
+필요한 것은 **Node 하나**다(Python·git 불필요). 설치기도 Node 스크립트이고, 앱이 전용 Node를 내려받아 `--node`로 넘기면 시스템 Node가 없어도 된다.
 
 하는 일(사용자 권한으로만, 네트워크 없이. `--with-codex-cli`만 npm 레지스트리를 쓴다):
 - 풀(`claude`·`codex`·`agy`·`grok`·`cursor`)마다 설치 폴더 `~/.local/share/teamproxy-app/<풀>`(npm prefix)에 설치.
   원천은 **이 설치기가 들어 있는 폴더**다: `<node> <npm-cli.js> install --global --prefix … --ignore-scripts --install-links <이 폴더>`.
   npm은 시스템 것이 아니라 `--node`와 같은 배포본의 `lib/node_modules/npm/bin/npm-cli.js`(node가 심볼릭 링크면 실제 경로 쪽도 찾는다)를 그 node로 실행한다.
   브랜치 tip을 받지 않는다. 런타임 의존성은 0이다.
-- `~/.local/bin/{teamclaude,teamcodex,teamagy,teamgrok,teamcursor}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄(tmux)·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
+- `~/.local/bin/{teamclaude,teamcodex,teamagy,teamgrok,teamcursor}` 래퍼(둘째 줄에 `# teamproxy-app` 표식). 하단 줄·HUD 없이, **`--node` 절대 경로의 node**로 프록시를 바로 실행한다. 래퍼 PATH와 launchd PATH는 그 node 폴더로 시작한다(사용자 PATH·셸 rc는 건드리지 않는다).
 - 설정 `~/.config/{teamclaude,teamcodex,teamagy,teamgrok,teamcursor}.json`이 없으면 만들고(`0600`) `proxy.apiKey`를 생성, `proxy.host`를 `127.0.0.1`, `proxy.allowNoAccounts`를 `true`로 적는다.
   앱 설치 전부터 있던 설정은 **바꾸지 않는다**(끝 줄과 단계 줄에 `"config":"existing_kept"`, 매니페스트에도 기록). 앱이 만든 설정만 새 키를 채우고 `--purge`로 지운다.
 - launchd 사용자 에이전트 `kr.selvi.teamproxy.<풀>`: `<래퍼> server`, `RunAtLoad`·`KeepAlive`·`ThrottleInterval 10`,
@@ -20,7 +20,7 @@
 
 - `--with-codex-cli <버전>`이면(실제 npm으로 0.162.1을 `--ignore-scripts`로 설치해 플랫폼 선택 의존성 `@openai/codex-darwin-arm64`가 깔리고 `codex --version`이 도는 것을 확인했다) 같은 node·npm으로 `@openai/codex@<버전>`을 `~/.local/share/teamproxy-app/codex-cli`(npm prefix)에 설치하고, teamcodex 래퍼가 `TEAMCODEX_CODEX_BIN=<그 폴더>/bin/codex`를 쓴다(사용자가 이미 `TEAMCODEX_CODEX_BIN`을 정해 두면 그 값이 우선). 이 CLI의 `#!/usr/bin/env node`가 같은 node를 찾도록 래퍼 PATH가 node 폴더로 시작한다.
 
-하지 않는 일: 셸 rc, `~/.claude/settings.json`, 상태줄, tmux 하단 줄, 계정 로그인, sudo.
+하지 않는 일: 셸 rc, `~/.claude/settings.json`, 상태줄, 하단 줄, 계정 로그인, sudo.
 
 설정에 `proxy.allowNoAccounts: true`를 적으므로 계정이 0개여도 서버가 떠 있다(launchd 재기동 없음). `/teamclaude/status`는 200과 `totalCount: 0`, API 요청은 503 "계정이 없습니다. 로그인하세요"를 준다. `<풀> login`이 끝나면 실행 중인 서버에 반영해(SIGHUP, 또는 `POST /teamclaude/accounts/sync`) 재시작 없이 새 계정을 쓴다. 플래그가 없는 설정은 지금처럼 "No accounts configured"로 종료한다.
 

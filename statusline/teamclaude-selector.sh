@@ -1,7 +1,7 @@
 # Numbered account selector for teamclaude-statusline.
 # Sourced by Bash/Zsh; `claude` keeps automatic rotation and `claude N` pins
 # the new session to account N in `teamclaude status --json` order.
-# Like `teamclaude`: no arguments or Claude flags open Claude Code with the tmux
+# Like `teamclaude`: no arguments or Claude flags open Claude Code with the
 # account footer; a first word (a Claude subcommand) runs directly, without it.
 
 unalias claude 2>/dev/null || true

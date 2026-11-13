@@ -352,13 +352,14 @@ class DetectWaiting502Tests(unittest.TestCase):
                     watchdog.detect_waiting_502(screen, "session-1")
                 )
 
-    def test_remote_tmux_footer_after_status_matches(self) -> None:
+    def test_remote_tmux_footer_after_status_does_not_match(self) -> None:
+        # 2026-11-13 tmux 제거: 원격 tmux 하단 줄도 이제 아무 줄과 같다.
         screen = (
             f"{ERROR}\n\n› Run /review on my current changes\n\n"
             "  gpt-5.6-sol xhigh · ~/repo\n\n"
             "  Mac-Studio | qjc-codex-job 1:Python 08/13 18:22"
         )
-        self.assertIsNotNone(
+        self.assertIsNone(
             watchdog.detect_waiting_502(screen, "session-1", "surface:289")
         )
 
@@ -1021,88 +1022,17 @@ class CandidateAndStateTests(unittest.TestCase):
                     )
                 )
 
-    def test_remote_binding_requires_checkpoint_in_command(self) -> None:
+    def test_remote_tmux_bindings_are_never_candidates(self) -> None:
+        # 2026-11-13 tmux 제거: 원격 qjc-agent tmux 세션(kind "tmux")은 후보가 아니다.
         surface = "22222222-2222-4222-8222-222222222222"
-        for checkpoint, command in (
-            (None, "qjc-agent attach"),
-            ("", "qjc-agent attach"),
-            ("qjc-codex-42", "qjc-agent attach qjc-codex-other"),
-            (
-                "qjc-codex-42",
-                "qjc-agent attach qjc-codex-other --note qjc-codex-42",
-            ),
-        ):
-            with self.subTest(checkpoint=checkpoint, command=command):
-                self.assertIsNone(
-                    watchdog.resume_candidate(
-                        surface,
-                        {
-                            "resume_binding": {
-                                "kind": "tmux",
-                                "checkpoint_id": checkpoint,
-                                "command": command,
-                            }
-                        },
-                    )
-                )
-
-    def test_remote_codex_launcher_bindings_are_exact_candidates(self) -> None:
-        surface = "22222222-2222-4222-8222-222222222222"
-        checkpoint = "qjc-codex-42"
-        valid_commands = (
+        for command in (
             "qjc-agent codex",
             ["/Users/test/bin/qjc-agent", "codex"],
             "qjc-worker agent codex",
-            ["/Users/test/bin/qjc-worker", "agent", "codex"],
-        )
-        for command in valid_commands:
-            with self.subTest(command=command):
-                command_tokens = command if isinstance(command, list) else command.split()
-                candidate = watchdog.resume_candidate(
-                    surface,
-                    {
-                        "resume_binding": {
-                            "kind": "tmux",
-                            "checkpoint_id": checkpoint,
-                            "command": command,
-                        }
-                    },
-                )
-                self.assertEqual(
-                    candidate,
-                    {
-                        "ref": surface,
-                        "checkpoint": checkpoint,
-                        "remote": "true",
-                        "command_ref": watchdog.binding_command_ref(command_tokens),
-                    },
-                )
-
-        for command in (
-            "qjc-agent codex --unsafe",
-            "qjc-worker agent codex --unsafe",
-            "other-agent codex",
+            "qjc-agent attach qjc-codex-42",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(
-                    watchdog.resume_candidate(
-                        surface,
-                        {
-                            "resume_binding": {
-                                "kind": "tmux",
-                                "checkpoint_id": checkpoint,
-                                "command": command,
-                            }
-                        },
-                    )
-                )
-        for command in (
-            "qjc-agent attach qjc-codex-42",
-            ["/Users/test/bin/qjc-agent", "attach", "qjc-codex-42"],
-        ):
-            with self.subTest(command=command):
-                command_tokens = command if isinstance(command, list) else command.split()
-                self.assertEqual(
                     watchdog.resume_candidate(
                         surface,
                         {
@@ -1112,15 +1042,7 @@ class CandidateAndStateTests(unittest.TestCase):
                                 "command": command,
                             }
                         },
-                    ),
-                    {
-                        "ref": surface,
-                        "checkpoint": "qjc-codex-42",
-                        "remote": "true",
-                        "command_ref": watchdog.binding_command_ref(
-                            command_tokens
-                        ),
-                    },
+                    )
                 )
 
     def test_only_terminal_codex_bindings_are_candidates(self) -> None:
@@ -1255,15 +1177,8 @@ class CandidateAndStateTests(unittest.TestCase):
                             "01911111-1111-7111-8111-111111111111",
                         ]
                     ),
-                },
-                {
-                    "ref": remote_id,
-                    "checkpoint": "qjc-codex-42",
-                    "remote": "true",
-                    "command_ref": watchdog.binding_command_ref(
-                        ["qjc-agent", "attach", "qjc-codex-42"]
-                    ),
-                },
+                }
+                # The remote tmux binding is not a candidate any more (2026-11-13).
             ],
         )
 

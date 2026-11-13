@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // App-mode installer: non-interactive, user-level, JSON-lines output (docs/install/APP-INSTALL.md).
-// Needs only Node (the one that runs it, or --node). No Python, tmux, git, sudo or network
+// Needs only Node (the one that runs it, or --node). No Python, git, sudo or network
 // (except `--with-codex-cli`, which asks npm for the pinned Codex CLI). Never touches shell rc files or ~/.claude.
 // macOS: npm copy + sh wrappers + launchd. Windows: no service, no wrapper, no npm — it writes configs and a
 // manifest and hands back each pool's run spec ({argv, env, log}); the app starts and stops the servers itself.

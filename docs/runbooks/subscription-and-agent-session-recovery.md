@@ -1,5 +1,7 @@
 # TeamClaude 구독 오판·qjc-agent 세션 상한 재발 방지 runbook
 
+> 2026-11-13 tmux 제거: teamproxy는 tmux를 더 쓰지 않는다(하단 줄은 Herdr 분할 창·hc 터미널, 맥 상시 실행은 launchd + hc 터미널 `<풀>-proxy`). 아래의 tmux 이야기는 그때의 기록이다.
+
 ## 결론
 
 계정의 `usable:false` 또는 세션 시작 실패를 구독 연체로 단정하지 않는다. TeamClaude는

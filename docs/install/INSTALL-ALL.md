@@ -26,8 +26,9 @@ macOS 기준(Homebrew). Linux면 §4의 launchd 대신 `python3 scripts/install.
 `docs/install/HUD.md`의 Linux 절을 따른다.
 
 ```sh
-brew install tmux node git python3   # 없는 것만
-node -v; npm -v; git --version; tmux -V; python3 --version   # node 20+, python 3.9+
+brew install node git python3   # 없는 것만
+node -v; npm -v; git --version; python3 --version   # node 20+, python 3.9+
+command -v hc                   # Herdr core: §4 상시 실행·하단 줄에 쓴다(2026-11-13 tmux 제거)
 command -v claude; command -v codex   # Claude Code·Codex CLI가 먼저 설치돼 있어야 한다
 command -v agy                        # teamagy를 쓸 때만: Antigravity CLI, agy에서 한 번 로그인해 둔다
 ls ~/.grok/bin/grok                   # teamgrok을 쓸 때만: Grok Build CLI, grok에서 한 번 로그인해 둔다
@@ -296,33 +297,62 @@ PY
 다른 풀의 설정 파일로는 teamagy가 실행되지 않는다. Claude 쪽 `proxy.apiKey`는 로그인이
 만든 값을 유지한다(상태라인이 이 키로 status를 읽는다).
 
-## 4. 상시 실행 — launchd + tmux (macOS)
+## 4. 상시 실행 — launchd + Herdr core 터미널 (macOS)
 
-프록시를 tmux 세션 안에서 띄워 TUI 대시보드를 볼 수 있게 한다.
+launchd가 감독 스크립트 `teamproxy-hc-server <풀>`을 띄우고, 그 스크립트가 프록시(`<풀> server`, TUI 대시보드)를
+Herdr core(`hc`) 터미널 `<풀>-proxy` 안에서 돌린다. `hc`가 먼저 설치돼 있어야 한다(`command -v hc`).
+2026-11-13부터 tmux는 쓰지 않는다(옛 `<풀>-tmux-server`·tmux 세션 `proxy`는 `update`가 감독자로 보지 않는다).
+`hc`가 없는 맥은 대시보드 없이 `ProgramArguments`를 `[~/.local/bin/<풀>, server, --headless]`로 두고, 갱신은
+`<풀> update --no-restart` 뒤 `launchctl kickstart -k gui/$(id -u)/<라벨>`로 한다.
 
 ```sh
-TMUX_BIN=$(command -v tmux)
-for pool in teamclaude teamcodex teamagy teamgrok teamcursor; do
-[ -x ~/.local/bin/$pool ] || continue   # teamagy·teamgrok·teamcursor는 §1-3·§1-4·§1-5를 했을 때만
-cat > ~/.local/bin/$pool-tmux-server <<EOF
+cat > ~/.local/bin/teamproxy-hc-server <<'EOF2'
 #!/bin/sh
-# Run the $pool proxy inside a detached tmux session so its TUI can be viewed:
-#   tmux -L $pool attach -t proxy   (Ctrl-b d detaches; 'q' in the TUI stops the proxy — launchd restarts it)
-# Restart: tmux -L $pool kill-session -t proxy
-TMUX=$TMUX_BIN; SOCK=$pool; SES=proxy
-export TERM=xterm-256color LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-if ! "\$TMUX" -L "\$SOCK" has-session -t "\$SES" 2>/dev/null; then
-  "\$TMUX" -L "\$SOCK" -f /dev/null new-session -d -s "\$SES" -x 170 -y 48 \\
-    "exec \$HOME/.local/bin/$pool server" || exit 1
-  "\$TMUX" -L "\$SOCK" set-option -t "\$SES" mouse on >/dev/null 2>&1
-  "\$TMUX" -L "\$SOCK" set-option -t "\$SES" status off >/dev/null 2>&1
-  "\$TMUX" -L "\$SOCK" set-option -t "\$SES" remain-on-exit off >/dev/null 2>&1
-fi
-while "\$TMUX" -L "\$SOCK" has-session -t "\$SES" 2>/dev/null; do sleep 3; done
-exit 0
-EOF
-chmod 755 ~/.local/bin/$pool-tmux-server
+# teamproxy-hc-server <pool>   (pool: teamclaude teamcodex teamgrok teamagy teamcursor)
+# launchd (KeepAlive) runs this in the foreground. The proxy itself (`<pool> server`, TUI dashboard)
+# lives in the Herdr core terminal named <pool>-proxy: view it with `hc attach <pool>-proxy`
+# (Ctrl+\ detaches; `q` in the TUI STOPS the proxy and launchd starts a fresh one). Restart: `hc kill <pool>-proxy`.
+# A live <pool>-proxy terminal is adopted, never started twice; this script exits once it ends.
+POOL=${1:?usage: teamproxy-hc-server <pool>}
+HC=${TEAMPROXY_HC:-$HOME/.local/bin/hc}
+NAME=$POOL-proxy
+
+# live | finished | absent | error (core unreachable: never start then, a duplicate could follow)
+state() {
+  out=$("$HC" get "$NAME" --json 2>/dev/null); rc=$?
+  if [ $rc -eq 3 ]; then echo absent
+  elif [ $rc -ne 0 ]; then echo error
+  elif printf '%s' "$out" | grep -q '"state":"live"'; then echo live
+  else echo finished; fi
+}
+
+while :; do
+  case $(state) in
+    live) break ;;
+    finished) "$HC" rm "$NAME" >/dev/null 2>&1 ;;
+    absent)
+      "$HC" run --bg --json --no-parent --outlive-parent --no-notify --name "$NAME" --cwd "$HOME" -- \
+        /usr/bin/env -i HOME="$HOME" PATH="$PATH" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" \
+        SHELL="${SHELL:-/bin/zsh}" TMPDIR="${TMPDIR:-/tmp/}" TERM=xterm-256color LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+        "$HOME/.local/bin/$POOL" server >/dev/null || sleep 3 ;;
+    *) sleep 3 ;;
+  esac
 done
+echo "$(date '+%F %T') watching hc terminal $NAME"
+
+while :; do
+  "$HC" wait "$NAME" --timeout 3600 >/dev/null 2>&1 || sleep 3
+  case $(state) in
+    live|error) ;;
+    *) break ;;
+  esac
+done
+"$HC" rm "$NAME" >/dev/null 2>&1
+echo "$(date '+%F %T') hc terminal $NAME ended"
+exit 0
+EOF2
+chmod 755 ~/.local/bin/teamproxy-hc-server
+[ -x ~/.local/bin/hc ] || echo "hc가 ~/.local/bin/hc에 없다: TEAMPROXY_HC를 plist EnvironmentVariables에 넣는다"
 
 mkdir -p ~/.local/state/teamcodex ~/.local/state/teamagy ~/.local/state/teamgrok ~/.local/state/teamcursor ~/Library/Logs
 python3 - <<'PY'
@@ -331,20 +361,20 @@ from pathlib import Path
 home = Path.home(); uid = os.getuid()
 node_dir = str(Path(os.popen('command -v node').read().strip()).parent)
 path_env = f"/opt/homebrew/bin:{home}/.local/bin:{node_dir}:/usr/local/bin:/usr/bin:/bin"
-for label, wrapper, out in [
-    ('com.local.teamclaude', 'teamclaude-tmux-server', home/'Library/Logs/teamclaude.log'),
-    ('com.local.teamcodex',  'teamcodex-tmux-server',  home/'.local/state/teamcodex/server.log'),
-    ('com.local.teamagy',    'teamagy-tmux-server',    home/'.local/state/teamagy/server.log'),
-    ('com.local.teamgrok',   'teamgrok-tmux-server',   home/'.local/state/teamgrok/server.log'),
-    ('com.local.teamcursor', 'teamcursor-tmux-server', home/'.local/state/teamcursor/server.log'),
+for label, pool, out in [
+    ('com.local.teamclaude', 'teamclaude', home/'Library/Logs/teamclaude.log'),
+    ('com.local.teamcodex',  'teamcodex',  home/'.local/state/teamcodex/server.log'),
+    ('com.local.teamagy',    'teamagy',    home/'.local/state/teamagy/server.log'),
+    ('com.local.teamgrok',   'teamgrok',   home/'.local/state/teamgrok/server.log'),
+    ('com.local.teamcursor', 'teamcursor', home/'.local/state/teamcursor/server.log'),
 ]:
-    if not (home/'.local/bin'/wrapper).exists():
+    if not (home/'.local/bin'/pool).exists():   # teamagy·teamgrok·teamcursor는 §1-3·§1-4·§1-5를 했을 때만
         continue
     p = home/'Library/LaunchAgents'/f'{label}.plist'
     p.parent.mkdir(parents=True, exist_ok=True)
     plistlib.dump({
         'Label': label,
-        'ProgramArguments': [str(home/'.local/bin'/wrapper)],
+        'ProgramArguments': [str(home/'.local/bin/teamproxy-hc-server'), pool],
         'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10,
         'ProcessType': 'Standard',
         'EnvironmentVariables': {'HOME': str(home), 'PATH': path_env},
@@ -367,11 +397,11 @@ teamclaude status; teamcodex status; teamagy status
 ```
 
 운영 요령:
-- 재시작은 `tmux -L teamclaude kill-session -t proxy`(launchd가 다시 띄움). Codex 쪽 재시작은
+- 재시작은 `hc kill teamclaude-proxy`(launchd가 다시 띄움). Codex 쪽 재시작은
   실행 중인 teamcodex 화면 세션을 죽이니 주의. `teamclaude restart`는 포그라운드라 쓰지 않는다.
 - `enable|disable|priority|login|reauth`는 살아 있는 서버에 즉시 반영되므로 재시작 불필요.
-- 대시보드: `tmux -L teamclaude attach -t proxy` / `tmux -L teamcodex attach -t proxy` /
-  `tmux -L teamagy attach -t proxy`, `Ctrl-b d`로 분리. TUI에서 `q`는 서버 종료(launchd가 재기동).
+- 대시보드: `hc attach teamclaude-proxy` / `hc attach teamcodex-proxy` / `hc attach teamagy-proxy`, `Ctrl+\`로 분리.
+  보기만 할 때는 `hc read <풀>-proxy`. TUI에서 `q`는 서버 종료(launchd가 재기동).
 
 ## 5. Claude 상태라인 + 계정 선택기 (포크의 statusline/)
 
@@ -400,7 +430,7 @@ json.dump(d, open(p, 'w'), indent=2, ensure_ascii=False); print(d['env'])
 PY
 ```
 
-새 셸을 열고 `type claude`가 함수로 나오는지, `claude`를 띄웠을 때 Claude Code 아래 tmux 하단 줄에
+새 셸을 열고 `type claude`가 함수로 나오는지, `claude`를 띄웠을 때 Claude Code 아래 하단 줄(Herdr 분할 창)에
 계정별 Ses/Wk/Fbl 막대가 그려지는지(Claude 안의 상태줄에는 모델 줄만) 확인한다.
 
 ## 6. Codex 상태라인 (teamcodex) 확인
@@ -408,11 +438,11 @@ PY
 §1에서 이미 설치됐다. 확인만 한다:
 
 ```sh
-cd ~/some-project && teamcodex # Codex 화면 아래 tmux 패널로 상태줄
+cd ~/some-project && teamcodex # Codex 화면 아래 하단 줄(Herdr 안이면 분할 창, 밖이면 새 hc 터미널)
 ```
 
 `teamcodex`는 `--dangerously-bypass-approvals-and-sandbox` 같은 Codex 인자를 그대로 넘긴다.
-창을 닫아도 유지하려면 `teamcodex --keep-alive`.
+Herdr 밖에서 띄운 것은 hc 터미널이라 `Ctrl+\`로 떼어도 계속 돌고 `hc attach <주소>`로 다시 붙는다.
 
 teamagy를 설치했다면:
 
@@ -451,7 +481,7 @@ cd ~/some-project && teamcursor                                      # cursor-ag
 
 ## 8. 최신판으로 갱신 — `<풀> update`
 
-설치한 뒤 포크 main이 바뀌면 풀 명령 하나로 갱신한다. 맥(launchd + tmux)과 Linux(systemd 사용자 서비스) 모두 같은 명령이다.
+설치한 뒤 포크 main이 바뀌면 풀 명령 하나로 갱신한다. 맥(launchd + hc 터미널)과 Linux(systemd 사용자 서비스) 모두 같은 명령이다.
 
 ```sh
 teamclaude update --dry-run      # 무엇을 바꾸고 무엇을 다시 띄울지만 본다
@@ -480,8 +510,8 @@ teamagy update --ref <브랜치|태그|커밋> --wait 900 --json
    없는 파일이 하나라도 있으면 그 목록을 보이고 멈춘다(`local_changes`, 아무것도 바꾸지 않는다).
    파일이 같고 서버의 `x-teamcodex-source-hash`도 같으면 "이미 최신"이다. 파일만 같고 서버가 옛 코드로 돌면 재시작만 한다.
 3. 재시작 방법 확인: 감독자가 다시 띄워 주는 풀만 재시작한다. Linux는 systemd 사용자 단위 `<풀>`이 active일 때 `systemctl --user restart <풀>`만,
-   맥은 tmux 소켓 `<풀>`의 세션 `proxy`가 있고 launchd 작업(라벨이 `.<풀>`로 끝나거나 그 프로세스가 `<풀>-tmux-server`)이 떠 있을 때
-   그 세션을 끊는다. 없으면 바꾸기 전에 멈춘다(`no_restart_method`. `--no-restart`로 파일만 바꾸고 손으로 다시 띄운다).
+   맥은 hc 터미널 `<풀>-proxy`가 살아 있고 launchd 작업(라벨이 `.<풀>`로 끝나거나 그 프로세스가 `teamproxy-hc-server <풀>`)이 떠 있을 때
+   `hc kill <풀>-proxy`로 그 터미널을 끝낸다(launchd가 다시 띄운다). 옛 tmux 세션 `proxy`는 2026-11-13부터 감독자로 보지 않는다. 없으면 바꾸기 전에 멈춘다(`no_restart_method`. `--no-restart`로 파일만 바꾸고 손으로 다시 띄운다).
 4. 잠금: `<설치본>/.update.lock`(pid). 살아 있는 다른 update가 쥐고 있으면 멈춘다(`locked`), 죽은 pid의 잠금은 넘겨받는다.
 5. 요청 0 대기와 drain(runbook [teamcodex-runtime-deployment](../runbooks/teamcodex-runtime-deployment.md)의 순서):
    감독자의 `x-teamcodex-active-requests`(없는 옛 서버는 계정 `inflight` 합)가 2초 간격 두 번 연속 0이 되면
@@ -523,7 +553,7 @@ d=$(date +%Y%m%d)
 cp -a <설치본>/src <설치본>/src.pre-$d && cp <설치본>/package.json <설치본>/package.json.pre-$d
 rsync -a --delete ~/src/teamproxy/src/ <설치본>/src/ && cp ~/src/teamproxy/package.json <설치본>/package.json
 curl -s -D - -o /dev/null http://127.0.0.1:<포트>/teamclaude/status | grep -i x-teamcodex-active-requests   # 0일 때
-tmux -L <풀> kill-session -t proxy      # 맥. Linux는 systemctl --user restart <풀>
+hc kill <풀>-proxy                      # 맥. Linux는 systemctl --user restart <풀>
 <풀> status --json                      # ok:true, 계정 수·이름·활성 상태가 전과 같은지
 curl -s -o /dev/null -w '%{http_code}\n' -H 'anthropic-version: 2023-06-01' http://127.0.0.1:3456/v1/models   # 200
 ```
@@ -583,7 +613,7 @@ state, session, weekly, fable, thirdParty, end, stale}], requests:{active}, upda
 
 ### 9-3. Ovis 탭으로 하단 표시줄 보기
 
-Ovis(폰 화면)는 Herdr 터미널을 탭으로 보여 준다. tmux 없이 도는 하단 표시줄을 hc 터미널로 띄운다:
+Ovis(폰 화면)는 Herdr 터미널을 탭으로 보여 준다. 하단 표시줄을 hc 터미널로 따로 띄운다:
 
 ```sh
 hc run --bg --no-parent --name teamproxy-hud -- \
@@ -591,7 +621,7 @@ hc run --bg --no-parent --name teamproxy-hud -- \
 # Codex 풀: … statusline.py --plain --watch   (agy·grok·cursor는 --agy·--grok·--cursor)
 ```
 
-`--plain --watch`는 tmux 없이 2초마다 다시 그린다. 이 기계의 `hc-sweep`이 닫지 않게 이름을 `~/.claude-tasks/keep`에 넣는다.
+`--plain --watch`는 2초마다 다시 그린다. 이 기계의 `hc-sweep`이 닫지 않게 이름을 `~/.claude-tasks/keep`에 넣는다.
 
 ## 하지 말 것
 

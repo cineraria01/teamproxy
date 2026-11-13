@@ -10,7 +10,7 @@ Claude Code, Codex CLI, Antigravity CLI(`agy`), Grok Build CLI(`grok`), Cursor C
 
 - 런타임 의존성 0(Node.js 18+ 내장 모듈만). 빌드 단계 없음.
 - 다섯 명령 `teamclaude` · `teamcodex` · `teamagy` · `teamgrok` · `teamcursor`. 인자 없이 치면 CLI 아래에 계정별 사용량 하단 줄이 붙는다.
-- 서버는 launchd(macOS)나 systemd(Linux)가 띄우고, tmux 안의 대시보드로 계정을 본다.
+- 서버는 launchd(macOS, Herdr core 터미널 안)나 systemd(Linux)가 띄우고, 대시보드는 `hc attach <풀>-proxy`로 본다.
 
 > 자기 구독 계정만 넣는다. 한 좌석을 여러 사람이 나눠 쓰는 용도는 지원하지 않는다.
 > 한도를 늘리거나 우회하지 않는다. 이미 낸 한도를 버리지 않고 쓰게 할 뿐이다.
@@ -47,7 +47,7 @@ Claude Code, Codex CLI, Antigravity CLI(`agy`), Grok Build CLI(`grok`), Cursor C
 
 이 저장소에는 프록시 말고 두 가지가 더 있다.
 
-- `src/hud/`: 하단 줄. `launcher.py`(CLI를 tmux 안에 띄우는 실행기), `statusline.py`(하단 줄),
+- `src/hud/`: 하단 줄. `launcher.py`(CLI를 띄우고 그 아래 Herdr 분할 창에 하단 줄을 붙이는 실행기), `statusline.py`(하단 줄),
   `codex_login.py`(Codex 브라우저 로그인). 프록시 설치본에 함께 들어간다.
 - `statusline/`: Claude Code 상태줄과 계정 선택기(`claude` 셸 함수). `statusline/install.sh`가 `~/.claude`에 설치한다.
   npm 패키지에는 들어가지 않는다.
@@ -63,14 +63,14 @@ Claude Code, Codex CLI, Antigravity CLI(`agy`), Grok Build CLI(`grok`), Cursor C
 손으로 할 때의 흐름은 이렇다(세부는 INSTALL-ALL의 각 절).
 
 ```sh
-brew install tmux node git python3        # macOS. node 20+, python 3.9+, claude·codex(·agy) CLI는 미리 설치
+brew install node git python3             # macOS. node 20+, python 3.9+, claude·codex(·agy) CLI와 Herdr core(hc)는 미리 설치
 git clone https://github.com/cineraria01/teamproxy.git ~/src/teamproxy
 cd ~/src/teamproxy
 python3 scripts/install.py                # Codex 풀 설치본 + ~/.local/bin/teamcodex  (INSTALL-ALL §1)
 # teamclaude·teamagy 래퍼                  (§1-2, §1-3)
 # 계정 로그인                               (§2)
 # 운영 설정값                               (§3)
-# launchd + tmux로 상시 실행                (§4)
+# launchd + hc 터미널로 상시 실행           (§4)
 cd statusline && NO_PROBE=1 NO_RELOAD_PATCH=1 ./install.sh   # Claude 상태줄 (§5)
 ```
 
@@ -90,13 +90,14 @@ npm 레지스트리의 `teamcodex`. 이름은 같지만 이 포크의 수정이 
 
 | 첫 인자 | 가는 곳 |
 |---|---|
-| 없음, 또는 `-`로 시작하는 옵션 | 그 CLI(Claude Code·Codex·agy·grok·cursor-agent)를 tmux 안에 띄우고 아래에 하단 줄을 붙인다. 옵션은 CLI에 그대로 넘긴다 |
+| 없음, 또는 `-`로 시작하는 옵션 | 그 CLI(Claude Code·Codex·agy·grok·cursor-agent)를 띄우고 아래에 하단 줄을 붙인다(Herdr 터미널 안이면 분할 창, 밖이면 새 hc 터미널). 옵션은 CLI에 그대로 넘긴다 |
 | `--` | 뒤의 것은 CLI 하위 명령. 하단 줄 없이 실행한다 |
 | 그 밖의 낱말(`server`, `status`, `accounts`, `login`, `import`, `enable`, `disable`, `priority`, `reload`, `run`, `env`, `remove` …)과 `-h`/`--help` | 프록시 명령 |
 
 하단 줄 없이 바로 실행하는 경우: 인쇄 모드(`-p`/`--print`, agy는 `--prompt`도, grok은 `--single`·`--prompt-file`·`--prompt-json`도, cursor-agent는 `--list-models`도)와 `--version`, 터미널이 아닌 실행,
 높이가 계정 수 + 12줄보다 낮은 창. 폭이 좁은 창은 하단 줄 오른쪽이 잘린다.
-창을 닫으면 CLI 세션도 끝난다. `--keep-alive`를 주면 남고, `tmux -L <풀>-hud attach`로 다시 붙는다.
+Herdr 밖에서 띄우면 새 hc 터미널에서 돌고 지금 터미널이 거기에 붙는다. `Ctrl+\`로 떼도 계속 돌고 `hc attach <주소>`로 다시 붙는다.
+`hc`가 없는 기계에서는 하단 줄 없이 CLI만 뜨고 그 이유를 한 줄 알린다(Claude는 상태줄이 계정 표를 그려 조용히 뜬다. 2026-11-13 tmux 하단 줄 제거). 옛 `--keep-alive`는 받아서 버린다.
 `--yolo`를 주면 승인 없이 실행한다. 세 명령 모두 같은 낱말이고, 실행기가 각 CLI의 플래그로 바꿔 넘긴다
 (Claude Code·agy `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, grok `--always-approve`, cursor-agent는 자기 `--yolo`).
 2026-10-31부터는 `--yolo` 없이도 기본이다: `<풀> run`(하단 줄, `--` 경로, 인쇄·비터미널 실행 모두)이 같은 플래그를 맨 앞에 붙인다.
@@ -114,7 +115,6 @@ teamclaude status                   # 프록시 명령
 
 # Codex
 teamcodex                           # Codex + 하단 줄
-teamcodex --keep-alive              # 창을 닫아도 유지 → tmux -L teamcodex-hud attach
 teamcodex -- resume SESSION_ID      # 기존 대화 재개
 
 # agy
@@ -158,11 +158,9 @@ teamcodex run -- -c model_reasoning_effort=high \
 
 ## 하단 줄과 Claude 상태줄
 
-하단 줄은 CLI 화면 아래 tmux 칸에서 자기 풀의 `GET /teamclaude/status`를 2초마다 읽어 계정 행을 그린다.
-tmux 소켓은 풀마다 따로(`teamclaude-hud`·`teamcodex-hud`·`teamagy-hud`·`teamgrok-hud`·`teamcursor-hud`)라 평소 쓰는 tmux와 섞이지 않는다.
-이 tmux 서버는 [`src/hud/tmux.conf`](src/hud/tmux.conf)로 뜬다. Esc는 지연 없이 CLI에 가고(실행 중인 턴 중단), 스크롤 기록은 5만 줄이다.
-Shift+Enter는 그 CLI가 줄바꿈으로 읽는 키로 바꿔 보낸다(Claude Code·agy·grok은 Alt+Enter, Codex·cursor-agent는 Ctrl+J). 바깥 터미널이 Shift+Enter를
-따로 보내야 한다. 마우스로 글자를 고를 때는 option(macOS)이나 shift를 누른 채 끈다.
+하단 줄은 CLI 화면 아래 Herdr 분할 창에서 자기 풀의 `GET /teamclaude/status`를 2초마다 읽어 계정 행을 그린다.
+CLI는 Herdr 터미널에서 바로 돌아 Herdr가 작업 중·질문 대기·끝남을 보고, Shift+Enter·Esc도 CLI가 직접 받는다.
+2026-11-13에 tmux 하단 줄(`<풀>-hud` 소켓, `src/hud/tmux.conf`)을 지웠다. `hc`가 없는 기계에서는 하단 줄 없이 CLI만 뜬다.
 계정이 둘 이상이면 맨 위에 FLEET(평균) 행이 붙는다.
 
 | 풀 | 계정 행의 막대 |
@@ -236,8 +234,7 @@ Fable 5
 | 설치본 | `~/.local/share/teamclaude-global/lib/node_modules/teamcodex` | `~/.local/share/teamcodex-global/lib/node_modules/teamcodex` | `~/.local/share/teamagy-global/lib/node_modules/teamcodex` | `~/.local/share/teamgrok-global/lib/node_modules/teamcodex` | `~/.local/share/teamcursor-global/lib/node_modules/teamcodex` |
 | 래퍼 | `~/.local/bin/teamclaude` | `~/.local/bin/teamcodex` | `~/.local/bin/teamagy` | `~/.local/bin/teamgrok` | `~/.local/bin/teamcursor` |
 | 실행 | `src/teamclaude.js` | `src/index.js codex …` | `src/index.js agy …` | `src/index.js grok …` | `src/index.js cursor …` |
-| 대시보드 | `tmux -L teamclaude attach -t proxy` | `tmux -L teamcodex attach -t proxy` | `tmux -L teamagy attach -t proxy` | `tmux -L teamgrok attach -t proxy` | `tmux -L teamcursor attach -t proxy` |
-| 하단 줄 소켓 | `teamclaude-hud` | `teamcodex-hud` | `teamagy-hud` | `teamgrok-hud` | `teamcursor-hud` |
+| 대시보드 | `hc attach teamclaude-proxy` | `hc attach teamcodex-proxy` | `hc attach teamagy-proxy` | `hc attach teamgrok-proxy` | `hc attach teamcursor-proxy` |
 | launchd(INSTALL-ALL §4) | `com.local.teamclaude` | `com.local.teamcodex` | `com.local.teamagy` | `com.local.teamgrok` | `com.local.teamcursor` |
 
 - 설치본을 풀마다 따로 두므로 한 풀을 갱신해도 다른 풀 코드는 그대로다. CLI는 자기 설치본에서 뜬 서버만 알아본다.
@@ -282,14 +279,14 @@ Fable 5
 
 ## 서버 운영
 
-INSTALL-ALL §4대로 설치하면 launchd가 `~/.local/bin/<풀>-tmux-server`를 띄우고, 그 스크립트가 tmux 세션 `proxy` 안에서
-`<풀> server`를 돌린다. 서버가 죽으면 launchd가 다시 띄운다.
+INSTALL-ALL §4대로 설치하면 launchd가 `~/.local/bin/teamproxy-hc-server <풀>`을 띄우고, 그 스크립트가 Herdr core 터미널 `<풀>-proxy` 안에서
+`<풀> server`를 돌린다. 서버가 죽으면 launchd가 다시 띄운다(2026-11-13까지 쓰던 tmux 세션 `proxy`는 지웠다).
 
 ```sh
-tmux -L teamclaude attach -t proxy          # 대시보드. Ctrl-b d로 분리
+hc attach teamclaude-proxy                  # 대시보드. Ctrl+\로 분리(보기만: hc read teamclaude-proxy)
 launchctl list | grep -E 'teamclaude|teamcodex|teamagy|teamgrok|teamcursor'
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3456/teamclaude/status
-tmux -L teamclaude kill-session -t proxy    # 재시작(launchd가 다시 띄운다)
+hc kill teamclaude-proxy                    # 재시작(launchd가 다시 띄운다)
 ```
 
 <p align="center">
@@ -320,7 +317,7 @@ tmux -L teamclaude kill-session -t proxy    # 재시작(launchd가 다시 띄운
 ### 업데이트
 
 포크 main의 최신판으로 올릴 때는 풀 명령 하나면 된다. 받기 → 로컬 수정 검사 → 요청 0 대기·drain → 백업 → 덮기 → 다시 띄우기 → 확인
-순서로 하고, 확인이 실패하면 백업으로 되돌려 다시 띄운다. 맥(launchd + tmux)·Linux(systemd 사용자 서비스) 같은 명령이다.
+순서로 하고, 확인이 실패하면 백업으로 되돌려 다시 띄운다. 맥(launchd + hc 터미널)·Linux(systemd 사용자 서비스) 같은 명령이다.
 
 ```sh
 teamclaude update --dry-run     # 할 일만 보기
@@ -457,7 +454,7 @@ Linux는 launchd 대신 `python3 scripts/install.py --service`가 Codex 풀용 �
 node src/index.js <명령>                                # 빌드 없이 소스로 실행
 TEAMCLAUDE_CONFIG=./config.json node src/index.js server  # 임시 설정으로(config.json은 gitignore)
 npm test                                               # node --test, test/
-npm run test:hud                                       # 하단 줄·상태줄 Python 검사(tmux 필요)
+npm run test:hud                                       # 하단 줄·상태줄 Python 검사
 npm run lint                                           # eslint
 ```
 

@@ -1,11 +1,10 @@
-"""Offline lifecycle check with real tmux and PTYs; no login or inference."""
+"""Offline lifecycle check with PTYs and fake Herdr programs; no login or inference (tmux footer removed 2026-11-13)."""
 
 import fcntl
 import json
 import os
 from pathlib import Path
 import pty
-import shutil
 import signal
 import struct
 import subprocess
@@ -43,7 +42,7 @@ def drain(fd, into):
 
 
 def herdr_footer():
-    """Inside a Herdr terminal the CLI runs without tmux (so Herdr sees its status) and the footer is a Herdr
+    """Inside a Herdr terminal the CLI runs in it directly (so Herdr sees its status) and the footer is a Herdr
     split under it, closed when the CLI exits. Fake herdr-app and hc record what the launcher asked."""
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         folder = Path(directory)
@@ -64,7 +63,7 @@ def herdr_footer():
             # t-me's program is on the launcher's tty; t-other's (this check) is not.
             "a = sys.argv[2]\n"
             "print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}"
-            " if a == 't-other' else {'rows': 1}))\n")
+            " if a == 't-other' else {'rows': int(os.environ.get('FOOT_ROWS', '1'))}))\n")
         for name in ("teamcodex", "teamclaude", "teamgrok"):
             (folder / name).write_text(
                 f"#!{sys.executable}\nimport json, os, sys, time\n"
@@ -77,7 +76,7 @@ def herdr_footer():
         for name in ("app/herdr-app", "core/hc", "teamcodex", "teamclaude", "teamgrok"):
             (folder / name).chmod(0o755)
 
-        def run(arguments, terminal="t-me", stop=False, jobs=True, app=True, core=True, **inherited):
+        def run(arguments, terminal="t-me", stop=False, jobs=True, app=True, core=True, lines=50, **inherited):
             calls.unlink(missing_ok=True)
             (folder / "cli.json").unlink(missing_ok=True)
             (folder / "cli.pid").unlink(missing_ok=True)
@@ -86,8 +85,8 @@ def herdr_footer():
                       "launcher.render = lambda data, **kw: ['footer']\nlauncher.claude_rows = lambda: ['footer']\n"
                       f"raise SystemExit(launcher.launch({arguments!r}))\n")
             master, slave = pty.openpty()
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
-            env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS", "TMUX", "TEAMCLAUDE_HUD")}
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", lines, 120, 0, 0))
+            env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS", "TEAMCLAUDE_HUD")}
             # Without app (core), no herdr-app (hc) anywhere on PATH, whatever this machine has installed. Whole
             # folders go; what the run needs besides the fakes is the shell's sleep, and Python by its absolute path.
             gone = [name for name, keep in (("herdr-app", app), ("hc", core)) if not keep]
@@ -131,15 +130,23 @@ def herdr_footer():
             return code, json.loads((folder / "cli.json").read_text()), recorded, b"".join(output).decode()
 
         note = "starting without the account footer"
-        code, cli, recorded, output = run(["--yolo"])
+        # Codex: the account rows plus its cache-usage row.
+        code, cli, recorded, output = run(["--yolo"], FOOT_ROWS="2")
         assert code == 0 and cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
         assert [c[:2] for c in recorded] == [["get", "t-me"], ["ls"], ["do", "pane.split"], ["do", "pane.focus"],
                                              ["do", "layout.resize"], ["get", "t-foot"], ["do", "pane.close"]], recorded
         assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
+        # Codex's footer reads the cache usage of the CLI under this launcher.
+        assert json.loads(recorded[2][2])["argv"][-2:] == ["--codex-pid", (folder / "launcher.pid").read_text()]
         assert json.loads(recorded[-1][2]) == {"pane": "p-foot"}
         assert note not in output, output
         # Claude's own status line drops the account table only when the footer shows it.
         assert run(["--claude"])[1] == [["run", "--", "--effort", "xhigh"], "1"]
+        assert json.loads(run(["--grok"])[2][2][2])["argv"][-1] == "--grok"
+        # A terminal too short for the footer starts the CLI alone instead of refusing, and says why.
+        code, cli, recorded, output = run(["--grok"], lines=8)
+        assert code == 0 and cli == [["run", "--"], None] and "pane.split" not in str(recorded), (code, cli, recorded)
+        assert f"teamgrok: {note} (under 11 rows)" in output, output
         # A terminal id that is not this terminal's (inherited) splits nothing; the CLI runs alone, says why, and an
         # inherited TEAMCLAUDE_HUD does not hide the status line's table with no footer to show it.
         code, cli, recorded, output = run(["--claude"], terminal="t-other", TEAMCLAUDE_HUD="1")
@@ -175,7 +182,7 @@ def herdr_footer():
 
 def hc_terminal():
     """Outside Herdr core an interactive launch starts the launcher again, same arguments, in a new hc terminal and
-    attaches to it: no tmux, the exit code and a failed run's last lines come back. A fake hc records the calls."""
+    attaches to it: the exit code and a failed run's last lines come back. A fake hc records the calls."""
     with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
         folder = Path(directory)
         calls = folder / "calls.jsonl"
@@ -196,7 +203,7 @@ def hc_terminal():
             calls.unlink(missing_ok=True)
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 120, 0, 0))
-            # Only the fakes on PATH: no tmux to fall back on, and no real hc.
+            # Only the fakes on PATH: no real hc, no herdr-app.
             env = {"PATH": directory, "HOME": directory, "TC_ACCT": "2", **extra}
             child = subprocess.Popen([sys.executable, str(HUD / "launcher.py"), *arguments], cwd=directory,
                                      stdin=slave, stdout=slave, stderr=slave, env=env)
@@ -231,11 +238,11 @@ def hc_terminal():
         # hc cannot start it: the error comes back, nonzero.
         code, output, recorded = run(["--claude"], FAIL="1")
         assert code != 0 and "core down" in output and [c[0] for c in recorded] == ["run"], output
-        # The launch inside that terminal never starts another one; without tmux it says what it needs.
-        code, output, recorded = run(["--claude"], TEAMPROXY_HUD_HC_STARTED="1")
-        assert code != 0 and "Requires hc (herdr-core) or tmux" in output and not recorded, output
-        # Print mode still runs directly, never through hc.
+        # The launch inside that terminal never starts another one: there, outside a Herdr pane, the CLI runs alone.
         (folder / "teamclaude").write_text(f"#!{sys.executable}\nprint('direct', *__import__('sys').argv[1:])\n")
+        code, output, recorded = run(["--claude"], TEAMPROXY_HUD_HC_STARTED="1")
+        assert code == 0 and "direct run -- --effort xhigh" in output and not recorded, output
+        # Print mode still runs directly, never through hc.
         code, output, recorded = run(["--claude", "-p", "hi"])
         assert code == 0 and "direct run -- -p hi" in output and not recorded, output
 
@@ -253,11 +260,11 @@ def check():
     for flags in (["-p", "hi"], ["--single", "x"], ["--prompt-file=f"], ["--prompt-json", "{}"], ["-v"], ["--version"]):
         assert oneshot(flags, modes["grok"][2]), flags
     assert not oneshot(["--model", "grok-4.7"], modes["grok"][2])
-    assert modes["grok"][1] == "Grok" and modes["grok"][3] == "M-Enter" and modes["grok"][4] == "--always-approve"
+    assert modes["grok"][1] == "Grok" and modes["grok"][3] == "--always-approve"
     for flags in (["-p", "hi"], ["--print"], ["--list-models"], ["-v"], ["--version"]):
         assert oneshot(flags, modes["cursor"][2]), flags
     assert not oneshot(["--model", "gpt-5"], modes["cursor"][2]) and not oneshot(["--resume", "x"], modes["cursor"][2])
-    assert modes["cursor"][1] == "Cursor" and modes["cursor"][3] == "C-j" and modes["cursor"][4] == "--yolo"
+    assert modes["cursor"][1] == "Cursor" and modes["cursor"][3] == "--yolo"
     # Claude conversations default to --effort xhigh; an explicit effort (max included) is kept.
     assert launcher.with_effort([]) == ["--effort", "xhigh"]
     assert launcher.with_effort(["--effort", "high"]) == ["--effort", "high"]
@@ -273,7 +280,7 @@ def check():
             result = subprocess.run([sys.executable, str(HUD / "launcher.py"), "--agy", *arguments], env=env,
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             assert json.loads(result.stdout) == ["run", "--", *arguments], (arguments, result.stdout, result.stderr)
-        # --yolo becomes each CLI's own skip-all-approvals flag; --keep-alive is ours wherever it sits.
+        # --yolo becomes each CLI's own skip-all-approvals flag; --keep-alive (old, ours) is dropped wherever it sits.
         for name in ("teamclaude", "teamcodex", "teamgrok", "teamcursor"):
             (Path(directory) / name).write_text(fake.read_text())
             (Path(directory) / name).chmod(0o755)
@@ -291,153 +298,9 @@ def check():
             assert json.loads(result.stdout) == ["run", "--", *expected], (arguments, result.stdout, result.stderr)
     print("PASS: agy print mode and no terminal skip the footer")
     hc_terminal()
-    print("PASS: outside Herdr core an interactive launch runs in a new hc terminal, not tmux")
+    print("PASS: outside Herdr core an interactive launch runs in a new hc terminal")
     herdr_footer()
-    print("PASS: a Herdr terminal runs the CLI without tmux, the footer as a Herdr split")
-    # The rest checks the tmux footer, used only where hc is not installed.
-    tmux = shutil.which("tmux")
-    if not tmux:
-        print("SKIP: tmux footer lifecycle not checked (tmux is not installed)")
-        return
-    os.environ["TEAMPROXY_HUD_HC_STARTED"] = "1"
-    # A terminal too short for the footer starts the CLI alone instead of refusing.
-    with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
-        record = Path(directory) / "argv.json"
-        fake = Path(directory) / "teamcodex"
-        fake.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-        fake.chmod(0o755)
-        runner = ("import launcher\nlauncher.read_status = lambda path: {}\n"
-                  "launcher.render = lambda data, **kw: ['footer']\n"
-                  "raise SystemExit(launcher.launch(['--model', 'm']))\n")
-        master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 50, 0, 0))
-        env = {k: v for k, v in os.environ.items() if k not in ("LINES", "COLUMNS")}
-        env["PATH"] = directory + os.pathsep + env["PATH"]
-        child = subprocess.Popen([sys.executable, "-c", runner], cwd=HUD, stdin=slave, stdout=slave, stderr=slave, env=env)
-        os.close(slave)
-        assert child.wait(timeout=10) == 0
-        os.close(master)
-        assert json.loads(record.read_text()) == ["run", "--", "--model", "m"], record.read_text()
-    print("PASS: a short terminal runs the CLI without the footer")
-    for mode in ("close", "detach", "keep-alive", "two-clients", "attach-failure", "keep-attach-failure",
-                 "stale-server-cwd", "agy", "claude"):
-        with tempfile.TemporaryDirectory(prefix="tcodex-test-") as directory:
-            path = Path(directory)
-            socket = path.name
-            base = [tmux, "-L", socket, "-f", "/dev/null"]
-            wrapper = path / "tmux"
-            wrapper.write_text(f"#!{sys.executable}\n" +
-                               "import os, sys\na = sys.argv[1:]\n" +
-                               f"a[a.index('-L') + 1] = {socket!r}\n" +
-                               # respawn-pane closes and reopens a PTY at once; macOS then
-                               # intermittently fails with "fork failed: Device not configured".
-                               "if 'respawn-pane' in a: sys.exit('respawn-pane races macOS PTY allocation')\n" +
-                               ("if 'attach-session' in a: sys.exit(1)\n" if mode.endswith("attach-failure") else "") +
-                               f"os.execv({tmux!r}, [{tmux!r}] + a)\n")
-            wrapper.chmod(0o755)
-            proxy = path / {"agy": "teamagy", "claude": "teamclaude"}.get(mode, "teamcodex")
-            record = path / "processes.json"
-            proxy.write_text(f"#!{sys.executable}\n" +
-                             "import json, os, subprocess, sys, time\nfrom pathlib import Path\n" +
-                             "child = subprocess.Popen(['sleep', '300'])\n" +
-                             f"Path({str(record)!r}).write_text(json.dumps([os.getpid(), child.pid, sys.argv[1:], os.getcwd(), os.environ.get('TEAMCLAUDE_HUD')]))\n" +
-                             "time.sleep(300)\n")
-            proxy.chmod(0o755)
-            arguments = (["--keep-alive"] if mode.startswith("keep") else []) + ["resume", "test-id"]
-            if mode in ("agy", "claude"):
-                arguments = ["--" + mode, "--model", "m"]
-            runner = ("import launcher, shutil\noriginal = shutil.which\n" +
-                      f"launcher.shutil.which = lambda name: {str(wrapper)!r} if name == 'tmux' else " +
-                      f"{str(proxy)!r} if name == {proxy.name!r} else original(name)\n" +
-                      "launcher.read_status = lambda path: {}\nlauncher.render = lambda data, **kw: ['footer']\n" +
-                      "launcher.claude_rows = lambda: ['footer']\n" +
-                      f"raise SystemExit(launcher.launch({arguments!r}))\n")
-            masters, clients, pids = [], [], []
-
-            def connect(command):
-                master, slave = pty.openpty()
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
-                client = subprocess.Popen(command, cwd=root, stdin=slave, stdout=slave, stderr=slave,
-                                          env={**os.environ, "TERM": "xterm-256color"}, start_new_session=True)
-                os.close(slave)
-                masters.append(master)
-                clients.append(client)
-                return master
-
-            def sessions():
-                result = subprocess.run(base + ["list-sessions", "-F", "#{session_name} #{session_attached}"],
-                                        capture_output=True, text=True)
-                return result.stdout.strip()
-
-            try:
-                if mode == "stale-server-cwd":
-                    # tmux 3.7 keeps the server's start directory; once it is gone, new
-                    # panes ignore `-c` and Codex would exit with ENOENT. Seed the server
-                    # from a directory that is deleted before teamcodex launches.
-                    stale = tempfile.mkdtemp(prefix="tcodex-stale-")
-                    subprocess.run(base + ["new-session", "-d", "-s", "seed", "sleep 300"], check=True, cwd=stale)
-                    os.rmdir(stale)
-                master = connect([sys.executable, "-c", runner])
-                if mode.endswith("attach-failure"):
-                    eventually(lambda: clients[0].poll() is not None)
-                    eventually(lambda: not sessions())
-                    assert clients[0].returncode != 0
-                else:
-                    if mode == "stale-server-cwd":
-                        eventually(record.exists)
-                        subprocess.run(base + ["kill-session", "-t", "seed"], check=True)
-                    eventually(lambda: sessions().endswith(" 1") and record.exists())
-                    parent, child, forwarded, launched_in, hud = json.loads(record.read_text())
-                    # Only Claude Code is told that the footer shows the account table.
-                    assert hud == ("1" if mode == "claude" else None), (mode, hud)
-                    pids = [parent, child]
-                    expected = ["--model", "m"] if mode in ("agy", "claude") else ["resume", "test-id"]
-                    if mode == "claude":
-                        expected += ["--effort", "xhigh"]
-                    assert forwarded == ["run", "--", *expected], forwarded
-                    assert launched_in == str(root), launched_in
-                    session = sessions().split()[0]
-                    panes = subprocess.check_output(base + ["list-panes", "-t", session, "-F", "#{pane_pid}"], text=True)
-                    pids += [int(pid) for pid in panes.splitlines()]
-                    # Neither pane sets a title, so the terminal tab gets the window name, not the host name.
-                    titles = subprocess.check_output(base + ["list-panes", "-t", session, "-F", "#{T:set-titles-string}"],
-                                                     text=True).split()
-                    assert set(titles) == {{"agy": "agy", "claude": "Claude"}.get(mode, "Codex")}, titles
-                    if mode == "two-clients":
-                        second = connect(base + ["attach-session", "-t", session])
-                        eventually(lambda: sessions().endswith(" 2"))
-                    if mode == "detach":
-                        subprocess.run(base + ["detach-client", "-s", session], check=True)
-                    else:
-                        os.close(master)
-                        masters.remove(master)
-                    eventually(lambda: clients[0].poll() is not None)
-                    if mode in ("keep-alive", "two-clients"):
-                        expected = " 0" if mode == "keep-alive" else " 1"
-                        eventually(lambda: sessions().endswith(expected))
-                        assert all(alive(pid) for pid in pids)
-                        if mode == "two-clients":
-                            os.close(second)
-                            masters.remove(second)
-                        else:
-                            # Normal Codex exit still closes its session in keep-alive mode.
-                            os.kill(parent, signal.SIGTERM)
-                    eventually(lambda: not sessions())
-                    eventually(lambda: not any(alive(pid) for pid in pids))
-                print(f"PASS: {mode}")
-            finally:
-                subprocess.run(base + ["kill-server"], capture_output=True)
-                for master in masters:
-                    os.close(master)
-                for client in clients:
-                    if client.poll() is None:
-                        client.terminate()
-                    client.wait(timeout=5)
-                if record.exists():
-                    for pid in json.loads(record.read_text())[:2]:
-                        if alive(pid):
-                            os.kill(pid, signal.SIGTERM)
-
+    print("PASS: a Herdr terminal runs the CLI in it, the footer as a Herdr split")
 
 if __name__ == "__main__":
     check()

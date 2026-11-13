@@ -1,5 +1,7 @@
 # Cursor mode (`teamcursor`) — 2026-10-24
 
+> 2026-11-13 tmux 제거: teamproxy는 tmux를 더 쓰지 않는다(하단 줄은 Herdr 분할 창·hc 터미널, 맥 상시 실행은 launchd + hc 터미널 `<풀>-proxy`). 아래의 tmux 이야기는 그때의 기록이다.
+
 Owner request (2026-10-24): "teamproxy 에 cursor-agent 부분도 다른것들과 같이 teamcursor 로 해서 다른것들처럼 지원하자".
 A fifth, fully isolated provider pool next to Anthropic, Codex, agy and Grok mode, in this same codebase and install:
 Cursor accounts used by the **Cursor CLI (`cursor-agent`)**, rotated like the other pools. Pattern to copy: Grok mode

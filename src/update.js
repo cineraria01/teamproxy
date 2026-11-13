@@ -23,7 +23,7 @@ const POOLS = {
   teamgrok: { prefix: ['grok'], file: 'teamgrok.json', probe: () => ({ path: '/v1/models' }) },
   teamcursor: { prefix: ['cursor'], file: 'teamcursor.json', probe: () => ({ method: 'POST', path: '/aiserver.v1.DashboardService/GetMe', body: '{}', headers: { 'content-type': 'application/json', 'connect-protocol-version': '1' } }) },
 };
-const RESTART_TIMEOUT_MS = 120_000; // a cold tmux shell has taken ~90 s to come up
+const RESTART_TIMEOUT_MS = 120_000; // a cold supervisor shell has taken ~90 s to bring the proxy up
 const SELF_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -148,7 +148,7 @@ async function updateInstall({ root, entry, repo, stage, target, targetHash, opt
     p.method = restartMethod(p.pool);
     if (!p.method) {
       entry.result = 'no_restart_method';
-      say(`멈춤: ${p.pool}을 다시 띄울 감독자를 찾지 못했습니다(systemd 사용자 단위도, launchd가 감독하는 hc 터미널 <풀>-proxy나 tmux 세션 proxy도 없음). `
+      say(`멈춤: ${p.pool}을 다시 띄울 감독자를 찾지 못했습니다(systemd 사용자 단위도, launchd가 감독하는 hc 터미널 <풀>-proxy도 없음). `
         + '--no-restart로 파일만 바꾼 뒤 손으로 다시 띄우세요');
       return;
     }
@@ -475,8 +475,9 @@ function accountSnapshot(config) {
 
 /**
  * A supervisor that starts the pool again: a systemd user unit, or (macOS) a launchd job owning
- * either the Herdr core terminal `<pool>-proxy` (`teamproxy-hc-server`, 2026-11-02) or the older
- * tmux session `proxy`. Ending it makes launchd start a fresh one.
+ * the Herdr core terminal `<pool>-proxy` (`teamproxy-hc-server`, 2026-11-02). Ending that terminal
+ * makes launchd start a fresh one. (The older tmux session `proxy` is no longer looked for: tmux
+ * removed 2026-11-13.)
  */
 function restartMethod(pool) {
   if (run('systemctl', ['--user', 'is-active', '--quiet', pool]).status === 0) {
@@ -487,14 +488,13 @@ function restartMethod(pool) {
   const hc = run('hc', ['get', name, '--json']);
   let hcLive = false;
   try { hcLive = hc.status === 0 && JSON.parse(hc.stdout).state === 'live'; } catch { /* not hc JSON */ }
-  if (!hcLive && run('tmux', ['-L', pool, 'has-session', '-t', 'proxy']).status !== 0) return null;
+  if (!hcLive) return null;
   const label = launchdLabel(pool);
   if (!label) return null;
-  if (hcLive) return { cmd: ['hc', 'kill', name], label: `hc kill ${name} (launchd ${label})` };
-  return { cmd: ['tmux', '-L', pool, 'kill-session', '-t', 'proxy'], label: `tmux -L ${pool} kill-session -t proxy (launchd ${label})` };
+  return { cmd: ['hc', 'kill', name], label: `hc kill ${name} (launchd ${label})` };
 }
 
-/** The running launchd job for this pool: label `….<pool>`, or one whose process is `<pool>-tmux-server` / `teamproxy-hc-server <pool>`. */
+/** The running launchd job for this pool: label `….<pool>`, or one whose process is `teamproxy-hc-server <pool>`. */
 function launchdLabel(pool) {
   const jobs = run('launchctl', ['list']).stdout.split('\n').map(l => l.trim().split(/\s+/))
     .filter(([pid, , label]) => /^\d+$/.test(pid) && label?.includes(pool));
@@ -502,7 +502,7 @@ function launchdLabel(pool) {
   if (byLabel) return byLabel[2];
   return jobs.find(([pid]) => {
     const cmd = run('ps', ['-ww', '-o', 'command=', '-p', pid]).stdout;
-    return cmd.includes(`${pool}-tmux-server`) || new RegExp(`teamproxy-hc-server ${pool}(\\s|$)`).test(cmd);
+    return new RegExp(`teamproxy-hc-server ${pool}(\\s|$)`).test(cmd);
   })?.[2] ?? null;
 }
 
