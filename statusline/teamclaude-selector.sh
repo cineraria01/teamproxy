@@ -80,3 +80,33 @@ print(accounts[index].get("name", "") if 0 <= index < len(accounts) else "")
     TEAMCLAUDE_STATUSLINE_INDEX="$number" TC_ACCT="$account" \
         command teamclaude "$@"
 }
+
+# The other pools' short names, by the same rule: no arguments or CLI flags open the CLI with the account
+# footer (`teamcodex …`), a first word (a CLI subcommand) runs without it (`teamcodex -- …`).
+# update/login/logout manage the CLI itself (codex, grok and cursor-agent all list them, agy lists update),
+# so they go to the real CLI. Each is defined only where its pool wrapper is installed; elsewhere `codex`
+# and the others stay as they are. The wrappers run the real CLI by absolute path, so nothing recurses.
+_teamproxy_short() {
+    local pool=$1 cli=$2
+    shift 2
+    # `cursor agent` is how the cursor-agent installer's `cursor` shim starts the agent.
+    if [ "$cli" = cursor-agent ] && [ "${1:-}" = agent ]; then
+        case "${2:-}" in ''|-*) shift ;; esac
+    fi
+    case "${1:-}" in
+        update|login|logout) command "$cli" "$@" ;;
+        ''|-*) command "$pool" "$@" ;;
+        *) command "$pool" -- "$@" ;;
+    esac
+}
+
+for _tp_entry in codex:teamcodex:codex grok:teamgrok:grok agy:teamagy:agy cursor:teamcursor:cursor-agent; do
+    _tp_name=${_tp_entry%%:*}
+    _tp_rest=${_tp_entry#*:}
+    if command -v "${_tp_rest%%:*}" >/dev/null 2>&1; then
+        unalias "$_tp_name" 2>/dev/null || true
+        # eval: the function name comes from the loop, and an alias of that name is gone before this parses.
+        eval "$_tp_name() { _teamproxy_short ${_tp_rest%%:*} ${_tp_rest#*:} \"\$@\"; }"
+    fi
+done
+unset _tp_entry _tp_name _tp_rest

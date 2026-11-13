@@ -416,6 +416,9 @@ cd ~/src/teamproxy/statusline && NO_PROBE=1 NO_RELOAD_PATCH=1 ./install.sh   # �
 - 설치되는 것: `~/.claude/statusline-teamclaude.py`·`statusline-wrapper.py`·
   `statusline-autoupdate.sh`·`teamclaude-selector.sh`, `settings.json`의 `statusLine`,
   셸 rc의 `claude` 함수 블록(`teamclaude`와 같이 하단 줄 붙은 Claude Code, `claude N`은 N번 계정 고정).
+  같은 블록은 §1·§1-3~1-5의 풀 래퍼가 있으면 `codex`·`grok`·`agy`·`cursor`도 `teamcodex`·`teamgrok`·`teamagy`·
+  `teamcursor`로 넘긴다(인자 없음·옵션은 하단 줄, 첫 낱말은 `-- …`, `update`·`login`·`logout`은 진짜 CLI, 2026-11-13).
+  래퍼를 나중에 만들었으면 새 셸부터 먹는다.
 - 자동 업데이트는 기본 꺼짐(`~/.claude/teamclaude-statusline-config.json`의 `autoUpdate: false`).
 
 Claude Code 설정에 도구 검색을 켠다(비 Anthropic base URL에서는 기본 꺼져 있어 MCP 도구
@@ -430,7 +433,7 @@ json.dump(d, open(p, 'w'), indent=2, ensure_ascii=False); print(d['env'])
 PY
 ```
 
-새 셸을 열고 `type claude`가 함수로 나오는지, `claude`를 띄웠을 때 Claude Code 아래 하단 줄(Herdr 분할 창)에
+새 셸을 열고 `type claude`(풀 래퍼가 있으면 `type codex grok agy cursor`도)가 함수로 나오는지, `claude`를 띄웠을 때 Claude Code 아래 하단 줄(Herdr 분할 창)에
 계정별 Ses/Wk/Fbl 막대가 그려지는지(Claude 안의 상태줄에는 모델 줄만) 확인한다.
 
 ## 6. Codex 상태라인 (teamcodex) 확인

@@ -81,6 +81,60 @@ updated=$(HOME="$TEST_HOME" PATH="$TEST_BIN:$PATH" \
   bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic 'claude update' 2>/dev/null)
 grep -qx 'NATIVE=update' <<< "$updated"
 
+# codex/grok/agy/cursor go to their pool wrappers by the same rule; update/login/logout go to the real CLI.
+for pool in teamcodex teamgrok teamagy teamcursor; do
+  printf '#!/bin/sh\necho "%s${*:+ $*}"\n' "$pool" > "$TEST_BIN/$pool"
+done
+for cli in codex grok agy cursor-agent; do
+  printf '#!/bin/sh\necho "REAL %s $*"\n' "$cli" > "$TEST_BIN/$cli"
+done
+chmod +x "$TEST_BIN"/team* "$TEST_BIN"/codex "$TEST_BIN"/grok "$TEST_BIN"/agy "$TEST_BIN"/cursor-agent
+short_calls='codex; codex --no-daemon; codex resume ID; codex update; codex login
+grok; grok -p hi; grok models; grok logout
+agy; agy -c; agy mcp list; agy update
+cursor; cursor --yolo; cursor agent; cursor agent --yolo; cursor agent fix it; cursor ls; cursor update'
+short_expected='teamcodex
+teamcodex --no-daemon
+teamcodex -- resume ID
+REAL codex update
+REAL codex login
+teamgrok
+teamgrok -p hi
+teamgrok -- models
+REAL grok logout
+teamagy
+teamagy -c
+teamagy -- mcp list
+REAL agy update
+teamcursor
+teamcursor --yolo
+teamcursor
+teamcursor --yolo
+teamcursor -- agent fix it
+teamcursor -- ls
+REAL cursor-agent update'
+short_bash=$(HOME="$TEST_HOME" PATH="$TEST_BIN:$PATH" \
+  bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic "$short_calls" 2>/dev/null)
+test "$short_bash" = "$short_expected"
+short_zsh=$(PATH="$TEST_BIN:$PATH" \
+  zsh -fc "alias codex=nope
+source '$TEST_HOME/.claude/teamclaude-selector.sh'
+$short_calls")
+test "$short_zsh" = "$short_expected"
+
+# Without a pool wrapper the short name is left alone (here only teamcodex is installed).
+ONLY_CODEX_BIN="$TEST_DIR/only-codex-bin"
+mkdir -p "$ONLY_CODEX_BIN"
+cp "$TEST_BIN/teamcodex" "$ONLY_CODEX_BIN/"
+test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" bash -c \
+  "source '$TEST_HOME/.claude/teamclaude-selector.sh'; type -t codex; type -t grok agy cursor || echo none")" = "function
+none"
+test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" zsh -fc \
+  "grok() { echo mine; }; source '$TEST_HOME/.claude/teamclaude-selector.sh'; whence -w codex agy cursor; grok")" = "codex: function
+agy: none
+cursor: none
+mine"
+
 HOME="$TEST_HOME" SHELL=/bin/zsh CLAUDE_DIR="$TEST_HOME/.claude" \
   PATH="$TEST_BIN:$PATH" \
   "$REPO_DIR/uninstall.sh" >/dev/null
