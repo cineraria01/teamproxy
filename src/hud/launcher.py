@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -129,13 +130,22 @@ def herdr_footer(mode, cli):
             call(app, "do", "pane.focus", json.dumps({"pane": pane}))
             # Herdr sizes panes in pixels; about 20 px a row plus the pane's own chrome, then corrected from
             # the rows the footer terminal really got. ponytail: three corrections, a rows API if Herdr adds one.
-            px = 60 + 20 * rows
+            def footer_rows():
+                return call(hc, "get", footer["terminal"]).get("rows") or rows
+
+            got, px = footer_rows(), 60 + 20 * rows
             for _ in range(4):
-                call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
-                got = call(hc, "get", footer["terminal"]).get("rows") or rows
                 if got == rows:
                     break
-                px = max(40, px + 20 * (rows - got))
+                call(app, "do", "layout.resize", json.dumps({"id": footer["pane"], "px": px}))
+                # Herdr answers before the terminal takes the new size: right after a resize hc still reports the
+                # old rows (2026-11-13 measured: 0.3 s), and correcting from that shrank a footer to one row.
+                # So wait until the rows move off the old value (up to a second: a resize may not change them).
+                before, deadline = got, time.monotonic() + 1
+                while (got := footer_rows()) == before and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if got != rows:
+                    px = max(40, px + 20 * (rows - got))
             if mode == "claude":
                 # The Claude Code status line drops the table the footer already shows.
                 env["TEAMCLAUDE_HUD"] = "1"

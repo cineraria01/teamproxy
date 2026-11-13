@@ -57,13 +57,24 @@ def herdr_footer():
             "a = sys.argv[1:]\n"
             "print(json.dumps({'spaces': [{'tabs': [{'terminals': [{'terminal': 't-me', 'pane': 'p-me'}]}]}]}"
             " if a == ['ls'] else {'pane': 'p-foot', 'terminal': 't-foot'} if a[1:2] == ['pane.split']"
-            " else {'ok': True}))\n")
+            " else {'ok': True}))\n"
+            # The footer's size, like Herdr: a split starts at half the pane, a resize lands only after hc has
+            # answered once more with the old rows (about 20 px a row plus 60 px of chrome).
+            f"state = {str(folder / 'foot.json')!r}\n"
+            "if a[1:2] == ['pane.split']: json.dump({'rows': 15, 'pending': None}, open(state, 'w'))\n"
+            "if a[1:2] == ['layout.resize']:\n"
+            "    foot = json.load(open(state)); foot['pending'] = max(0, (json.loads(a[2])['px'] - 60) // 20)\n"
+            "    json.dump(foot, open(state, 'w'))\n")
         (folder / "core/hc").write_text(
             f"#!{sys.executable}\nimport json, os, sys\n{log}"
             # t-me's program is on the launcher's tty; t-other's (this check) is not.
             "a = sys.argv[2]\n"
-            "print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}"
-            " if a == 't-other' else {'rows': int(os.environ.get('FOOT_ROWS', '1'))}))\n")
+            "if a == 't-foot':\n"
+            f"    foot = json.load(open({str(folder / 'foot.json')!r}))\n"
+            "    print(json.dumps({'rows': foot['rows']}))\n"
+            "    if foot['pending'] is not None: foot['rows'], foot['pending'] = foot['pending'], None\n"
+            f"    json.dump(foot, open({str(folder / 'foot.json')!r}, 'w'))\n"
+            "else: print(json.dumps({'pid': os.getppid()} if a == 't-me' else {'pid': int(os.environ['TEST_PID'])}))\n")
         for name in ("teamcodex", "teamclaude", "teamgrok"):
             (folder / name).write_text(
                 f"#!{sys.executable}\nimport json, os, sys, time\n"
@@ -131,10 +142,14 @@ def herdr_footer():
 
         note = "starting without the account footer"
         # Codex: the account rows plus its cache-usage row.
-        code, cli, recorded, output = run(["--yolo"], FOOT_ROWS="2")
+        code, cli, recorded, output = run(["--yolo"])
         assert code == 0 and cli == [["run", "--", "--dangerously-bypass-approvals-and-sandbox"], None], cli
+        # The footer gets its two rows even though hc reports the old rows once after each resize: corrected from
+        # that stale answer, it used to end at 40 px, one row or none (seen on Cursor 2026-11-13).
         assert [c[:2] for c in recorded] == [["get", "t-me"], ["ls"], ["do", "pane.split"], ["do", "pane.focus"],
-                                             ["do", "layout.resize"], ["get", "t-foot"], ["do", "pane.close"]], recorded
+                                             ["get", "t-foot"], ["do", "layout.resize"], ["get", "t-foot"],
+                                             ["get", "t-foot"], ["do", "pane.close"]], recorded
+        assert json.loads((folder / "foot.json").read_text()) == {"rows": 2, "pending": None}
         assert json.loads(recorded[2][2])["pane"] == "p-me" and json.loads(recorded[2][2])["direction"] == "down"
         # Codex's footer reads the cache usage of the CLI under this launcher.
         assert json.loads(recorded[2][2])["argv"][-2:] == ["--codex-pid", (folder / "launcher.pid").read_text()]
