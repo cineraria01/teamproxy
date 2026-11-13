@@ -49,6 +49,7 @@ grok·agy·cursor는 하단 줄이 없고 Codex는 래퍼가 `--`를 실행기�
 Herdr `+` 메뉴의 Codex·Grok·Antigravity·Cursor(`cursor-agent`)도 이 함수를 거쳐 하단 줄이 붙습니다.
 - 같은 이름의 기존 함수·별칭은 이 함수로 바뀝니다. 다만 PATH에 Cursor 편집기의 `cursor`(cursor-agent 설치기의
   `~/.local/bin/cursor` 말고)가 있으면 `cursor`는 편집기 그대로 두고 `cursor-agent`만 넘깁니다.
+  이 판정은 셀렉터를 source할 때 한 번만 하니, rc에서 셀렉터 source 줄은 PATH 설정 뒤에 둡니다.
 - `-h`·`--help`는 `claude --help`처럼 풀 도움말이 나옵니다. CLI 자체 도움말은 `codex help`처럼 하위 명령으로 봅니다.
 - 에이전트(Claude Code 등)의 Bash 도구가 부르는 `codex`도 이 함수를 타서 teamcodex의 제한이 그대로 걸립니다
   (`resume --last`·`--all` 거부, `exec` 뒤 `-c`는 종료 2 — 아래 「에이전트·스크립트에서 쓰기」).
