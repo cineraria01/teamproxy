@@ -186,6 +186,8 @@ def herdr_footer():
                             ("lag 1.2", dict(FOOT_LAG="1.2")), ("lag 2.5", dict(FOOT_LAG="2.5")),
                             ("lags 0.3,2.5", dict(FOOT_LAGS="0.3,2.5")),
                             ("chrome 80", dict(FOOT_CHROME="80")), ("chrome 40", dict(FOOT_CHROME="40")),
+                            # Rows taller than the formula's 20 px (an app zoomed in) with a late resize can still
+                            # end a row short: the known limit of a correction that never shrinks (see launcher.py).
                             *((f"row {px} px", dict(FOOT_ROWPX=px)) for px in ("11", "13", "32", "40"))):
             code, cli, recorded, output = run(["--yolo"], **knobs)
             px = resizes(recorded)
