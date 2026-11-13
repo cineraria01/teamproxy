@@ -81,72 +81,140 @@ updated=$(HOME="$TEST_HOME" PATH="$TEST_BIN:$PATH" \
   bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic 'claude update' 2>/dev/null)
 grep -qx 'NATIVE=update' <<< "$updated"
 
-# codex/grok/agy/cursor go to their pool wrappers by the same rule; update/login/logout go to the real CLI.
-for pool in teamcodex teamgrok teamagy teamcursor; do
-  printf '#!/bin/sh\necho "%s${*:+ $*}"\n' "$pool" > "$TEST_BIN/$pool"
-done
-for cli in codex grok agy cursor-agent; do
-  printf '#!/bin/sh\necho "REAL %s $*"\n' "$cli" > "$TEST_BIN/$cli"
-done
-chmod +x "$TEST_BIN"/team* "$TEST_BIN"/codex "$TEST_BIN"/grok "$TEST_BIN"/agy "$TEST_BIN"/cursor-agent
-short_calls='codex; codex --no-daemon; codex resume ID; codex update; codex login
-grok; grok -p hi; grok models; grok logout
-agy; agy -c; agy mcp list; agy update
-cursor; cursor --yolo; cursor agent; cursor agent --yolo; cursor agent fix it; cursor ls; cursor update
-cursor-agent; cursor-agent -p hi; cursor-agent agent --yolo; cursor-agent ls; cursor-agent login'
+# codex/grok/agy/cursor/cursor-agent go to their pool wrappers by the same rule; update/login/logout go to the
+# real CLI. Each stub prints every argument in brackets, so argument boundaries are checked too.
+stub() {
+  printf '#!/bin/sh\nprintf "%%s" "%s"; for a; do printf " [%%s]" "$a"; done; echo\n' "$2" > "$1"
+  chmod +x "$1"
+}
+for pool in teamcodex teamgrok teamagy teamcursor; do stub "$TEST_BIN/$pool" "$pool"; done
+for cli in codex grok agy cursor-agent; do stub "$TEST_BIN/$cli" "REAL $cli"; done
+# Hermetic PATH: a real Cursor editor or installer shim on this machine must not decide what `cursor` is.
+SHORT_PATH="$TEST_BIN:/usr/bin:/bin"
+SELECTOR="$TEST_HOME/.claude/teamclaude-selector.sh"
+short_calls='codex
+codex --no-daemon
+codex resume ID
+codex exec "a b"
+codex update
+codex login
+codex ""
+grok
+grok -p hi
+grok models
+grok logout
+agy
+agy -c
+agy mcp list
+agy update
+cursor
+cursor --yolo
+cursor agent
+cursor agent --yolo
+cursor agent fix it
+cursor agent ""
+cursor ls
+cursor update
+cursor-agent
+cursor-agent -p hi
+cursor-agent agent --yolo
+cursor-agent ls
+cursor-agent login'
 short_expected='teamcodex
-teamcodex --no-daemon
-teamcodex -- resume ID
-REAL codex update
-REAL codex login
+teamcodex [--no-daemon]
+teamcodex [--] [resume] [ID]
+teamcodex [--] [exec] [a b]
+REAL codex [update]
+REAL codex [login]
+teamcodex [--] []
 teamgrok
-teamgrok -p hi
-teamgrok -- models
-REAL grok logout
+teamgrok [-p] [hi]
+teamgrok [--] [models]
+REAL grok [logout]
 teamagy
-teamagy -c
-teamagy -- mcp list
-REAL agy update
+teamagy [-c]
+teamagy [--] [mcp] [list]
+REAL agy [update]
 teamcursor
-teamcursor --yolo
+teamcursor [--yolo]
 teamcursor
-teamcursor --yolo
-teamcursor -- agent fix it
-teamcursor -- ls
-REAL cursor-agent update
+teamcursor [--yolo]
+teamcursor [--] [agent] [fix] [it]
+teamcursor [--] [agent] []
+teamcursor [--] [ls]
+REAL cursor-agent [update]
 teamcursor
-teamcursor -p hi
-teamcursor --yolo
-teamcursor -- ls
-REAL cursor-agent login'
-short_bash=$(HOME="$TEST_HOME" PATH="$TEST_BIN:$PATH" \
-  bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic "$short_calls" 2>/dev/null)
-test "$short_bash" = "$short_expected"
-short_zsh=$(PATH="$TEST_BIN:$PATH" \
-  zsh -fc "alias codex=nope
-source '$TEST_HOME/.claude/teamclaude-selector.sh'
-$short_calls")
-test "$short_zsh" = "$short_expected"
+teamcursor [-p] [hi]
+teamcursor [--yolo]
+teamcursor [--] [ls]
+REAL cursor-agent [login]'
+check_short() {
+  local label=$1 got=$2
+  if [ "$got" != "$short_expected" ]; then
+    printf 'short names (%s) differ:\n' "$label" >&2
+    diff <(printf '%s\n' "$short_expected") <(printf '%s\n' "$got") >&2 || true
+    return 1
+  fi
+}
+check_short bash-rc "$(HOME="$TEST_HOME" PATH="$SHORT_PATH" \
+  bash --noprofile --rcfile "$TEST_HOME/.bashrc" -ic "$short_calls" 2>/dev/null)"
+# An alias of the same name is replaced (the next lines parse after the source).
+check_short zsh "$(PATH="$SHORT_PATH" zsh -fc "alias codex=nope
+source '$SELECTOR'
+$short_calls")"
+# Sourced under set -eu, twice.
+check_short bash-eu-twice "$(PATH="$SHORT_PATH" bash -c "set -eu
+. '$SELECTOR'
+. '$SELECTOR'
+$short_calls")"
+check_short zsh-eu-twice "$(PATH="$SHORT_PATH" zsh -fc "set -eu
+source '$SELECTOR'
+source '$SELECTOR'
+$short_calls")"
+# Claude Code's shell snapshot keeps only functions not named `_x…` (typeset +f | grep -vE '^_[^_]'), so each
+# function must work from its own body in a fresh shell that sources only the snapshot.
+SNAPSHOT="$TEST_DIR/snapshot.zsh"
+PATH="$SHORT_PATH" zsh -fc "source '$SELECTOR'
+typeset +f | grep -vE '^_[^_]' | while read f; do typeset -f \$f; done > '$SNAPSHOT'"
+check_short zsh-snapshot "$(PATH="$SHORT_PATH" zsh -fc "source '$SNAPSHOT'
+$short_calls")"
 
 # Without a pool wrapper the short name is left alone (here only teamcodex is installed).
 ONLY_CODEX_BIN="$TEST_DIR/only-codex-bin"
 mkdir -p "$ONLY_CODEX_BIN"
 cp "$TEST_BIN/teamcodex" "$ONLY_CODEX_BIN/"
 test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" bash -c \
-  "source '$TEST_HOME/.claude/teamclaude-selector.sh'; type -t codex; type -t grok agy cursor cursor-agent || echo none")" = "function
+  "source '$SELECTOR'; type -t codex; type -t grok agy cursor cursor-agent || echo none")" = "function
 none"
 test "$(PATH="$ONLY_CODEX_BIN:/usr/bin:/bin" zsh -fc \
-  "grok() { echo mine; }; source '$TEST_HOME/.claude/teamclaude-selector.sh'; whence -w codex agy cursor cursor-agent; grok")" = "codex: function
+  "grok() { echo mine; }; source '$SELECTOR'; whence -w codex agy cursor cursor-agent; grok")" = "codex: function
 agy: none
 cursor: none
 cursor-agent: none
 mine"
 
+# A Cursor editor's `cursor` on PATH keeps its name; `cursor-agent` is still routed. The cursor-agent
+# installer's shim ($HOME/.local/bin/cursor) is not an editor.
+EDITOR_BIN="$TEST_DIR/editor-bin"
+mkdir -p "$EDITOR_BIN" "$TEST_HOME/.local/bin"
+stub "$EDITOR_BIN/cursor" "EDITOR"
+stub "$TEST_HOME/.local/bin/cursor" "SHIM"
+test "$(HOME="$TEST_HOME" PATH="$EDITOR_BIN:$SHORT_PATH" bash -c \
+  ". '$SELECTOR'; type -t cursor; cursor .; cursor-agent ls")" = "file
+EDITOR [.]
+teamcursor [--] [ls]"
+test "$(HOME="$TEST_HOME" PATH="$EDITOR_BIN:$SHORT_PATH" zsh -fc \
+  "source '$SELECTOR'; whence -w cursor cursor-agent")" = "cursor: command
+cursor-agent: function"
+test "$(HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$SHORT_PATH" bash -c \
+  ". '$SELECTOR'; type -t cursor; cursor ls")" = "function
+teamcursor [--] [ls]"
+
 # POSIX shells cannot name a function `cursor-agent`: sourcing still finishes, `cursor` routes, `cursor-agent` is the CLI.
 for posix_sh in "bash --posix" sh; do
-  test "$(PATH="$TEST_BIN:$PATH" $posix_sh -c \
-    ". '$TEST_HOME/.claude/teamclaude-selector.sh'; cursor ls; cursor-agent -p hi")" = "teamcursor -- ls
-REAL cursor-agent -p hi"
+  test "$(PATH="$SHORT_PATH" $posix_sh -c \
+    ". '$SELECTOR'; cursor ls; cursor-agent -p hi")" = "teamcursor [--] [ls]
+REAL cursor-agent [-p] [hi]"
 done
 
 HOME="$TEST_HOME" SHELL=/bin/zsh CLAUDE_DIR="$TEST_HOME/.claude" \

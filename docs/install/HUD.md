@@ -42,10 +42,17 @@ Cache last: 98.9% | 148,864/150,566 in | new 1,702
 하단 줄 안에서 뜬 Claude Code에는 `TEAMCLAUDE_HUD=1`이 붙어, Claude 안의 상태줄은 표를 숨기고 모델 줄만 보입니다.
 인쇄 모드(`-p`·`--print`)·`--version`, 터미널이 아닌 실행은 하단 줄 없이 바로 가고, Claude 하위 명령은 `teamclaude -- mcp list`
 (`claude mcp list`)처럼 하단 줄 없이 실행됩니다. `claude N`은 N번 계정에 고정하고 하단 줄에도 그 계정에 `>`가 붙습니다.
-같은 셀렉터가 `codex`·`grok`·`agy`·`cursor`도 같은 규칙으로 `teamcodex`·`teamgrok`·`teamagy`·`teamcursor`에 넘깁니다
-(2026-11-13, 그 풀 래퍼가 있는 기계에서만). `update`·`login`·`logout`은 진짜 CLI(`cursor`는 `cursor-agent`)로 가고,
-`cursor agent`(옵션만)와 `cursor-agent`는 `cursor`와 같습니다. Herdr `+` 메뉴의 Codex·Grok·Antigravity·Cursor(`cursor-agent`)도
-이 함수를 거쳐 하단 줄이 붙습니다. `sh`·`bash --posix`는 이름에 `-`가 든 함수를 못 만들어 거기서는 `cursor-agent`만 그대로입니다.
+같은 셀렉터가 `codex`·`grok`·`agy`·`cursor`·`cursor-agent`도 같은 규칙으로 `teamcodex`·`teamgrok`·`teamagy`·`teamcursor`에
+넘깁니다(2026-11-13, 그 풀 래퍼가 있는 기계에서만). 인자 없음·옵션은 하단 줄, 첫 낱말은 `teamX -- …`이고, 하위 명령에는
+grok·agy·cursor는 하단 줄이 없고 Codex는 래퍼가 `--`를 실행기로 보내 붙습니다(아래 「명령은 `teamcodex` 하나」).
+`update`·`login`·`logout`은 진짜 CLI(`cursor`는 `cursor-agent`)로 가고, `cursor agent`(옵션만)는 `cursor`와 같습니다.
+Herdr `+` 메뉴의 Codex·Grok·Antigravity·Cursor(`cursor-agent`)도 이 함수를 거쳐 하단 줄이 붙습니다.
+- 같은 이름의 기존 함수·별칭은 이 함수로 바뀝니다. 다만 PATH에 Cursor 편집기의 `cursor`(cursor-agent 설치기의
+  `~/.local/bin/cursor` 말고)가 있으면 `cursor`는 편집기 그대로 두고 `cursor-agent`만 넘깁니다.
+- `-h`·`--help`는 `claude --help`처럼 풀 도움말이 나옵니다. CLI 자체 도움말은 `codex help`처럼 하위 명령으로 봅니다.
+- 에이전트(Claude Code 등)의 Bash 도구가 부르는 `codex`도 이 함수를 타서 teamcodex의 제한이 그대로 걸립니다
+  (`resume --last`·`--all` 거부, `exec` 뒤 `-c`는 종료 2 — 아래 「에이전트·스크립트에서 쓰기」).
+- `sh`·`bash --posix`는 이름에 `-`가 든 함수를 못 만들어 거기서는 `cursor-agent`만 그대로입니다.
 
 ```text
      FLEET         x5      pooled  Ses    2% 9m     Wk   51% 4h9m   Fbl      -
