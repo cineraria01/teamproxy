@@ -111,6 +111,7 @@ import {
   resolveCursorBin,
 } from './cursor.js';
 import { isCursorLanePath } from './cursor-openai.js';
+import { approveClaudeApiKey, claudeGlobalConfigPath, clientChildEnv, clientCommand, clientOf, remoteUseCommand } from './remote-client.js';
 import {
   SERVE_HEADERS, applyAccountAction, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
@@ -124,6 +125,9 @@ const LIFECYCLE_ID_HEADER = 'x-teamcodex-lifecycle-id';
 const DEFAULT_MAX_BUFFERED_REQUEST_BYTES = 256 * 1024 * 1024;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_MANAGED_CLAUDE_MODEL = 'claude-sonnet-5';
+// Tests only (node --test, like scripts/install-app.mjs): TEAMPROXY_APP_PLATFORM=win32 takes the Windows
+// process-lifecycle branch (no ps/lsof) on any OS. Ignored outside the test runner.
+const PLATFORM = (process.env.NODE_TEST_CONTEXT && process.env.TEAMPROXY_APP_PLATFORM) || process.platform;
 function runtimeSourceHash(entryPath) {
   const sourceDir = dirname(realpathSync(entryPath));
   const digest = createHash('sha256');
@@ -251,8 +255,8 @@ if (DEDICATED_MODE && AGY_UNSUPPORTED_COMMANDS.has(command)) {
 // usually has no provider key at all — and only a missing file is created
 // (as an agy config). Outside agy mode only an agy config is refused, so
 // Claude ⇄ Codex keeps its old behavior.
+let onDisk = null;
 if (command !== 'help' && command !== '--help' && command !== '-h') {
-  let onDisk = null;
   let configExists = false;
   try {
     onDisk = await loadConfig();
@@ -270,6 +274,15 @@ if (command !== 'help' && command !== '--help' && command !== '-h') {
         + `Run it with the ${onDisk.provider} prefix: ${theirs.cli} …, or node src/index.js ${onDisk.provider} ….`);
     process.exit(1);
   }
+}
+
+// Remote pool client mode (`teamclaude remote use <URL>`, src/remote-client.js): Claude pool only, no local
+// server is looked for or started; every command but help and `remote` goes to the remote pool or is refused.
+const REMOTE_CLIENT = !DEDICATED_MODE && !isCodexMode(onDisk) ? clientOf(onDisk) : null;
+if (REMOTE_CLIENT && command !== 'remote' && !['help', '--help', '-h'].includes(command)) {
+  // run exits with Claude's code (or re-raises its signal); never fall through to the local commands below.
+  if (command === 'run') await clientRunCommand(REMOTE_CLIENT);
+  process.exit(command === 'run' ? 1 : await clientCommand(command, args, REMOTE_CLIENT));
 }
 
 if (args.includes('--json') && MACHINE_COMMANDS.has(command)) {
@@ -2097,7 +2110,7 @@ function isPidAlive(pid) {
 }
 
 function readProcessIdentity(pid) {
-  if (!Number.isInteger(pid) || pid <= 0 || process.platform === 'win32') return null;
+  if (!Number.isInteger(pid) || pid <= 0 || PLATFORM === 'win32') return null;
   try {
     const result = spawnSync(
       'ps',
@@ -2236,7 +2249,7 @@ function configuredStatusProbeTimeoutMs(fallbackMs = 1500) {
 
 /** Best-effort: the pid listening on a TCP port (macOS/Linux via lsof). */
 function lsofPid(port, candidatePid = null) {
-  if (process.platform === 'win32') return null;
+  if (PLATFORM === 'win32') return null;
   try {
     const args = ['-b', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'];
     if (Number.isSafeInteger(candidatePid) && candidatePid > 0) {
@@ -2453,6 +2466,20 @@ function refuseSelfDisruptiveLifecycleCommand(command) {
   process.exit(1);
 }
 
+// Windows has no ps/lsof, so a running server's identity is never verified and it is never signalled (a pid
+// taken on faith could be a recycled one). Say exactly what to do instead. true = printed.
+function windowsLifecycleHint(r, verb) {
+  if (PLATFORM !== 'win32' || (r.reason !== 'unverified-lifecycle' && r.reason !== 'no-pid')) return false;
+  const cli = cliName();
+  console.error(`[${cli}] Windows에서는 서버 프로세스의 신원을 확인할 수 없어(ps·lsof 없음) ${verb === 'stop' ? '끄지' : '다시 띄우지'} 않았습니다.`);
+  console.error('  앱 모드(셀비)라면 앱이 서버를 끄고 켭니다 — 앱에서 하세요.');
+  console.error(r.pid
+    ? `  손으로: tasklist /FI "PID eq ${r.pid}" 로 node.exe인지 본 뒤  taskkill /PID ${r.pid} /T /F`
+    : `  손으로: netstat -ano | findstr :${r.port} 로 pid를 찾아  taskkill /PID <pid> /T /F`);
+  console.error(`  그다음 다시 띄우기: ${cli} server   (원격 풀만 쓰는 기계라면: ${cli} remote use <주소>)`);
+  return true;
+}
+
 async function stopCommand() {
   if (refuseSelfDisruptiveLifecycleCommand('stop')) return;
   const r = await stopRunningServer();
@@ -2460,6 +2487,7 @@ async function stopCommand() {
     console.log(`Stopped TeamClaude server (pid ${r.pid}, port ${r.port}).`);
     return;
   }
+  if (windowsLifecycleHint(r, 'stop')) process.exit(1);
   switch (r.reason) {
     case 'not-running':
       console.log('No TeamClaude server is running.');
@@ -2489,6 +2517,7 @@ async function restartCommand() {
   if (r.stopped) {
     console.log(`Stopped previous server (pid ${r.pid}).`);
   } else if (r.reason !== 'not-running') {
+    if (windowsLifecycleHint(r, 'restart')) process.exit(1);
     const reason = r.reason === 'unverified-lifecycle'
       ? 'lifecycle identity unverified'
       : r.reason;
@@ -3284,6 +3313,33 @@ async function codexResumeCommand() {
     process.exit(1);
   }
   await runCommand(['resume', sessionId, ...resumeArgs]);
+}
+
+// Client mode `run`: Claude Code in API-key mode against the remote pool. No local proxy, no model fallback or
+// crash recovery (both read the local server); the same default yolo and nested-launch guard as the local pool.
+async function clientRunCommand(client) {
+  if (process.env.TEAMCLAUDE_SESSION_SUPERVISED === '1') {
+    console.error(
+      '[TeamClaude] Refusing nested supervised Claude launch: TEAMCLAUDE_CLAUDE_BIN must point to the native Claude vendor binary.',
+    );
+    process.exit(75);
+  }
+  const clientArgs = args.slice(1);
+  if (clientArgs[0] === '--') clientArgs.shift();
+  const approval = await approveClaudeApiKey(client.token, claudeGlobalConfigPath());
+  if (approval.error) {
+    console.error(`[TeamClaude] ${claudeGlobalConfigPath()}에 키 승인을 못 넣었습니다(${approval.error}); Claude Code가 이 API 키를 쓸지 물으면 Yes를 고르세요.`);
+  }
+  if (!isClaudeSubcommand(clientArgs)) clientArgs.unshift(...defaultYolo('claude', clientArgs));
+  const claudeBin = process.env.TEAMCLAUDE_CLAUDE_BIN || 'claude';
+  const result = spawnSync(claudeBin, clientArgs, { stdio: 'inherit', env: clientChildEnv(process.env, client) });
+  if (result.error) {
+    console.error(result.error.code === 'ENOENT'
+      ? 'Claude Code not found in PATH. Install it first.'
+      : `Failed to start claude: ${result.error.message}`);
+    process.exit(1);
+  }
+  return propagateChildExit(result);
 }
 
 async function runCommand(clientArgsOverride = null) {
@@ -4344,6 +4400,8 @@ Commands:
   uninstall-claude-wrapper Remove it and restore the prior launchers
   update [--all]      Update this pool's install to the fork's latest main (--dry-run, --ref, --no-restart, --wait SEC)
   remote on|off|status|token [--rotate]  Phone/remote access through tailscale serve (tailnet only)
+  remote use <URL> [--token-file PATH]   Use another machine's pool instead of a local one (token on stdin)
+  remote use --off    Back to the local pool
   help                Show this help
 
 Options:
@@ -5275,6 +5333,21 @@ async function remoteCommand() {
   const sub = args[1];
   const cli = cliName();
   const pool = cli.replace(/^team/, '');
+  if (sub === 'use') {
+    if (pool !== 'claude') {
+      console.error(`${cli} remote use: 원격 풀 클라이언트 모드는 Claude 풀(teamclaude)만 됩니다.`);
+      return 1;
+    }
+    return remoteUseCommand(args.slice(2), {
+      config: await loadConfig(), configPath: getConfigPath(), update: atomicConfigUpdate,
+    });
+  }
+  if (REMOTE_CLIENT) {
+    console.log(`이 기계는 원격 풀 클라이언트입니다: ${REMOTE_CLIENT.url} (토큰 있음 — 보이지 않음)`);
+    if (sub === 'status' || sub == null) return 0;
+    console.error(`${cli} remote ${sub}: 원격 접속 켜고 끄기·토큰은 풀 기계에서 합니다. 클라이언트 모드 끄기: ${cli} remote use --off`);
+    return 1;
+  }
   const config = await loadOrCreateConfig();
   const port = remotePort(pool, config.remote);
   const localPort = config.proxy.port;
@@ -5361,7 +5434,7 @@ async function remoteCommand() {
     return 0;
   }
 
-  console.error(`Usage: ${cli} remote on|off|status|token [--rotate]`);
+  console.error(`Usage: ${cli} remote on|off|status|token [--rotate] | use <URL> [--token-file PATH] [--no-check] | use --off`);
   return 1;
 }
 

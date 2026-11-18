@@ -6,7 +6,9 @@ artifacts/
 # Local agent/session artifacts — never published (they carry account emails,
 # host paths and machine-local state).
 .codex/
-.claude/
+.claude/*
+# …except the landing check `hc-lane land` runs (no machine state in it).
+!.claude/herdr-verify.sh
 .omo/
 .deployment-backups/
 review-snapshots/

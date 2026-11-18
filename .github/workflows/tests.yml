@@ -54,6 +54,9 @@ jobs:
       # config writes (rename retry); loopback callback on 127.0.0.1 and ::1.
       - name: App mode tests
         run: node --test test/app-installer-win.test.js test/codex.test.js test/config.test.js test/oauth-callback.test.js
+      # Remote pool client mode (teamclaude remote use) and the win32 stop/restart guidance, natively.
+      - name: Remote client tests
+        run: node --test test/remote-client.test.js
       # Login cancel without SIGTERM (stdin line / EOF, not on a NUL stdin) and the sync route (no wait on quota);
       # the rest of the file needs sh.
       - name: App login and sync tests

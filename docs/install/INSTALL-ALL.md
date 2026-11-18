@@ -626,6 +626,76 @@ hc run --bg --no-parent --name teamproxy-hud -- \
 
 `--plain --watch`는 2초마다 다시 그린다. 이 기계의 `hc-sweep`이 닫지 않게 이름을 `~/.claude-tasks/keep`에 넣는다.
 
+### 9-4. 다른 기계의 풀 쓰기 — 클라이언트 모드 (`teamclaude remote use`, 맥·리눅스·Windows)
+
+자기 계정 없이 풀 기계(예: 주 작업 맥)의 Claude 풀을 쓰는 기계. 같은 node 코드라 세 OS에서 똑같이 돈다.
+Claude Code는 API 키 모드로 `ANTHROPIC_BASE_URL=<풀 주소>`, `ANTHROPIC_API_KEY=<원격 토큰>`을 받는다(`ANTHROPIC_AUTH_TOKEN`·
+`CLAUDE_CODE_OAUTH_TOKEN`은 뺀다). 「이 API 키를 쓸까?」가 안 뜨게 키 끝 20자를 `~/.claude.json`
+(`CLAUDE_CONFIG_DIR`가 있으면 그 안)의 `customApiKeyResponses.approved`에 한 번 넣는다(원자적 쓰기, 다른 칸 그대로).
+이 기계에서는 로컬 서버를 찾거나 띄우지 않는다.
+
+**풀 기계에서** (한 번): `teamclaude remote on` → `teamclaude remote token`으로 토큰을 보고 안전한 길로 옮긴다.
+쓰는 기기의 Tailscale 로그인이 풀 기계와 다르면 풀 기계 설정 `remote.allowLogins`에 더한다.
+tailnet 밖 기기(SSH 터널·hosts로 그 이름을 잇는 경우)의 연결은 기계마다 따로 맞춘다 — 이 절 밖이다.
+
+**쓰는 기계에서 켜기** (토큰은 명령줄·화면·로그에 안 나온다. 넣기 전에 원격을 한 번 불러 맞는지 본다):
+
+```sh
+teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456 --token-file token.txt   # 그다음 token.txt를 지운다
+teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456   # 또는 토큰을 붙여 넣기(화면에 안 보임)·파이프
+teamclaude remote use          # 지금 설정 보기 (토큰은 안 보임)
+teamclaude remote use --off    # 끄기 = 되돌리기 (설정의 client 칸을 지움)
+```
+
+- 설정은 `teamclaude.json`의 `"client": {"url", "token"}`(유닉스 0600, Windows는 `%USERPROFILE%` 아래 그 사용자 전용). 주소는
+  `https://` 원점만(경로 없음. 평문 `http://`는 루프백만). 로컬 계정이 있는 설정·Claude 풀이 아닌 주소(`:8457` 등)·
+  안 닿는 주소는 거절하고 저장하지 않는다(연결 전에 저장만 하려면 `--no-check`).
+- 쓰기: `teamclaude`(대화형) · `teamclaude -p "…"`·`--model …` 등 Claude 옵션 · `teamclaude -- mcp list`(Claude 하위 명령).
+  승인 생략(`--dangerously-skip-permissions`)은 로컬 풀과 같은 규칙으로 붙는다.
+- 관리(원격 풀 전체에 적용): `status`·`accounts`(원격 표: 번호·이름·상태·주간·Fable·5시간·우선·`*` 지금 계정·처리 중 요청,
+  `--json`은 원격 응답 그대로) · `reload` · `enable|disable <번호|이름>` · `priority <번호|이름> <n|auto>`(이름은 앞부분만
+  써도 하나로 정해지면 된다) · `restart` = 이 기계에 서버가 없으니 원격 reload로 대신한다(원격 풀 재시작은 원격 API에 없고,
+  하면 그 기계 세션이 모두 끊긴다).
+- 여기서 못 하는 것(`login`·`logout`·`import`·`remove`·`update`·`server`·`stop`·`env`·`remote on|off|token` …)은 한국어 안내와
+  종료 1. 원격에 못 닿으면 한 줄(연결 실패·401 토큰·403 허용 로그인·원격 꺼짐)과 종료 1.
+- 맥·리눅스 sh 래퍼(§1-2)는 그대로 쓴다. 하단 줄(Herdr 분할)은 읽을 로컬 서버가 없어 클라이언트 모드에서는 조용히 띄우지
+  않는다(원격 표는 `teamclaude status`). 이 기계에 `statusline/`의 Claude 상태줄을 깔았으면 그 줄은 로컬 풀 기준이라 비어 보일 수 있다.
+
+**Windows** (관리자 권한·PowerShell 실행 정책 변경 필요 없음. Node 18+와 Claude Code 네이티브 설치 —
+`%USERPROFILE%\.local\bin\claude.exe` — 가 있어야 한다):
+
+```powershell
+git clone https://github.com/cineraria01/teamproxy.git "$env:USERPROFILE\.local\share\teamproxy"
+$pkg  = "$env:USERPROFILE\.local\share\teamproxy"
+$node = (Get-Command node.exe).Source
+$bin  = "$env:USERPROFILE\.local\bin"
+New-Item -ItemType Directory -Force $bin | Out-Null
+@"
+@echo off
+rem teamclaude (cineraria01/teamproxy). The argument rule is in node (TEAMCLAUDE_WRAPPER=1): no args or -options
+rem open Claude Code, -- passes a Claude subcommand, any other word is a teamclaude command.
+setlocal
+set "TEAMCLAUDE_CONFIG=%USERPROFILE%\.config\teamclaude.json"
+set "TEAMCLAUDE_WRAPPER=1"
+"$node" "$pkg\src\teamclaude.js" %*
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Encoding Oem "$bin\teamclaude.cmd"
+where.exe teamclaude          # %USERPROFILE%\.local\bin\teamclaude.cmd 가 나와야 한다 (없으면 그 폴더를 PATH에)
+teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456 --token-file "$env:USERPROFILE\token.txt"
+Remove-Item "$env:USERPROFILE\token.txt"
+teamclaude status
+```
+
+- 래퍼 규칙은 sh 래퍼와 같다(`TEAMCLAUDE_WRAPPER=1`을 받은 `src/teamclaude.js`가 정한다): 인자 없음·`-`로 시작 → Claude Code,
+  `--` 뒤 → Claude 하위 명령, `-h`·`--help`와 그 밖의 말 → teamclaude 명령. 이 값은 Claude에게 넘어가지 않는다.
+- 갱신: `git -C "$env:USERPROFILE\.local\share\teamproxy" pull`. 되돌리기: `teamclaude remote use --off`, 그다음
+  `teamclaude.cmd`와 그 폴더를 지운다. `~/.claude.json`에 넣은 키 승인(끝 20자)은 남아도 해가 없다.
+- Windows에서 **로컬 풀**을 돌릴 때 `teamclaude stop`·`restart`는 서버를 끄지 않는다(ps·lsof가 없어 프로세스 신원을 확인할 수
+  없고, 확인 안 된 pid에는 신호를 보내지 않는다). 대신 `tasklist /FI "PID eq <pid>"`·`taskkill /PID <pid> /T /F`·`teamclaude server`
+  순서를 그대로 찍고 종료 1로 끝낸다. 앱 모드(셀비)는 앱이 서버를 끄고 켠다([APP-INSTALL.md](APP-INSTALL.md#windows)).
+- 시험: `test/remote-client.test.js`(가짜 원격 서버, Windows 분기는 `TEAMPROXY_APP_PLATFORM=win32`로 맥·리눅스에서도, CI는
+  `windows-latest`에서 그대로).
+
 ## 하지 말 것
 
 - 업스트림(sangrokjung·jung-wan-kim·karpeleslab)에서 설치하거나 그쪽에 PR·이슈를 보내지 않는다.

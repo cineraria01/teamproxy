@@ -42,6 +42,16 @@ FORWARD = ("CODEX_HOME", "TC_ACCT", "TEAMCLAUDE_STATUSLINE_INDEX")
 HC_STARTED = "TEAMPROXY_HUD_HC_STARTED"
 
 
+def remote_client():
+    """The Claude pool config names a remote pool (`client.url`, written by `teamclaude remote use`)."""
+    path = os.environ.get("TEAMCLAUDE_CONFIG") or str(Path.home() / ".config/teamclaude.json")
+    try:
+        client = json.loads(Path(path).read_text()).get("client") or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(client, dict) and bool(client.get("url")) and bool(client.get("token"))
+
+
 def oneshot(arguments, flags):
     return any(a.startswith("-") and a.lstrip("-").split("=")[0] in flags for a in arguments)
 
@@ -261,6 +271,10 @@ def launch(arguments):
         os.execv(proxy, [proxy, "run", "--", *arguments])
     if mode == "claude" and not subcommand:
         arguments = with_effort(arguments)
+    if mode == "claude" and remote_client():
+        # Client mode (`teamclaude remote use`): no local proxy for the footer to read, so no footer at all —
+        # quietly, not an error line or an empty table. `teamclaude status` shows the remote pool.
+        os.execv(proxy, [proxy, "run", "--", *arguments])
     hc = shutil.which("hc")
     if hc and not os.environ.get("HC_TERMINAL_ID") and not os.environ.get(HC_STARTED):
         return hc_terminal(hc, cli, raw)

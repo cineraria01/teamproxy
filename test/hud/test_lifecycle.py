@@ -207,6 +207,15 @@ def herdr_footer():
         assert output.count(note) == 1, output
         # Claude's own status line drops the account table only when the footer shows it.
         assert run(["--claude"])[1] == [["run", "--", "--effort", "xhigh"], "1"]
+        # Client mode (`teamclaude remote use`): no local proxy to read, so Claude starts quietly with no footer
+        # and no Herdr call at all (no note, no empty table).
+        client = folder / "client.json"
+        client.write_text(json.dumps({"accounts": [], "client": {"url": "https://pool.example.ts.net:8456", "token": "t"}}))
+        code, cli, recorded, output = run(["--claude"], TEAMCLAUDE_CONFIG=str(client))
+        assert code == 0 and cli == [["run", "--", "--effort", "xhigh"], None], (code, cli)
+        assert not recorded and note not in output, (recorded, output)
+        client.write_text(json.dumps({"accounts": [], "client": {"url": "https://pool.example.ts.net:8456"}}))
+        assert run(["--claude"], TEAMCLAUDE_CONFIG=str(client))[1] == [["run", "--", "--effort", "xhigh"], "1"]
         assert json.loads(run(["--grok"])[2][2][2])["argv"][-1] == "--grok"
         # A terminal too short for the footer starts the CLI alone instead of refusing, and says why.
         code, cli, recorded, output = run(["--grok"], lines=8)
