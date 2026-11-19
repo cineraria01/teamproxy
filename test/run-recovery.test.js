@@ -1350,7 +1350,8 @@ test('active recovery bounds a failed local proxy start by the same deadline', a
       foreignServer.listening ? closeServer(foreignServer) : Promise.resolve(),
       controlServer.listening ? closeServer(controlServer) : Promise.resolve(),
     ]);
-    await rm(root, { recursive: true, force: true });
+    // The auto-started server is SIGTERMed at the deadline and may still write its state files on the way out.
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   await writeFile(join(bin, 'claude'), `#!/usr/bin/env node
