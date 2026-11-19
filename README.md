@@ -320,7 +320,9 @@ hc kill teamclaude-proxy                    # 재시작(launchd가 다시 띄운
 쓰는 기계에서 `teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456 --token-file <토큰 파일>`(토큰은 표준 입력도 됨,
 화면에 안 찍힘). 그 뒤 `teamclaude`·`-p`·`--`는 원격 풀로 Claude Code를 띄우고, `status`·`reload`·`enable`·`disable`·`priority`는
 원격 풀 전체에 적용되며, `restart`는 원격 reload로 대신한다. 끄기 `teamclaude remote use --off`. 자세히: INSTALL-ALL §9-4.
-Windows는 따로 된 래퍼 `scripts/win32/teamclaude.cmd`를 쓴다(§9-5. Windows 코드는 `src/win32.js`·`src/teamclaude-win32.js`에만).
+Windows PC는 설치기 한 명령으로 풀(래퍼 `team<풀>.cmd` + 작업 스케줄러 서버)을 깔고 `update`·`restart`·`stop`도 맥처럼 쓴다:
+`node scripts\install-win.mjs [--pools all] [--remote <주소> --token-file <파일>]` — [docs/install/INSTALL-WINDOWS.md](docs/install/INSTALL-WINDOWS.md).
+Windows 코드는 따로 된 파일(`scripts/install-win.mjs`, `src/win32*.js`, `src/teamproxy-win32.js`, `src/teamclaude-win32.js`)에만 있다.
 
 ### 업데이트
 

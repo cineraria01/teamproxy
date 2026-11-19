@@ -197,12 +197,16 @@ export function resolveCodexCliBin({
     // under @openai/codex, or hoisted), then the legacy in-package vendor/ folder.
     const plat = arch === 'arm64' ? 'arm64' : 'x64';
     const triple = arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
-    const modules = win32.join(win32.dirname(execPath), 'node_modules', '@openai');
-    const found = [
-      win32.join(modules, 'codex', 'node_modules', '@openai', `codex-win32-${plat}`),
-      win32.join(modules, `codex-win32-${plat}`),
-      win32.join(modules, 'codex'),
-    ].map(root => win32.join(root, 'vendor', triple, 'bin', 'codex.exe')).find(exists);
+    // npm's default global prefix on Windows is %APPDATA%\npm (node.exe's folder only with nvm-style installs).
+    const prefixes = [win32.dirname(execPath), env.APPDATA && win32.join(env.APPDATA, 'npm')].filter(Boolean);
+    const found = prefixes.flatMap(prefix => {
+      const modules = win32.join(prefix, 'node_modules', '@openai');
+      return [
+        win32.join(modules, 'codex', 'node_modules', '@openai', `codex-win32-${plat}`),
+        win32.join(modules, `codex-win32-${plat}`),
+        win32.join(modules, 'codex'),
+      ];
+    }).map(root => win32.join(root, 'vendor', triple, 'bin', 'codex.exe')).find(exists);
     if (found) return found;
   } else {
     // win32: the extension-less `codex` next to node.exe is npm's POSIX shim,

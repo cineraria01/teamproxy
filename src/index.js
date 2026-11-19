@@ -44,7 +44,6 @@ import { formatBytes } from './system-metrics.js';
 import { SseFramer, sseErrorEvent, isEventStream } from './sse.js';
 import { runClaudeWithRecovery } from './claude-recovery.js';
 import { reauthenticateAccount } from './reauth.js';
-import { updateCommand } from './update.js';
 import {
   applySubscriptionCancellation,
   cancellationEndsAt,
@@ -114,7 +113,7 @@ import { isCursorLanePath } from './cursor-openai.js';
 import {
   BAD_SAVED_TOKEN, approveClaudeApiKey, claudeGlobalConfigPath, clientChildEnv, clientCommand, clientOf, remoteUseCommand, validToken,
 } from './remote-client.js';
-import { hasProcessTools, unverifiedServerHint } from './platform.js';
+import { hasProcessTools, serviceLifecycle, unverifiedServerHint, updateCommand } from './platform.js';
 import {
   SERVE_HEADERS, applyAccountAction, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
@@ -2474,8 +2473,19 @@ function exitWithUnverifiedServerHint(r, verb) {
   process.exit(1);
 }
 
+// A pool the platform runs as a service (src/platform.js: the Windows scheduled task) stops and restarts through
+// it, and the command ends there. Returns only when there is no such service.
+async function exitThroughService(verb) {
+  const isUp = async () => probeServer((await loadConfig())?.proxy?.port, 1000);
+  const failure = await serviceLifecycle(verb, { cli: cliName(), isUp });
+  if (failure === null) return;
+  if (failure) console.error(`[${cliName()}] ${failure}`);
+  process.exit(failure ? 1 : 0);
+}
+
 async function stopCommand() {
   if (refuseSelfDisruptiveLifecycleCommand('stop')) return;
+  await exitThroughService('stop');
   const r = await stopRunningServer();
   if (r.stopped) {
     console.log(`Stopped TeamClaude server (pid ${r.pid}, port ${r.port}).`);
@@ -2507,6 +2517,7 @@ async function stopCommand() {
 
 async function restartCommand() {
   if (refuseSelfDisruptiveLifecycleCommand('restart')) return;
+  await exitThroughService('restart');
   const r = await stopRunningServer();
   if (r.stopped) {
     console.log(`Stopped previous server (pid ${r.pid}).`);

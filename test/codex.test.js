@@ -218,6 +218,11 @@ test('resolveCodexCliBin prefers env override, then the node-sibling CLI, then P
       );
     }
     assert.equal(resolveCodexCliBin({ env: {}, execPath: 'C:\\nodejs\\node.exe', exists: () => true, platform: 'win32', arch }), nested);
+    // npm's default global prefix %APPDATA%\npm (node.exe in Program Files): found there too, after node's own folder
+    const npmGlobal = `C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-${plat}\\vendor\\${triple}\\bin\\codex.exe`;
+    const env = { APPDATA: 'C:\\Users\\u\\AppData\\Roaming' };
+    assert.equal(resolveCodexCliBin({ env, execPath: 'C:\\nodejs\\node.exe', exists: p => p === npmGlobal, platform: 'win32', arch }), npmGlobal);
+    assert.equal(resolveCodexCliBin({ env, execPath: 'C:\\nodejs\\node.exe', exists: () => true, platform: 'win32', arch }), nested);
   }
   // and TEAMCODEX_CODEX_BIN still wins on win32
   assert.equal(

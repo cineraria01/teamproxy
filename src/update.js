@@ -2,7 +2,8 @@
 // main (README "업데이트"). Steps per install: fetch → local-edit check → wait until
 // the pools it serves are idle → back up → replace src/ and package.json →
 // restart → verify, restoring the backup and restarting again when verification
-// fails. App-mode installs (~/.local/share/teamproxy-app) are left to the app.
+// fails. App-mode installs (~/.local/share/teamproxy-app) are left to the app. Windows uses
+// src/win32-update.js instead (src/platform.js picks), reusing the exported live-server helpers below.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -380,7 +381,7 @@ function prepareRepo(opts, say, warnings) {
 // ── live server ─────────────────────────────────────────────
 
 /** Active requests: the supervisor's own count (x-teamcodex-active-requests); account inflight only on servers without it. */
-async function liveStatus(p) {
+export async function liveStatus(p) {
   try {
     const res = await fetch(`http://127.0.0.1:${p.port}/teamclaude/status`, {
       headers: p.config.proxy?.apiKey ? { 'x-api-key': p.config.proxy.apiKey } : undefined,
@@ -429,7 +430,7 @@ async function drain(p, on) {
 }
 
 /** Idle, then fenced (new requests get 503 + retry-after while the 15 s lease lasts) with zero in flight. */
-async function quiesce(pools, deadline, pollMs) {
+export async function quiesce(pools, deadline, pollMs) {
   for (;;) {
     const idle = await waitIdle(pools, deadline, pollMs);
     if (!idle.ok) return idle;
@@ -447,7 +448,7 @@ async function quiesce(pools, deadline, pollMs) {
   }
 }
 
-async function probeModels(p) {
+export async function probeModels(p) {
   const probe = POOLS[p.pool].probe();
   try {
     const res = await fetch(`http://127.0.0.1:${p.port}${probe.path}`, {
@@ -460,7 +461,7 @@ async function probeModels(p) {
   }
 }
 
-function statusJson(p) {
+export function statusJson(p) {
   const env = { ...process.env, TEAMCLAUDE_CONFIG: p.configPath };
   delete env.TEAMCLAUDE_PROVIDER;
   delete env.TEAMCLAUDE_SESSION_SUPERVISED;
@@ -469,7 +470,7 @@ function statusJson(p) {
   try { return JSON.parse(last); } catch { return null; }
 }
 
-function accountSnapshot(config) {
+export function accountSnapshot(config) {
   return (config.accounts ?? []).map(a => [a.name, a.enabled !== false]);
 }
 
@@ -540,7 +541,7 @@ function diffMaps(from, to) {
 }
 
 /** Same digest as the supervisor's x-teamcodex-source-hash (index.js runtimeSourceHash). */
-function sourceHash(srcDir) {
+export function sourceHash(srcDir) {
   const digest = createHash('sha256');
   for (const name of readdirSync(srcDir).filter(n => n.endsWith('.js')).sort()) {
     digest.update(name).update('\0').update(readFileSync(join(srcDir, name))).update('\0');

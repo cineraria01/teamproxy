@@ -58,6 +58,10 @@ jobs:
       # and the win32 stop/restart guidance, natively.
       - name: Remote client tests
         run: node --test test/remote-client.test.js
+      # Windows installs (scripts/install-win.mjs) with a fake schtasks, the pool entry and task stop/restart,
+      # and update on a git clone (local repos only).
+      - name: Windows install tests
+        run: node --test test/install-win.test.js test/win32.test.js test/win32-update.test.js
       # Login cancel without SIGTERM (stdin line / EOF, not on a NUL stdin) and the sync route (no wait on quota);
       # the rest of the file needs sh.
       - name: App login and sync tests

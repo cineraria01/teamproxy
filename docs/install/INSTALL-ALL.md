@@ -4,6 +4,9 @@
 
 > https://raw.githubusercontent.com/cineraria01/teamproxy/main/docs/install/INSTALL-ALL.md 를 읽고 그 절차를 순서대로 수행해. 업스트림 저장소에서는 절대 설치하지 마.
 
+**Windows PC는 이 문서가 아니라 [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)** — 설치기 한 명령(`scripts/install-win.mjs`)으로
+같은 풀(래퍼 `team<풀>.cmd` + 작업 스케줄러 서버 + 설정)과 `update`·`restart`·`stop`을 맞춘다. 아래 절차는 macOS·Linux용이다.
+
 ---
 
 당신은 이 머신에 Claude·Codex·Antigravity(agy) 다계정 프록시와 상태라인 두 개를 설치한다(teamagy·teamgrok·teamcursor는 선택). **모든 소스는
@@ -672,6 +675,10 @@ teamclaude remote use --off    # 끄기 = 되돌리기 (설정의 client 칸을 
 
 ### 9-5. Windows — `teamclaude.cmd`와 Windows에서만 다른 것
 
+**Windows 설치는 [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md)의 설치기**(`scripts/install-win.mjs`)가 기본이다 — 원격 풀 모드도
+`--remote <주소> --token-file <파일>`로 같은 설치기가 한다. 아래는 그 전부터 있던 teamclaude 한 개짜리 손 설치(원격 풀용)이고,
+설치기는 이 손 설치의 `teamclaude.cmd` shim을 넘겨받는다(백업 `*.bak-install-<날짜>`).
+
 Windows 쪽은 따로 된 파일에만 있다: 래퍼 틀 `scripts/win32/teamclaude.cmd`, 진입점 `src/teamclaude-win32.js`, Windows 동작
 `src/win32.js`(공통 코드는 `src/platform.js` 한 곳에서 고른다). 맥·리눅스 sh 래퍼(§1-2)와 그 경로는 이 파일들을 쓰지 않는다.
 관리자 권한·PowerShell 실행 정책 변경이 필요 없다. Node 18+(`node`가 PATH에)와 Claude Code 네이티브 설치
@@ -697,7 +704,8 @@ teamclaude                    # Claude Code (원격 풀)
 - UTF-16 토큰 파일(`Set-Content -Encoding Unicode`)은 NUL이 남아 「제어 문자」로 거절된다 — ASCII/UTF-8로 다시 쓴다.
 - 갱신: `git -C "$env:USERPROFILE\.local\share\teamproxy" pull`. 되돌리기: `teamclaude remote use --off`, 그다음
   `%USERPROFILE%\.local\bin\teamclaude.cmd`와 저장소 폴더를 지운다. `~/.claude.json`에 넣은 키 승인(끝 20자)은 남아도 해가 없다.
-- Windows에서 **로컬 풀**을 돌릴 때 `teamclaude stop`·`restart`는 서버를 끄지 않는다(ps·lsof가 없어 프로세스 신원을 확인할 수
+- 설치기가 만든 작업 `team<풀>`이 있으면 `stop`·`restart`는 그 작업을 끝내고 다시 띄운다([INSTALL-WINDOWS §3](INSTALL-WINDOWS.md#3-다시-띄우기끄기갱신)).
+  작업 없이 Windows에서 **로컬 풀**을 돌릴 때 `teamclaude stop`·`restart`는 서버를 끄지 않는다(ps·lsof가 없어 프로세스 신원을 확인할 수
   없고, 확인 안 된 pid에는 신호를 보내지 않는다). 대신 `tasklist /FI "PID eq <pid>"`·`taskkill /PID <pid> /T /F`·`teamclaude server`
   순서를 찍고 종료 1로 끝낸다(`src/win32.js` `unverifiedServerHint`). 앱 모드(셀비)는 앱이 서버를 끄고 켠다([APP-INSTALL.md](APP-INSTALL.md#windows)).
 - 시험: `test/remote-client.test.js` — 진입점·인자 규칙·안내는 어느 OS에서나(`TEAMPROXY_APP_PLATFORM=win32`, `node --test` 안에서만),
