@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # teamproxy landing check — `hc-lane land main` runs it after the rebase and pushes only when it passes.
 # The full `npm test` is not the gate: 41~48 environment-bound failures exist on origin/main too. So:
-#   1. npx eslint src/
+#   1. npx eslint@10.15.0 src/
 #   2. node --test on what changed since `git merge-base HEAD origin/main`: changed test/*.test.js, plus
 #      test/<name>.test.js and test/<name>-*.test.js for each changed src/<name>.js
 #   3. python3 test/hud/test_*.py when src/hud/ or test/hud/ changed
@@ -12,7 +12,8 @@ base=$(git merge-base HEAD origin/main)
 clean=(env -u TEAMCLAUDE_SESSION_SUPERVISED -u TEAMCLAUDE_HUD -u TMUX -u TMUX_PANE)
 
 echo "[herdr-verify] eslint src/"
-npx --yes eslint src/
+# Pinned: eslint is no devDependency, and an unpinned npx would follow every new major (and need the network).
+npx --yes eslint@10.15.0 src/
 
 tests=()
 hud=0

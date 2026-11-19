@@ -2,9 +2,10 @@
 // against another machine's teamclaude pool through that machine's
 // `tailscale serve` address (`<pool> remote on` there), with the remote token as
 // the API key. The setting lives in this machine's teamclaude config as
-// `client: { url, token }` (written 0600 by config.js). Same node code on macOS,
-// Linux and Windows. Guide: docs/install/INSTALL-ALL.md §9-4. The token is never
-// printed, logged or put on a command line.
+// `client: { url, token }` (written 0600 by config.js). Platform-neutral: the same
+// code on macOS, Linux and Windows (Windows-only pieces are src/win32.js and
+// scripts/win32/). Guide: docs/install/INSTALL-ALL.md §9-4/§9-5. The token is
+// never printed, logged or put on a command line.
 import { randomBytes } from 'node:crypto';
 import { readFile, open, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -38,22 +39,10 @@ export function normalizeClientUrl(raw) {
   return url.origin;
 }
 
-/**
- * Windows `teamclaude.cmd` (and any wrapper setting TEAMCLAUDE_WRAPPER=1) follows the sh wrapper's rule:
- * no arguments or a Claude option opens Claude Code, `--` passes a Claude subcommand, any other word is a
- * proxy command. `-h`/`--help` stay the proxy's help, as in the sh wrapper.
- */
-export function wrapperArgs(argv) {
-  const first = argv[0];
-  if (first === '-h' || first === '--help') return argv;
-  if (first === undefined) return ['run', '--'];
-  if (first === '--') return ['run', ...argv];
-  if (first.startsWith('-')) return ['run', '--', ...argv];
-  return argv;
-}
-
+// Printable ASCII only (remote tokens are base64url): a control character (a NUL from a UTF-16 token file) would
+// make fetch/spawn throw an error that quotes the value.
 export function validToken(token) {
-  return typeof token === 'string' && token.length > 0 && token.length <= 4096 && !/\s/.test(token);
+  return typeof token === 'string' && /^[\x21-\x7e]{1,4096}$/.test(token);
 }
 
 /** The token from --token-file, else standard input (a terminal gets a prompt that does not echo). */
@@ -146,6 +135,8 @@ export async function approveClaudeApiKey(key, path) {
 
 export class RemoteError extends Error {}
 
+export const BAD_SAVED_TOKEN = '설정의 원격 토큰이 올바르지 않습니다(출력 가능한 ASCII가 아님). teamclaude remote use <주소>로 다시 넣으세요.';
+
 function failureLine(status, message) {
   if (status === 401) return '원격 토큰이 맞지 않습니다(401). 풀 기계의 `teamclaude remote token`으로 보고 `teamclaude remote use <주소>`로 다시 넣으세요.';
   if (status === 403) {
@@ -159,6 +150,7 @@ function failureLine(status, message) {
 
 /** One call to the remote surface. Throws RemoteError with a one-line Korean cause. */
 export async function remoteCall(client, method, path, body = undefined, { timeoutMs = 10_000, fetchImpl = fetch } = {}) {
+  if (!validToken(client.token)) throw new RemoteError(BAD_SAVED_TOKEN);
   let res;
   try {
     res = await fetchImpl(client.url + path, {
@@ -170,8 +162,9 @@ export async function remoteCall(client, method, path, body = undefined, { timeo
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
+    // Only the cause's code: a message may quote a header value (the token).
     const code = err?.name === 'TimeoutError' ? `${timeoutMs / 1000}초 안에 답이 없음`
-      : err?.cause?.code || err?.cause?.message || err?.message || 'unknown';
+      : err?.cause?.code || err?.code || err?.name || 'unknown';
     throw new RemoteError(`원격 풀에 못 닿습니다(${client.url}): ${code}`);
   }
   let data = null;
@@ -295,6 +288,7 @@ export async function clientCommand(command, argv, client, { out = console.log, 
   err(`teamclaude ${command ?? ''}`.trimEnd() + `: 이 기계는 원격 풀 클라이언트(${client.url})라 여기서 할 수 없습니다.`);
   err(`  여기서 되는 것: ${HERE}`);
   err('  계정 추가·로그인·제거·업데이트·서버 켜고 끄기는 풀 기계에서 하세요. 클라이언트 모드 끄기: teamclaude remote use --off');
+  err('  (이 기계에 로컬 서버가 있으면 먼저 remote use --off 한 뒤 다룹니다.)');
   return 1;
 }
 
@@ -316,6 +310,10 @@ export async function remoteUseCommand(argv, { config, configPath, update, out =
     return 0;
   }
   if (argv.includes('--token-file') && !tokenFile) { err('--token-file 뒤에 파일 경로를 주세요.'); return 1; }
+  if (positional.length > 1) {
+    err('주소 하나만 줍니다. 토큰은 명령줄에 넣지 않습니다(이미 쳤다면 셸 기록에 남았으니 풀 기계에서 remote token --rotate).');
+    return 1;
+  }
   let url;
   try { url = normalizeClientUrl(positional[0]); } catch (e) { err(e.message); return 1; }
   const accounts = Array.isArray(config?.accounts) ? config.accounts.length : 0;
@@ -325,7 +323,10 @@ export async function remoteUseCommand(argv, { config, configPath, update, out =
   }
   let token;
   try { token = await readToken({ tokenFile, stdin }); } catch (e) { err(`토큰을 못 읽었습니다: ${e.code || e.message}`); return 1; }
-  if (!validToken(token)) { err('토큰이 비었거나 공백이 들어 있습니다. 풀 기계의 `teamclaude remote token` 값을 그대로 넣으세요.'); return 1; }
+  if (!validToken(token)) {
+    err('토큰이 비었거나 공백·제어 문자가 들어 있습니다(토큰 파일은 UTF-8/ASCII로). 풀 기계의 `teamclaude remote token` 값을 그대로 넣으세요.');
+    return 1;
+  }
   const client = { url, token };
   if (!argv.includes('--no-check')) {
     try {

@@ -628,6 +628,8 @@ hc run --bg --no-parent --name teamproxy-hud -- \
 
 ### 9-4. 다른 기계의 풀 쓰기 — 클라이언트 모드 (`teamclaude remote use`, 맥·리눅스·Windows)
 
+Windows 설치(`teamclaude.cmd`)와 Windows에서만 다른 것은 §9-5.
+
 자기 계정 없이 풀 기계(예: 주 작업 맥)의 Claude 풀을 쓰는 기계. 같은 node 코드라 세 OS에서 똑같이 돈다.
 Claude Code는 API 키 모드로 `ANTHROPIC_BASE_URL=<풀 주소>`, `ANTHROPIC_API_KEY=<원격 토큰>`을 받는다(`ANTHROPIC_AUTH_TOKEN`·
 `CLAUDE_CODE_OAUTH_TOKEN`은 뺀다). 「이 API 키를 쓸까?」가 안 뜨게 키 끝 20자를 `~/.claude.json`
@@ -661,40 +663,42 @@ teamclaude remote use --off    # 끄기 = 되돌리기 (설정의 client 칸을 
 - 맥·리눅스 sh 래퍼(§1-2)는 그대로 쓴다. 하단 줄(Herdr 분할)은 읽을 로컬 서버가 없어 클라이언트 모드에서는 조용히 띄우지
   않는다(원격 표는 `teamclaude status`). 이 기계에 `statusline/`의 Claude 상태줄을 깔았으면 그 줄은 로컬 풀 기준이라 비어 보일 수 있다.
 
-**Windows** (관리자 권한·PowerShell 실행 정책 변경 필요 없음. Node 18+와 Claude Code 네이티브 설치 —
-`%USERPROFILE%\.local\bin\claude.exe` — 가 있어야 한다):
+- 손으로 넣어 둔 Claude Code `settings.json`의 `env.ANTHROPIC_BASE_URL`·`env.ANTHROPIC_API_KEY`가 있으면 그 값이 이 명령보다 이긴다.
+  클라이언트 모드로 옮길 때 그 두 칸을 지운다.
+- 시험: `test/remote-client.test.js`(가짜 원격 서버, 실제 외부 호출 없음).
+
+### 9-5. Windows — `teamclaude.cmd`와 Windows에서만 다른 것
+
+Windows 쪽은 따로 된 파일에만 있다: 래퍼 틀 `scripts/win32/teamclaude.cmd`, 진입점 `src/teamclaude-win32.js`, Windows 동작
+`src/win32.js`(공통 코드는 `src/platform.js` 한 곳에서 고른다). 맥·리눅스 sh 래퍼(§1-2)와 그 경로는 이 파일들을 쓰지 않는다.
+관리자 권한·PowerShell 실행 정책 변경이 필요 없다. Node 18+(`node`가 PATH에)와 Claude Code 네이티브 설치
+(`%USERPROFILE%\.local\bin\claude.exe`)가 있어야 한다.
 
 ```powershell
 git clone https://github.com/cineraria01/teamproxy.git "$env:USERPROFILE\.local\share\teamproxy"
-$pkg  = "$env:USERPROFILE\.local\share\teamproxy"
-$node = (Get-Command node.exe).Source
-$bin  = "$env:USERPROFILE\.local\bin"
-New-Item -ItemType Directory -Force $bin | Out-Null
-@"
-@echo off
-rem teamclaude (cineraria01/teamproxy). The argument rule is in node (TEAMCLAUDE_WRAPPER=1): no args or -options
-rem open Claude Code, -- passes a Claude subcommand, any other word is a teamclaude command.
-setlocal
-set "TEAMCLAUDE_CONFIG=%USERPROFILE%\.config\teamclaude.json"
-set "TEAMCLAUDE_WRAPPER=1"
-"$node" "$pkg\src\teamclaude.js" %*
-exit /b %ERRORLEVEL%
-"@ | Set-Content -Encoding Oem "$bin\teamclaude.cmd"
+# PATH에 이미 있는 %USERPROFILE%\.local\bin에 한 줄짜리 shim. 래퍼 본문은 저장소의 scripts\win32\teamclaude.cmd (git pull로 같이 갱신)
+'@call "%USERPROFILE%\.local\share\teamproxy\scripts\win32\teamclaude.cmd" %*' |
+  Set-Content -Encoding ascii "$env:USERPROFILE\.local\bin\teamclaude.cmd"
 where.exe teamclaude          # %USERPROFILE%\.local\bin\teamclaude.cmd 가 나와야 한다 (없으면 그 폴더를 PATH에)
+# 토큰 파일은 UTF-8/ASCII로 (메모장 기본값 그대로. PowerShell이면 Set-Content -Encoding ascii)
 teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456 --token-file "$env:USERPROFILE\token.txt"
 Remove-Item "$env:USERPROFILE\token.txt"
 teamclaude status
+teamclaude                    # Claude Code (원격 풀)
 ```
 
-- 래퍼 규칙은 sh 래퍼와 같다(`TEAMCLAUDE_WRAPPER=1`을 받은 `src/teamclaude.js`가 정한다): 인자 없음·`-`로 시작 → Claude Code,
-  `--` 뒤 → Claude 하위 명령, `-h`·`--help`와 그 밖의 말 → teamclaude 명령. 이 값은 Claude에게 넘어가지 않는다.
+- 인자 규칙은 sh 래퍼와 같다(`src/win32.js` `wrapperArgs`): 인자 없음·`-`로 시작 → Claude Code, `--` 뒤 → Claude 하위 명령,
+  `-h`·`--help`와 그 밖의 말 → teamclaude 명령. `.cmd`가 `TEAMCLAUDE_CONFIG=%USERPROFILE%\.config\teamclaude.json`을 고정한다.
+- sh 래퍼와 다른 점: 하단 줄 실행기가 없어 `--effort xhigh` 기본값·하단 줄이 붙지 않고, 중복 재개 가드(§1-2)도 없다.
+  Ctrl+C 뒤 cmd가 「일괄 작업을 끝내시겠습니까(Y/N)?」를 물을 수 있다(.cmd의 성질).
+- UTF-16 토큰 파일(`Set-Content -Encoding Unicode`)은 NUL이 남아 「제어 문자」로 거절된다 — ASCII/UTF-8로 다시 쓴다.
 - 갱신: `git -C "$env:USERPROFILE\.local\share\teamproxy" pull`. 되돌리기: `teamclaude remote use --off`, 그다음
-  `teamclaude.cmd`와 그 폴더를 지운다. `~/.claude.json`에 넣은 키 승인(끝 20자)은 남아도 해가 없다.
+  `%USERPROFILE%\.local\bin\teamclaude.cmd`와 저장소 폴더를 지운다. `~/.claude.json`에 넣은 키 승인(끝 20자)은 남아도 해가 없다.
 - Windows에서 **로컬 풀**을 돌릴 때 `teamclaude stop`·`restart`는 서버를 끄지 않는다(ps·lsof가 없어 프로세스 신원을 확인할 수
   없고, 확인 안 된 pid에는 신호를 보내지 않는다). 대신 `tasklist /FI "PID eq <pid>"`·`taskkill /PID <pid> /T /F`·`teamclaude server`
-  순서를 그대로 찍고 종료 1로 끝낸다. 앱 모드(셀비)는 앱이 서버를 끄고 켠다([APP-INSTALL.md](APP-INSTALL.md#windows)).
-- 시험: `test/remote-client.test.js`(가짜 원격 서버, Windows 분기는 `TEAMPROXY_APP_PLATFORM=win32`로 맥·리눅스에서도, CI는
-  `windows-latest`에서 그대로).
+  순서를 찍고 종료 1로 끝낸다(`src/win32.js` `unverifiedServerHint`). 앱 모드(셀비)는 앱이 서버를 끄고 켠다([APP-INSTALL.md](APP-INSTALL.md#windows)).
+- 시험: `test/remote-client.test.js` — 진입점·인자 규칙·안내는 어느 OS에서나(`TEAMPROXY_APP_PLATFORM=win32`, `node --test` 안에서만),
+  진짜 `.cmd`는 CI `windows-latest`에서 `cmd.exe`로 돈다.
 
 ## 하지 말 것
 

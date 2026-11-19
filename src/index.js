@@ -111,7 +111,10 @@ import {
   resolveCursorBin,
 } from './cursor.js';
 import { isCursorLanePath } from './cursor-openai.js';
-import { approveClaudeApiKey, claudeGlobalConfigPath, clientChildEnv, clientCommand, clientOf, remoteUseCommand } from './remote-client.js';
+import {
+  BAD_SAVED_TOKEN, approveClaudeApiKey, claudeGlobalConfigPath, clientChildEnv, clientCommand, clientOf, remoteUseCommand, validToken,
+} from './remote-client.js';
+import { hasProcessTools, unverifiedServerHint } from './platform.js';
 import {
   SERVE_HEADERS, applyAccountAction, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
@@ -125,9 +128,6 @@ const LIFECYCLE_ID_HEADER = 'x-teamcodex-lifecycle-id';
 const DEFAULT_MAX_BUFFERED_REQUEST_BYTES = 256 * 1024 * 1024;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_MANAGED_CLAUDE_MODEL = 'claude-sonnet-5';
-// Tests only (node --test, like scripts/install-app.mjs): TEAMPROXY_APP_PLATFORM=win32 takes the Windows
-// process-lifecycle branch (no ps/lsof) on any OS. Ignored outside the test runner.
-const PLATFORM = (process.env.NODE_TEST_CONTEXT && process.env.TEAMPROXY_APP_PLATFORM) || process.platform;
 function runtimeSourceHash(entryPath) {
   const sourceDir = dirname(realpathSync(entryPath));
   const digest = createHash('sha256');
@@ -2110,7 +2110,7 @@ function isPidAlive(pid) {
 }
 
 function readProcessIdentity(pid) {
-  if (!Number.isInteger(pid) || pid <= 0 || PLATFORM === 'win32') return null;
+  if (!Number.isInteger(pid) || pid <= 0 || !hasProcessTools) return null;
   try {
     const result = spawnSync(
       'ps',
@@ -2249,7 +2249,7 @@ function configuredStatusProbeTimeoutMs(fallbackMs = 1500) {
 
 /** Best-effort: the pid listening on a TCP port (macOS/Linux via lsof). */
 function lsofPid(port, candidatePid = null) {
-  if (PLATFORM === 'win32') return null;
+  if (!hasProcessTools) return null;
   try {
     const args = ['-b', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'];
     if (Number.isSafeInteger(candidatePid) && candidatePid > 0) {
@@ -2466,18 +2466,12 @@ function refuseSelfDisruptiveLifecycleCommand(command) {
   process.exit(1);
 }
 
-// Windows has no ps/lsof, so a running server's identity is never verified and it is never signalled (a pid
-// taken on faith could be a recycled one). Say exactly what to do instead. true = printed.
-function windowsLifecycleHint(r, verb) {
-  if (PLATFORM !== 'win32' || (r.reason !== 'unverified-lifecycle' && r.reason !== 'no-pid')) return false;
-  const cli = cliName();
-  console.error(`[${cli}] Windows에서는 서버 프로세스의 신원을 확인할 수 없어(ps·lsof 없음) ${verb === 'stop' ? '끄지' : '다시 띄우지'} 않았습니다.`);
-  console.error('  앱 모드(셀비)라면 앱이 서버를 끄고 켭니다 — 앱에서 하세요.');
-  console.error(r.pid
-    ? `  손으로: tasklist /FI "PID eq ${r.pid}" 로 node.exe인지 본 뒤  taskkill /PID ${r.pid} /T /F`
-    : `  손으로: netstat -ano | findstr :${r.port} 로 pid를 찾아  taskkill /PID <pid> /T /F`);
-  console.error(`  그다음 다시 띄우기: ${cli} server   (원격 풀만 쓰는 기계라면: ${cli} remote use <주소>)`);
-  return true;
+// A platform that cannot verify the server (src/platform.js: Windows) says what to do instead; exits 1 then.
+function exitWithUnverifiedServerHint(r, verb) {
+  const lines = unverifiedServerHint(r, verb, cliName());
+  if (!lines) return;
+  for (const line of lines) console.error(line);
+  process.exit(1);
 }
 
 async function stopCommand() {
@@ -2487,7 +2481,7 @@ async function stopCommand() {
     console.log(`Stopped TeamClaude server (pid ${r.pid}, port ${r.port}).`);
     return;
   }
-  if (windowsLifecycleHint(r, 'stop')) process.exit(1);
+  exitWithUnverifiedServerHint(r, 'stop');
   switch (r.reason) {
     case 'not-running':
       console.log('No TeamClaude server is running.');
@@ -2517,7 +2511,7 @@ async function restartCommand() {
   if (r.stopped) {
     console.log(`Stopped previous server (pid ${r.pid}).`);
   } else if (r.reason !== 'not-running') {
-    if (windowsLifecycleHint(r, 'restart')) process.exit(1);
+    exitWithUnverifiedServerHint(r, 'restart');
     const reason = r.reason === 'unverified-lifecycle'
       ? 'lifecycle identity unverified'
       : r.reason;
@@ -3323,6 +3317,11 @@ async function clientRunCommand(client) {
       '[TeamClaude] Refusing nested supervised Claude launch: TEAMCLAUDE_CLAUDE_BIN must point to the native Claude vendor binary.',
     );
     process.exit(75);
+  }
+  // spawn would throw an error quoting the env value (the token) for a control character in it.
+  if (!validToken(client.token)) {
+    console.error(BAD_SAVED_TOKEN);
+    process.exit(1);
   }
   const clientArgs = args.slice(1);
   if (clientArgs[0] === '--') clientArgs.shift();

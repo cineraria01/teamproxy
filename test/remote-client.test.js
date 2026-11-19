@@ -13,11 +13,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  approveClaudeApiKey, clientChildEnv, clientOf, formatRemoteStatus, normalizeClientUrl, resolveAccount, wrapperArgs,
+  approveClaudeApiKey, clientChildEnv, clientOf, formatRemoteStatus, normalizeClientUrl, resolveAccount,
 } from '../src/remote-client.js';
+import { unverifiedServerHint, wrapperArgs } from '../src/win32.js';
 
 const index = fileURLToPath(new URL('../src/index.js', import.meta.url));
 const entry = fileURLToPath(new URL('../src/teamclaude.js', import.meta.url));
+const winEntry = fileURLToPath(new URL('../src/teamclaude-win32.js', import.meta.url));
+const winCmd = fileURLToPath(new URL('../scripts/win32/teamclaude.cmd', import.meta.url));
 const TOKEN = 'rt-0123456789abcdefghijklmnopqrstuvwxyzABCD';
 const WIN = process.platform === 'win32';
 
@@ -112,6 +115,41 @@ test('wrapperArgs: the sh wrapper rule (no args / -… → Claude, -- → subcom
   assert.deepEqual(wrapperArgs(['status']), ['status']);
   assert.deepEqual(wrapperArgs(['--help']), ['--help']);
   assert.deepEqual(wrapperArgs(['-h']), ['-h']);
+});
+
+test('win32 unverifiedServerHint: only for an unverified/pid-less server, names the pid or the port', () => {
+  assert.equal(unverifiedServerHint({ reason: 'not-running' }, 'stop', 'teamclaude'), null);
+  assert.equal(unverifiedServerHint({ reason: 'eperm', pid: 5 }, 'stop', 'teamclaude'), null);
+  assert.match(unverifiedServerHint({ reason: 'unverified-lifecycle', pid: 42 }, 'stop', 'teamclaude').join('\n'), /taskkill \/PID 42 \/T \/F/);
+  const noPid = unverifiedServerHint({ reason: 'no-pid', port: 3456 }, 'restart', 'teamclaude').join('\n');
+  assert.match(noPid, /다시 띄우지 않았습니다/);
+  assert.match(noPid, /findstr :3456/);
+});
+
+test('scripts/win32/teamclaude.cmd: runs the Windows entry from its own checkout with the Claude config', async () => {
+  const text = await readFile(winCmd, 'utf8');
+  assert.match(text, /node "%~dp0\.\.\\\.\.\\src\\teamclaude-win32\.js" %\*/);
+  assert.match(text, /set "TEAMCLAUDE_CONFIG=%USERPROFILE%\\\.config\\teamclaude\.json"/);
+  assert.match(text, /^setlocal/m);
+  assert.match(text, /exit \/b %ERRORLEVEL%/);
+});
+
+test('teamclaude.cmd on Windows: status reaches the remote pool through the real .cmd', { skip: !WIN && 'cmd.exe only' }, async () => {
+  const remote = await fakeRemote();
+  const box = await sandbox();
+  try {
+    await mkdir(join(box.home, '.config'), { recursive: true });
+    await writeFile(join(box.home, '.config', 'teamclaude.json'), JSON.stringify({ accounts: [], client: { url: remote.url, token: TOKEN } }));
+    const r = await new Promise(resolve => execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${winCmd}" status`],
+      { env: { ...box.env, TEAMCLAUDE_CONFIG: '' }, encoding: 'utf8', timeout: 20_000, windowsVerbatimArguments: true },
+      (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })));
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /claude-main/);
+    noToken(r, 'teamclaude.cmd status');
+  } finally {
+    await remote.close();
+    await box.cleanup();
+  }
 });
 
 test('clientOf / clientChildEnv: API-key mode, local OAuth dropped', () => {
@@ -233,7 +271,20 @@ test('remote use refuses a config with local accounts, a non-Claude pool, and an
     const plain = await cli(['remote', 'use', 'http://pool.example.ts.net:8456'], empty.env, { input: TOKEN });
     assert.equal(plain.code, 1);
     assert.match(plain.stderr, /https:\/\//);
-    for (const r of [local, codex, down]) noToken(r, 'refusal');
+    // A UTF-16 token file (Windows Set-Content -Encoding Unicode) leaves NULs: refused before fetch could quote it.
+    const utf16 = join(empty.home, 'token-utf16.txt');
+    await writeFile(utf16, Buffer.from(TOKEN, 'utf16le'));
+    const nul = await cli(['remote', 'use', codexPool.url, '--token-file', utf16], empty.env);
+    assert.equal(nul.code, 1);
+    assert.match(nul.stderr, /제어 문자/);
+    const spaced = TOKEN.split('').join('\u0000');
+    assert.ok(!nul.stderr.includes(spaced) && !nul.stdout.includes(spaced));
+    // A token typed on the command line is refused (and the user is told it is in the shell history).
+    const typed = await cli(['remote', 'use', codexPool.url, TOKEN], empty.env, { input: TOKEN });
+    assert.equal(typed.code, 1);
+    assert.match(typed.stderr, /명령줄에 넣지 않습니다/);
+    for (const r of [local, codex, down, nul]) noToken(r, 'refusal');
+    assert.equal(codexPool.seen.length, 1, 'only the codex-pool check reached the remote');
   } finally {
     await codexPool.close();
     await withAccounts.cleanup();
@@ -338,8 +389,7 @@ async function fakeClaude(dir) {
   const out = join(dir, 'claude-call.json');
   await writeFile(bin, `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({ argv: process.argv.slice(2),
     base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, auth: process.env.ANTHROPIC_AUTH_TOKEN ?? null,
-    oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null, supervised: process.env.TEAMCLAUDE_SESSION_SUPERVISED,
-    wrapper: process.env.TEAMCLAUDE_WRAPPER ?? null }));\nprocess.exit(7);\n`);
+    oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null, supervised: process.env.TEAMCLAUDE_SESSION_SUPERVISED }));\nprocess.exit(7);\n`);
   await chmod(bin, 0o755);
   return { bin, read: async () => JSON.parse(await readFile(out, 'utf8')) };
 }
@@ -377,31 +427,42 @@ test('client mode run: Claude Code gets the remote URL and token, yolo, an appro
 
     const nested = await cli(['run'], { ...env, TEAMCLAUDE_SESSION_SUPERVISED: '1' });
     assert.equal(nested.code, 75);
+    // A hand-edited token with a control character: one line, no spawn error quoting the value.
+    const broken = `${TOKEN}\u0000x`;
+    await writeFile(box.configPath, JSON.stringify({ accounts: [], client: { url: 'https://pool.example.ts.net:8456', token: broken } }));
+    for (const cmd of [['run'], ['status']]) {
+      const bad = await cli(cmd, env);
+      assert.equal(bad.code, 1, cmd[0]);
+      assert.match(bad.stderr, /원격 토큰이 올바르지 않습니다/);
+      noToken(bad, `broken token ${cmd[0]}`);
+    }
     await assert.rejects(stat(join(box.home, 'teamclaude.server.json')));
   } finally {
     await box.cleanup();
   }
 });
 
-test('TEAMCLAUDE_WRAPPER=1 (teamclaude.cmd): no args and Claude flags open Claude, -- a subcommand, words stay proxy commands', { skip: WIN }, async () => {
+test('Windows entry (teamclaude-win32.js): no args and Claude flags open Claude, -- a subcommand, words stay proxy commands', { skip: WIN }, async () => {
   const remote = await fakeRemote();
   const box = await sandbox();
   try {
     await writeFile(box.configPath, JSON.stringify({ accounts: [], client: { url: remote.url, token: TOKEN } }));
     const claude = await fakeClaude(box.home);
-    const env = { ...box.env, TEAMCLAUDE_CLAUDE_BIN: claude.bin, TEAMCLAUDE_WRAPPER: '1' };
-    assert.equal((await cli([], env)).code, 7);
-    let call = await claude.read();
-    assert.deepEqual(call.argv, ['--dangerously-skip-permissions']);
-    assert.equal(call.wrapper, null);
-    assert.equal((await cli(['-p', 'x'], env)).code, 7);
+    const env = { ...box.env, TEAMCLAUDE_CLAUDE_BIN: claude.bin };
+    const win = argv => cli(argv, env, { script: winEntry });
+    assert.equal((await win([])).code, 7);
+    assert.deepEqual((await claude.read()).argv, ['--dangerously-skip-permissions']);
+    assert.equal((await win(['-p', 'x'])).code, 7);
     assert.deepEqual((await claude.read()).argv, ['--dangerously-skip-permissions', '-p', 'x']);
-    assert.equal((await cli(['--', 'doctor'], env)).code, 7);
-    call = await claude.read();
-    assert.deepEqual(call.argv, ['doctor']);
-    const status = await cli(['status'], env);
+    assert.equal((await win(['--', 'doctor'])).code, 7);
+    assert.deepEqual((await claude.read()).argv, ['doctor']);
+    const status = await win(['status']);
     assert.equal(status.code, 0);
     assert.match(status.stdout, /claude-main/);
+    // The common entry keeps its own meaning: no args is still a (here refused) proxy command, not Claude.
+    const plain = await cli([], env);
+    assert.equal(plain.code, 1);
+    assert.match(plain.stderr, /풀 기계/);
   } finally {
     await remote.close();
     await box.cleanup();

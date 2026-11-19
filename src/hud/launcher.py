@@ -44,7 +44,9 @@ HC_STARTED = "TEAMPROXY_HUD_HC_STARTED"
 
 def remote_client():
     """The Claude pool config names a remote pool (`client.url`, written by `teamclaude remote use`)."""
-    path = os.environ.get("TEAMCLAUDE_CONFIG") or str(Path.home() / ".config/teamclaude.json")
+    # The same file `teamclaude` reads (src/config.js getConfigPath).
+    path = os.environ.get("TEAMCLAUDE_CONFIG") or str(
+        Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "teamclaude.json")
     try:
         client = json.loads(Path(path).read_text()).get("client") or {}
     except (OSError, ValueError, AttributeError):

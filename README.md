@@ -319,8 +319,8 @@ hc kill teamclaude-proxy                    # 재시작(launchd가 다시 띄운
 자기 계정이 없는 기계(맥·리눅스·Windows)는 풀 기계의 Claude 풀을 원격으로 쓴다: 풀 기계에서 `teamclaude remote on`,
 쓰는 기계에서 `teamclaude remote use https://<풀 기계>.<tailnet>.ts.net:8456 --token-file <토큰 파일>`(토큰은 표준 입력도 됨,
 화면에 안 찍힘). 그 뒤 `teamclaude`·`-p`·`--`는 원격 풀로 Claude Code를 띄우고, `status`·`reload`·`enable`·`disable`·`priority`는
-원격 풀 전체에 적용되며, `restart`는 원격 reload로 대신한다. 끄기 `teamclaude remote use --off`. Windows는 `teamclaude.cmd`
-래퍼를 쓴다. 자세히: [INSTALL-ALL §9-4](docs/install/INSTALL-ALL.md#9-4-다른-기계의-풀-쓰기--클라이언트-모드-teamclaude-remote-use-맥리눅스windows).
+원격 풀 전체에 적용되며, `restart`는 원격 reload로 대신한다. 끄기 `teamclaude remote use --off`. 자세히: INSTALL-ALL §9-4.
+Windows는 따로 된 래퍼 `scripts/win32/teamclaude.cmd`를 쓴다(§9-5. Windows 코드는 `src/win32.js`·`src/teamclaude-win32.js`에만).
 
 ### 업데이트
 
@@ -467,7 +467,7 @@ npm run lint                                           # eslint
 bash .claude/herdr-verify.sh                           # 착지 검사(hc-lane land가 부름): eslint src/ + 기준 이후 바뀐 것의 시험만
 ```
 
-`.claude/herdr-verify.sh`는 `npx eslint src/`, `git merge-base HEAD origin/main` 이후 바뀐 `test/*.test.js`와 바뀐 `src/<이름>.js`의
+`.claude/herdr-verify.sh`는 `npx eslint@10.15.0 src/`, `git merge-base HEAD origin/main` 이후 바뀐 `test/*.test.js`와 바뀐 `src/<이름>.js`의
 `test/<이름>.test.js`·`test/<이름>-*.test.js`, `src/hud/`·`test/hud/`가 바뀌었으면 `test/hud/test_*.py`를 돌린다(teamclaude 세션이
 물려준 변수는 빼고). 전체 `npm test`는 환경 탓 실패가 origin/main에도 있어 착지 관문으로 쓰지 않는다.
 
