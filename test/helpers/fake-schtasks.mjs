@@ -1,6 +1,7 @@
 // A stand-in for schtasks.exe (src/win32.js runs it with node when TEAMPROXY_WIN_SCHTASKS points here, under
 // node --test only). Tasks are files <FAKE_SCHTASKS_DIR>/tasks/<name>.xml; every call is appended to calls.log.
-// FAKE_SCHTASKS_DENY=1 makes /Create fail like a missing right does.
+// FAKE_SCHTASKS_DENY=1 makes /Create fail like a missing right does; FAKE_SCHTASKS_MAXCOUNT=n refuses a task XML whose
+// RestartOnFailure Count is above n.
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -15,6 +16,12 @@ if (verb === '/Query') {
   if (args.includes('/XML')) process.stdout.write(readFileSync(file));
 } else if (verb === '/Create') {
   if (process.env.FAKE_SCHTASKS_DENY === '1') { console.error('ERROR: Access is denied.'); process.exit(1); }
+  const xml = readFileSync(args[args.indexOf('/XML') + 1]).toString('utf16le');
+  const count = Number(xml.match(/<Count>(\d+)<\/Count>/)?.[1]);
+  if (process.env.FAKE_SCHTASKS_MAXCOUNT && count > Number(process.env.FAKE_SCHTASKS_MAXCOUNT)) {
+    console.error('ERROR: The task XML contains a value which is incorrectly formatted or out of range.');
+    process.exit(1);
+  }
   mkdirSync(join(dir, 'tasks'), { recursive: true });
   copyFileSync(args[args.indexOf('/XML') + 1], file);
   console.log(`SUCCESS: The scheduled task "${name}" has successfully been created.`);

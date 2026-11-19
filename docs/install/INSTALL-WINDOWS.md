@@ -8,7 +8,8 @@ launchd·systemd는 이 파일들을 쓰지 않는다. 셀비 앱 모드(앱이 
 
 ## 0. 전제
 
-- Windows 10/11, 관리자 권한은 보통 필요 없다(작업 만들기가 「액세스가 거부되었습니다」로 막히면 관리자 PowerShell에서 설치기를 한 번).
+- Windows 10/11, 관리자 권한은 보통 필요 없다. 작업 만들기가 「액세스가 거부되었습니다」로 막히면, **같은 사용자**가 관리자 그룹일 때만
+  「관리자로 실행」한 PowerShell에서 설치기를 한 번 다시 돌린다(다른 관리자 계정으로 돌리면 래퍼·설정·작업이 그 계정 프로필에 깔린다).
 - **Node 18+**(`winget install OpenJS.NodeJS.LTS`)와 **Git**(`winget install Git.Git`)이 PATH에. 설치기를 돌린 그 `node.exe`의 경로가
   래퍼·서버에 박힌다 — Node를 다른 곳으로 옮기면 설치기를 다시 돌린다.
 - 쓸 CLI는 먼저 깔고 한 번 로그인해 둔다: Claude Code 네이티브(`irm https://claude.ai/install.ps1 | iex` → `%USERPROFILE%\.local\bin\claude.exe`),
@@ -39,7 +40,11 @@ node "$env:USERPROFILE\src\teamproxy\scripts\install-win.mjs" --pools all      #
 | 설정 | `%USERPROFILE%\.config\team<풀>.json` | **없을 때만** 만든다: `proxy.host` `127.0.0.1`(이 PC 밖에 안 열림), `allowNoAccounts`(계정 넣기 전에도 서버가 떠 있음). 있던 설정·계정은 손대지 않는다(host가 루프백이 아니면 「주의」만) |
 
 설치기는 서버가 안 떠 있는 풀의 작업을 바로 한 번 띄운다(`--no-start`면 안 띄움 — 다음 로그온 때 뜬다). 이미 그 포트에서 서버가
-응답하면(손 설치·전 작업) 그대로 두고 「새 작업으로 바꾸려면 `team<풀> restart`」를 알린다.
+응답하면(손 설치·전 작업) 그대로 둔다 — 그 서버가 작업 밖(콘솔 창 등)에서 뜬 것이면 그 창에서 끈 뒤 `schtasks /Run /TN team<풀>`
+(§5). 작업 `team<풀>`이 있으면 `team<풀>`(run)이 서버를 자동으로 띄울 때도 그 작업으로 띄운다(작업 밖 서버가 생기지 않게).
+설정이 원격 풀 모드(`client`)인 teamclaude는 래퍼만 바꾸고 서버·작업을 만들지 않는다. 읽을 수 없는 설정(깨진 JSON·BOM)은 아무것도
+바꾸지 않고 멈춘다. PATH에서 다른 `team<풀>`(예: 옛 npm 전역 `%APPDATA%\npm\teamcodex.cmd`)이 먼저 잡히면 「주의」로 알린다.
+작업의 「실패 시 다시」 9999번을 이 Windows가 받지 않으면 255번으로 만들고 알린다.
 `%USERPROFILE%\.local\bin`이 PATH에 없으면 넣는 명령을 알려 준다(Claude Code 네이티브 설치가 보통 넣어 둔다).
 
 ### 1-1. 래퍼 규칙 (맥 sh 래퍼와 같은 뜻)
@@ -63,11 +68,14 @@ Get-Content "$env:LOCALAPPDATA\teamproxy\logs\teamcodex.log" -Tail 50
 
 ## 3. 다시 띄우기·끄기·갱신
 
-- `team<풀> restart` = 작업 `team<풀>`을 끝내고(작업 스케줄러가 그 작업이 띄운 프로세스 트리를 끝낸다) 포트가 비면 다시 띄워
+- `team<풀> restart` = 요청 0과 drain을 최대 15초 기다린 뒤(넘기면 「진행 중 요청 N개가 끊깁니다」) 작업 `team<풀>`을 끝내고
+  (작업 스케줄러가 그 작업이 띄운 프로세스 트리를 강제로 끝낸다 — 맥의 SIGTERM과 달리 서버의 종료 처리가 돌지 않아 1분마다 쓰는
+  quota 기록의 마지막 1분이 빠질 수 있다) 포트가 비면 다시 띄워
   응답할 때까지(최대 120초) 기다린다. `team<풀> stop` = 끝내기만(다음 로그온·`restart`·`schtasks /Run /TN team<풀>` 때 다시 뜬다).
   작업을 끝내도 서버가 계속 응답하면(예: `team<풀> run`이 작업 밖에서 자동으로 띄운 서버) pid에 신호를 보내지 않고 손 절차를 알린 뒤 종료 1.
   작업이 없는 기계(앱 모드·옛 손 설치)는 전처럼 안내만 한다([INSTALL-ALL §9-5](INSTALL-ALL.md#9-5-windows--teamclaudecmd와-windows에서만-다른-것)).
-- `team<풀> update` — 어느 풀에서 불러도 같다(클론 하나를 다섯 풀이 같이 쓴다. `--all`도 같은 뜻):
+- `team<풀> update` — 로컬 풀이면 어느 풀에서 불러도 같다(클론 하나를 다섯 풀이 같이 쓴다. `--all`도 같은 뜻. 원격 풀 모드의
+  teamclaude는 update를 받지 않으니 §4의 git pull):
   1. 클론이 깨끗하고(추적 파일 수정 없음) `main`에 있어야 한다. 아니면 아무것도 바꾸지 않고 멈춘다(`local_changes`·`not_on_branch`).
   2. `git fetch` 뒤 `origin/main`이 같으면 「이미 최신」(단 `--no-restart` 뒤 옛 코드로 도는 서버는 다시 띄운다). 갈라졌으면 멈춘다(`diverged`).
   3. 작업이 있고 서버가 떠 있는 풀마다 요청 0과 drain을 기다린다(맥 `update`와 같은 순서, `--wait` 기본 600초). 넘기면 아무것도 바꾸지 않는다.
@@ -92,12 +100,20 @@ teamclaude 래퍼만 만들고 작업·서버는 만들지 않은 채 `teamclaud
 `--token-file`이 없으면 붙여 넣기를 묻는다. 연결 전에 저장만 하려면 `--no-check`). `--pools codex,…`를 같이 주면 그 풀들은 로컬로 깐다.
 손으로 만든 로컬 teamclaude 작업이 남아 있으면 지우는 명령을 알려 준다. 끄기: `teamclaude remote use --off`.
 
+갱신: 원격 풀 모드의 teamclaude는 `update`를 받지 않는다(클라이언트 모드는 풀 관리만 원격으로 보낸다). 이 PC에 로컬 풀이 하나도
+없으면 다시 띄울 서버가 없으니 클론만 당긴다: `git -C "$env:USERPROFILE\src\teamproxy" pull --ff-only`. 로컬 풀(`--pools codex` 등)도
+깔았으면 `teamcodex update`가 같은 클론을 갱신한다.
+
 ## 5. 손 설치를 넘겨받기
 
 같은 이름(래퍼 `team<풀>.cmd`, `team<풀>-server.cmd/.vbs`, 작업 `team<풀>`)이 이미 있으면 중복을 만들지 않고 그 자리를 넘겨받는다:
 내용이 다른 파일은 `<파일>.bak-install-<YYYYMMDD-HHMMSS>`로 남긴 뒤 쓰고, 작업은 기존 XML을
-`%LOCALAPPDATA%\teamproxy\team<풀>.task.bak-install-<…>.xml`로 남긴 뒤 바꾼다. 설정 파일은 그대로다. 돌고 있는 서버는 끄지 않는다 —
-새 작업으로 옮기려면 넘겨받은 뒤 `team<풀> restart`. 옛 손 설치의 한 줄 shim(`@call …\scripts\win32\teamclaude.cmd`)도 같은 이름이라 바뀐다.
+`%LOCALAPPDATA%\teamproxy\team<풀>.task.bak-install-<…>.xml`(UTF-16, `schtasks /Create /XML`로 그대로 되살림)로 남긴 뒤 바꾼다.
+설정 파일은 그대로다. 돌고 있는 서버는 끄지 않는다 — 새 작업으로 옮기려면:
+- 그 서버를 손 설치 **작업**이 띄웠으면(같은 이름 작업) `team<풀> restart`가 그 작업을 끝내고 새 작업으로 띄운다.
+- 콘솔 창·다른 방법으로 띄웠으면 그 창에서 끄거나(`Ctrl+C`), `tasklist /FI "IMAGENAME eq node.exe"`·`netstat -ano | findstr :<포트>`로
+  pid를 확인해 `taskkill /PID <pid> /T /F` 한 뒤 `schtasks /Run /TN team<풀>`. (`restart`는 작업이 띄우지 않은 서버를 끄지 않고 이 안내를 낸다.)
+옛 손 설치의 한 줄 shim(`@call …\scripts\win32\teamclaude.cmd`)도 같은 이름이라 바뀐다.
 
 ## 6. 되돌리기·지우기
 

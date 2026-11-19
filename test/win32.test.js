@@ -8,7 +8,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { codexExecConfigError, taskLifecycle } from '../src/win32.js';
+import { codexExecConfigError, decodeSchtasksOutput, taskLifecycle, taskStart } from '../src/win32.js';
 
 const ENTRY = fileURLToPath(new URL('../src/teamproxy-win32.js', import.meta.url));
 const FAKE = fileURLToPath(new URL('./helpers/fake-schtasks.mjs', import.meta.url));
@@ -120,4 +120,26 @@ test('taskLifecycle: no task → null; restart = End, wait down, Run, wait up; f
 
   s = fakeRun({ startsServer: false });
   assert.match(await taskLifecycle('restart', opts(s)), /응답하지 않습니다.*teamcodex\.log/);
+
+  // /End is hard: the drain runs first, and a busy pool is said to be cut, not waited on forever.
+  s = fakeRun();
+  const order = [];
+  const said = [];
+  const busy = async () => { order.push(s.calls.length); return { ok: false, active: 2 }; };
+  assert.equal(await taskLifecycle('stop', { ...opts(s), quiesce: busy, say: line => said.push(line) }), '');
+  assert.deepEqual(order, [1], 'quiesce ran after /Query, before /End');
+  assert.match(said[0], /진행 중 요청 2개가 끊깁니다/);
+});
+
+test('taskStart: /Run only for an existing task; decodeSchtasksOutput reads UTF-16, UTF-8 and CP949', () => {
+  assert.equal(taskStart('teamgrok', fakeRun({ task: false }).run), false);
+  const s = fakeRun({ up: false });
+  assert.equal(taskStart('teamgrok', s.run), true);
+  assert.deepEqual(s.calls, ['/Query', '/Run']);
+
+  const xml = '<UserId>PC\\홍길동</UserId>';
+  assert.equal(decodeSchtasksOutput(Buffer.from(`﻿${xml}`, 'utf16le')), xml);
+  assert.equal(decodeSchtasksOutput(Buffer.from(xml, 'utf8')), xml);
+  const cp949 = Buffer.from([...Buffer.from('<UserId>PC\\'), 0xc8, 0xab, 0xb1, 0xe6, 0xb5, 0xbf, ...Buffer.from('</UserId>')]);
+  assert.equal(decodeSchtasksOutput(cp949), xml);
 });

@@ -23,5 +23,8 @@ export const unverifiedServerHint = WIN32 ? win32.unverifiedServerHint : () => n
  */
 export const serviceLifecycle = WIN32 ? win32.taskLifecycle : async () => null;
 
+/** Start the pool's server through that service (true), or false: spawn it the usual way (macOS/Linux: always). */
+export const serviceStart = WIN32 ? cli => win32.taskStart(cli) : () => false;
+
 /** `<pool> update`: macOS/Linux replace an npm-style install (src/update.js), Windows pulls its git clone. */
 export const updateCommand = WIN32 ? win32UpdateCommand : unixUpdateCommand;

@@ -113,7 +113,8 @@ import { isCursorLanePath } from './cursor-openai.js';
 import {
   BAD_SAVED_TOKEN, approveClaudeApiKey, claudeGlobalConfigPath, clientChildEnv, clientCommand, clientOf, remoteUseCommand, validToken,
 } from './remote-client.js';
-import { hasProcessTools, serviceLifecycle, unverifiedServerHint, updateCommand } from './platform.js';
+import { hasProcessTools, serviceLifecycle, serviceStart, unverifiedServerHint, updateCommand } from './platform.js';
+import { quiesce } from './update.js';
 import {
   SERVE_HEADERS, applyAccountAction, failureDelayMs, isCrossSite, isLoopbackHost, isServeRequest, isTeamproxyPath, newRemoteToken, parsePriority, presentedKeys,
   remotePort, remoteVerdict, selfFromStatus, serveArgs, serveState, tailscaleBin, tokenMatches,
@@ -2340,17 +2341,21 @@ async function ensureProxyRunning(config, maxWaitMs = 15_000, serverArgs = ['ser
   if (running) return running;
 
   console.error('[TeamClaude] Proxy is not running; starting it automatically.');
-  const daemonEnv = { ...process.env };
-  delete daemonEnv[SUPERVISED_WORKER_ENV];
-  delete daemonEnv[SUPERVISOR_PID_ENV];
   let launchError = null;
-  const daemon = spawn(process.execPath, [process.argv[1], ...serverArgs], {
-    detached: true,
-    env: daemonEnv,
-    stdio: 'ignore',
-  });
-  daemon.once('error', err => { launchError = err; });
-  daemon.unref();
+  let daemon = null;
+  // A pool the platform runs as a service (src/platform.js: the Windows scheduled task) is started through it.
+  if (!serviceStart(cliName(config))) {
+    const daemonEnv = { ...process.env };
+    delete daemonEnv[SUPERVISED_WORKER_ENV];
+    delete daemonEnv[SUPERVISOR_PID_ENV];
+    daemon = spawn(process.execPath, [process.argv[1], ...serverArgs], {
+      detached: true,
+      env: daemonEnv,
+      stdio: 'ignore',
+    });
+    daemon.once('error', err => { launchError = err; });
+    daemon.unref();
+  }
 
   const boundedWaitMs = Number.isFinite(maxWaitMs)
     ? Math.max(0, Math.floor(maxWaitMs))
@@ -2360,11 +2365,11 @@ async function ensureProxyRunning(config, maxWaitMs = 15_000, serverArgs = ['ser
     if (launchError) break;
     const started = await findRunningServer(config);
     if (started) return started;
-    if (daemon.exitCode != null) break;
+    if (daemon && daemon.exitCode != null) break;
     await delay(100);
   }
 
-  if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
+  if (daemon && daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
   const detail = launchError ? `: ${launchError.message}` : '';
   throw new Error(`Proxy failed to start${detail}. Run "teamcodex server" to inspect the startup error.`);
 }
@@ -2477,7 +2482,14 @@ function exitWithUnverifiedServerHint(r, verb) {
 // it, and the command ends there. Returns only when there is no such service.
 async function exitThroughService(verb) {
   const isUp = async () => probeServer((await loadConfig())?.proxy?.port, 1000);
-  const failure = await serviceLifecycle(verb, { cli: cliName(), isUp });
+  // The service stop is hard (no SIGTERM), so idle + drain first, as `update` does (bounded: 15 s).
+  const drain = async () => {
+    const config = (await loadConfig()) ?? {};
+    const state = await readServerState();
+    const pool = { config, port: config.proxy?.port, lifecycleId: state?.lifecycle?.id ?? null };
+    return quiesce([pool], Date.now() + 15_000, 1000);
+  };
+  const failure = await serviceLifecycle(verb, { cli: cliName(), isUp, quiesce: drain });
   if (failure === null) return;
   if (failure) console.error(`[${cliName()}] ${failure}`);
   process.exit(failure ? 1 : 0);

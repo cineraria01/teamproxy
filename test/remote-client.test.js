@@ -131,7 +131,9 @@ test('scripts/win32/teamclaude.cmd: runs the Windows entry from its own checkout
   assert.match(text, /node "%~dp0\.\.\\\.\.\\src\\teamclaude-win32\.js" %\*/);
   assert.match(text, /set "TEAMCLAUDE_CONFIG=%USERPROFILE%\\\.config\\teamclaude\.json"/);
   assert.match(text, /^setlocal/m);
-  assert.match(text, /exit \/b %ERRORLEVEL%/);
+  // node and exit on one line (cmd re-reads the file after node returns; git pull may have rewritten it).
+  // `exit /b` without a number keeps node's exit code — checked through the real cmd.exe below.
+  assert.match(text, /teamclaude-win32\.js" %\* & exit \/b\r\n$/);
 });
 
 test('teamclaude.cmd on Windows: status reaches the remote pool through the real .cmd', { skip: !WIN && 'cmd.exe only' }, async () => {
@@ -140,12 +142,15 @@ test('teamclaude.cmd on Windows: status reaches the remote pool through the real
   try {
     await mkdir(join(box.home, '.config'), { recursive: true });
     await writeFile(join(box.home, '.config', 'teamclaude.json'), JSON.stringify({ accounts: [], client: { url: remote.url, token: TOKEN } }));
-    const r = await new Promise(resolve => execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${winCmd}" status`],
+    const cmd = verb => new Promise(resolve => execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${winCmd}" ${verb}`],
       { env: { ...box.env, TEAMCLAUDE_CONFIG: '' }, encoding: 'utf8', timeout: 20_000, windowsVerbatimArguments: true },
       (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })));
+    const r = await cmd('status');
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /claude-main/);
     noToken(r, 'teamclaude.cmd status');
+    // A refused command (not in client mode) exits 1 through the .cmd: `exit /b` kept node's code.
+    assert.equal((await cmd('logout')).code, 1);
   } finally {
     await remote.close();
     await box.cleanup();

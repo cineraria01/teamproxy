@@ -53,16 +53,16 @@ test('fresh install --pools all: wrapper, server cmd/vbs, task and config per po
     const text = wrapper.toString('ascii');
     assert.ok(!/[^\r]\n/.test(text) && text.endsWith('\r\n'), `${cli}.cmd is CRLF`);
     assert.match(text, new RegExp(`set "TEAMCLAUDE_CONFIG=%USERPROFILE%[\\\\/]\\.config[\\\\/]${cli}\\.json"`));
-    assert.match(text, new RegExp(`teamproxy-win32\\.js" ${pool} %\\*\\r\\n`));
+    assert.match(text, new RegExp(`teamproxy-win32\\.js" ${pool} %\\* & exit /b\\r\\n$`), 'node and exit on the last line');
 
     const server = readFileSync(join(t.tp, `${cli}-server.cmd`), 'ascii');
     const prefix = pool === 'claude' ? '' : `${pool} `;
-    assert.match(server, new RegExp(`index\\.js" ${prefix}server >> "%LOG%" 2>&1`));
+    assert.match(server, new RegExp(`index\\.js" ${prefix}server >> "%LOG%" 2>&1 & exit /b\\r\\n$`));
     assert.match(server, new RegExp(`set "LOG=%LOCALAPPDATA%[\\\\/]teamproxy[\\\\/]logs[\\\\/]${cli}\\.log"`));
     assert.match(server, /set "TEAMCLAUDE_PROVIDER="/);
     const vbs = readFileSync(join(t.tp, `${cli}-server.vbs`), 'ascii');
     const target = ['%LOCALAPPDATA%', 'teamproxy', `${cli}-server.cmd`].join(sep);
-    assert.ok(vbs.includes(`WScript.Quit shell.Run("cmd.exe /d /c """ & shell.ExpandEnvironmentStrings("${target}") & """", 0, True)`), vbs);
+    assert.ok(vbs.includes(`WScript.Quit shell.Run("cmd.exe /d /s /c """"" & shell.ExpandEnvironmentStrings("${target}") & """""", 0, True)`), vbs);
 
     const xml = readFileSync(join(t.fake, 'tasks', `${cli}.xml`));
     assert.deepEqual([...xml.subarray(0, 2)], [0xff, 0xfe], 'UTF-16LE with BOM');
@@ -108,12 +108,12 @@ test('takes over a hand install: differing files and the task are backed up, the
   const bak = readdirSync(t.bin).find(n => n.startsWith('teamcodex.cmd.bak-install-'));
   assert.equal(readFileSync(join(t.bin, bak), 'utf8'), '@echo off\r\nrem hand-made\r\n');
   const taskBak = readdirSync(t.tp).find(n => /^teamcodex\.task\.bak-install-.*\.xml$/.test(n));
-  assert.equal(readFileSync(join(t.tp, taskBak), 'utf8'), '<Task>hand</Task>');
+  assert.equal(utf16(join(t.tp, taskBak)), '﻿<Task>hand</Task>', 'UTF-16 with BOM, as schtasks /Create /XML reads');
   assert.match(utf16(join(t.fake, 'tasks', 'teamcodex.xml')), /teamcodex-server\.vbs/);
 });
 
 test('start: a task whose port is free is run; a server already answering is left alone', async () => {
-  const busy = http.createServer((_, res) => res.end('{}'));
+  const busy = http.createServer((_, res) => res.end('{"accounts":[]}'));
   await new Promise(done => busy.listen(0, '127.0.0.1', done));
   try {
     mkdirSync(join(t.home, '.config'), { recursive: true });
@@ -135,7 +135,8 @@ test('start: a task whose port is free is run; a server already answering is lef
 test('a refused /Create fails with the admin hint and leaves no marker, so the next run tries again', async () => {
   const r = await install(['--pools', 'claude', '--no-start'], { FAKE_SCHTASKS_DENY: '1' });
   assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /Access is denied[\s\S]*관리자 PowerShell/);
+  assert.match(r.out, /Access is denied[\s\S]*「관리자로 실행」한 PowerShell/);
+  assert.equal(calls().filter(c => c[0] === '/Create').length, 1, 'a refused right is not retried with another count');
   assert.ok(!existsSync(join(t.tp, 'teamclaude.task.xml')));
   assert.ok(!existsSync(join(t.tp, 'teamclaude.task.xml.new')));
   const ok = await install(['--pools', 'claude', '--no-start']);
@@ -155,6 +156,41 @@ test('--remote: teamclaude wrapper and remote use (client saved), no teamclaude 
   const config = JSON.parse(readFileSync(configOf('claude'), 'utf8'));
   assert.equal(config.client?.url, 'https://pool.example.ts.net:8456');
   assert.ok(!r.out.includes('tp-remote-token-abcdefghijklmnop'), 'the token is never printed');
+});
+
+test('--remote failure never echoes the address argument (a token pasted there)', async () => {
+  const r = await install(['--remote', 'FAKE-SECRET-tok-1234567890abcdef', '--no-check', '--no-start']);
+  assert.equal(r.code, 1, r.out);
+  assert.ok(!r.out.includes('FAKE-SECRET-tok-1234567890abcdef'), r.out);
+  assert.match(r.out, /remote use <주소> 로 다시/);
+});
+
+test('an unreadable config stops before writing anything; a client-mode teamclaude config gets no task', async () => {
+  mkdirSync(join(t.home, '.config'), { recursive: true });
+  writeFileSync(configOf('claude'), '﻿{"accounts": [');
+  const bad = await install(['--pools', 'claude', '--no-start']);
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /JSON으로 읽지 못해 아무것도 바꾸지 않았습니다/);
+  assert.ok(!existsSync(t.bin));
+
+  const client = `${JSON.stringify({ client: { url: 'https://pool.example.ts.net:8456', token: 'x'.repeat(30) }, accounts: [] })}\n`;
+  writeFileSync(configOf('claude'), client);
+  const r = await install(['--pools', 'claude', '--no-start']);
+  assert.equal(r.code, 0, r.out);
+  assert.ok(existsSync(join(t.bin, 'teamclaude.cmd')));
+  assert.ok(!existsSync(join(t.fake, 'tasks', 'teamclaude.xml')));
+  assert.match(r.out, /원격 풀 모드\(client\)라 서버·작업을 만들지 않았습니다/);
+  assert.equal(readFileSync(configOf('claude'), 'utf8'), client);
+});
+
+test('a Windows that refuses RestartOnFailure 9999 gets 255, and a rerun keeps it (no re-create)', async () => {
+  const r = await install(['--pools', 'codex', '--no-start'], { FAKE_SCHTASKS_MAXCOUNT: '255' });
+  assert.equal(r.code, 0, r.out);
+  assert.match(utf16(join(t.fake, 'tasks', 'teamcodex.xml')), /<Count>255<\/Count>/);
+  assert.match(r.out, /9999번을 받지 않아 255번으로/);
+  const before = calls().length;
+  assert.equal((await install(['--pools', 'codex', '--no-start'], { FAKE_SCHTASKS_MAXCOUNT: '255' })).code, 0);
+  assert.ok(!calls().slice(before).some(c => c[0] === '/Create'));
 });
 
 test('--dry-run writes nothing; bad arguments and non-Windows are refused', async () => {

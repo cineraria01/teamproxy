@@ -77,14 +77,35 @@ function schtasksArgv(args, env = process.env) {
   return fake ? [process.execPath, [fake, ...args]] : ['schtasks', args];
 }
 
-export function schtasks(args, run = spawnSync) {
+export function schtasks(args, run = spawnSync, encoding = 'utf8') {
   const [cmd, argv] = schtasksArgv(args);
-  const r = run(cmd, argv, { encoding: 'utf8', timeout: 30_000 });
+  const r = run(cmd, argv, { encoding, timeout: 30_000 });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
 export function taskExists(task, run = spawnSync) {
   return schtasks(['/Query', '/TN', task], run).status === 0;
+}
+
+/**
+ * A pool's server is started through its task when it has one (so `run`'s auto-start never leaves a server the
+ * task cannot end). true = asked the task to run; false = no task, start it the usual way.
+ */
+export function taskStart(task, run = spawnSync) {
+  return taskExists(task, run) && schtasks(['/Run', '/TN', task], run).status === 0;
+}
+
+/**
+ * schtasks output piped to us: UTF-16 with a BOM, else UTF-8, else the OEM code page (949 on Korean Windows).
+ * Used for a task's XML, which keeps the user name and description.
+ */
+export function decodeSchtasksOutput(bytes) {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return bytes.subarray(2).toString('utf16le');
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^﻿/, '');
+  } catch {
+    return new TextDecoder('euc-kr').decode(bytes);
+  }
 }
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -101,12 +122,17 @@ async function waitFor(check, ms, step) {
 /**
  * Stop, and for `restart` start again, a pool the installer runs as the scheduled task `<cli>`. Task Scheduler
  * ends the whole process tree it started, so no pid is ever signalled here. `isUp()` = a TeamClaude server answers
- * on the pool's port. Returns null when `cli` is a task's name nowhere (the caller's usual path applies), else
- * an error line or '' on success.
+ * on the pool's port. `/End` is a hard stop, so `quiesce()` (idle + deployment drain, src/update.js) runs first;
+ * when it times out the stop goes ahead and says so. Returns null when `cli` is a task's name nowhere (the
+ * caller's usual path applies), else an error line or '' on success.
  */
-export async function taskLifecycle(verb, { cli, isUp, run = spawnSync, say = console.log, stopMs = 15_000, startMs = 120_000 }) {
+export async function taskLifecycle(verb, {
+  cli, isUp, quiesce = async () => ({ ok: true }), run = spawnSync, say = console.log, stopMs = 15_000, startMs = 120_000,
+}) {
   if (!taskExists(cli, run)) return null;
   if (await isUp()) {
+    const quiet = await quiesce();
+    if (!quiet.ok) say(`[${cli}] 진행 중 요청 ${quiet.active}개가 끊깁니다.`);
     schtasks(['/End', '/TN', cli], run);
     if (!await waitFor(async () => !await isUp(), stopMs, 250)) {
       return `작업 ${cli}을 끝냈지만 서버가 계속 응답합니다 — 이 작업이 띄운 서버가 아닙니다(예: ${cli} run이 자동으로 띄운 것). `

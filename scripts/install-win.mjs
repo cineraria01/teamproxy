@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = file => import(pathToFileURL(join(ROOT, 'src', file)).href);
-const { POOLS, schtasks, taskExists } = await src('win32.js');
+const { POOLS, decodeSchtasksOutput, schtasks, taskExists } = await src('win32.js');
 // Same default bundle as INSTALL-ALL (§1 teamcodex, §1-2 teamclaude); agy·grok·cursor are opt-in there too.
 const DEFAULT_POOLS = ['claude', 'codex'];
 const USAGE = 'Usage: node scripts\\install-win.mjs [--pools claude,codex,agy,grok,cursor|all] '
@@ -53,8 +53,9 @@ export function wrapperCmd(pool, { node, root, config, L }) {
     'rem No args or -options open the CLI, -- passes a CLI subcommand, any other word is a proxy command.',
     'setlocal',
     `set "TEAMCLAUDE_CONFIG=${cmdPath(config, L)}"`,
-    `"${cmdPath(node, L)}" "${cmdPath(join(root, 'src', 'teamproxy-win32.js'), L)}" ${pool} %*`,
-    'exit /b %ERRORLEVEL%',
+    // One line: cmd re-reads a batch file after each command, and the installer may rewrite this one meanwhile.
+    // `exit /b` with no number keeps node's exit code.
+    `"${cmdPath(node, L)}" "${cmdPath(join(root, 'src', 'teamproxy-win32.js'), L)}" ${pool} %* & exit /b`,
   ]);
 }
 
@@ -71,8 +72,7 @@ export function serverCmd(pool, { node, root, config, L }) {
     `if not exist "${logs}" mkdir "${logs}"`,
     'rem Keep one old log of up to 10 MB.',
     'if exist "%LOG%" for %%F in ("%LOG%") do if %%~zF GTR 10485760 move /y "%LOG%" "%LOG%.1" >nul',
-    `"${cmdPath(node, L)}" "${cmdPath(join(root, 'src', 'index.js'), L)}" ${[...prefix, 'server'].join(' ')} >> "%LOG%" 2>&1`,
-    'exit /b %ERRORLEVEL%',
+    `"${cmdPath(node, L)}" "${cmdPath(join(root, 'src', 'index.js'), L)}" ${[...prefix, 'server'].join(' ')} >> "%LOG%" 2>&1 & exit /b`,
   ]);
 }
 
@@ -83,14 +83,15 @@ export function serverVbs(pool, { L }) {
   return cmdText([
     `' ${cli} server without a window, for the scheduled task ${cli} (scripts/install-win.mjs).`,
     'Set shell = CreateObject("WScript.Shell")',
-    `WScript.Quit shell.Run("cmd.exe /d /c """ & shell.ExpandEnvironmentStrings("${cmd}") & """", 0, True)`,
+    // cmd /s /c ""path"": the outer quotes are always the ones removed, whatever the path holds.
+    `WScript.Quit shell.Run("cmd.exe /d /s /c """"" & shell.ExpandEnvironmentStrings("${cmd}") & """""", 0, True)`,
   ]);
 }
 
 const xml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
 /** Task Scheduler XML (UTF-16 with BOM, what schtasks /Create /XML reads). */
-export function taskXml(pool, { user, L }) {
+export function taskXml(pool, { user, L, restartCount = 9999 }) {
   const { cli } = POOLS[pool];
   const vbs = join(L.dir, `${cli}-server.vbs`);
   const text = `<?xml version="1.0" encoding="UTF-16"?>
@@ -131,7 +132,7 @@ export function taskXml(pool, { user, L }) {
     <Priority>7</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
-      <Count>9999</Count>
+      <Count>${restartCount}</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
@@ -177,11 +178,11 @@ function parseArgs(argv) {
   return opts;
 }
 
+/** A TeamClaude server (its status has an accounts list) answers on the port. */
 async function isUp(port) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, { signal: AbortSignal.timeout(1500) });
-    await res.arrayBuffer();
-    return true;
+    return Array.isArray((await res.json())?.accounts);
   } catch {
     return false;
   }
@@ -226,15 +227,24 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const remote = pool === 'claude' && opts.remote;
     const config = join(home, '.config', file);
     const ctx = { node, root: ROOT, config, L };
+    let existing = null;
+    if (existsSync(config)) {
+      try {
+        existing = JSON.parse(readFileSync(config, 'utf8'));
+      } catch (err) {
+        throw new Fail(`${config}을 JSON으로 읽지 못해 아무것도 바꾸지 않았습니다(${err.message}) — 메모장 등으로 BOM·깨진 곳을 고친 뒤 다시`);
+      }
+    }
+    // A teamclaude config in remote-pool client mode has no local server to run.
+    const client = pool === 'claude' && !remote && existing?.client;
     say(`${cli}: 래퍼 ${put(join(bin, `${cli}.cmd`), wrapperCmd(pool, ctx))}`);
 
     let port = POOLS[pool].port;
-    const existing = (() => { try { return JSON.parse(readFileSync(config, 'utf8')); } catch { return null; } })();
     if (existing) {
       port = existing.proxy?.port ?? port;
       const host = existing.proxy?.host;
       say(`${cli}: 설정 ${config} 그대로(계정 ${existing.accounts?.length ?? 0}개)`);
-      if (!remote && host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+      if (!remote && !client && host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
         notes.push(`${cli}: proxy.host가 ${host ? `"${host}"` : '비어 있어'} 이 PC 밖에서도 열립니다 — "127.0.0.1"을 권합니다(설정은 바꾸지 않았음)`);
       }
     } else if (!remote) {
@@ -258,31 +268,45 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       if (taskExists(cli)) notes.push(`${cli}: 로컬 풀 작업 ${cli}이 남아 있습니다 — 원격 풀만 쓰려면 schtasks /End /TN ${cli} 뒤 schtasks /Delete /TN ${cli} /F`);
       continue;
     }
+    if (client) {
+      notes.push(`${cli}: 설정이 원격 풀 모드(client)라 서버·작업을 만들지 않았습니다 — 로컬 풀로 바꾸려면 teamclaude remote use --off 뒤 다시`);
+      continue;
+    }
     say(`${cli}: 서버 ${put(join(L.dir, `${cli}-server.cmd`), serverCmd(pool, ctx))}, 창 없이 ${put(join(L.dir, `${cli}-server.vbs`), serverVbs(pool, ctx))}`);
-    const task = taskXml(pool, { user, L });
+    // RestartOnFailure 9999 (as the hand install); 255 only if this Windows refuses it (the documented schema type
+    // is unsignedByte — unverified which one Task Scheduler enforces).
+    const variants = [9999, 255].map(restartCount => taskXml(pool, { user, L, restartCount }));
     const marker = join(L.dir, `${cli}.task.xml`);
     const exists = taskExists(cli);
     let marked = null;
     try { marked = readFileSync(marker); } catch { /* first install */ }
-    if (exists && marked?.equals(task)) {
+    if (exists && variants.some(v => marked?.equals(v))) {
       say(`${cli}: 작업 ${cli} 그대로`);
     } else if (opts.dryRun) {
       say(`${cli}: (dry-run) 작업 ${cli} ${exists ? '바꿈(전 판 백업)' : '만듦'}`);
     } else {
       mkdirSync(L.dir, { recursive: true });
       if (exists) {
-        const old = schtasks(['/Query', '/TN', cli, '/XML']);
-        if (old.status !== 0) throw new Fail(`작업 ${cli}의 XML을 읽지 못해 바꾸지 않았습니다: ${old.stderr.trim()}`);
-        writeFileSync(join(L.dir, `${cli}.task.bak-install-${when}.xml`), old.stdout);
+        const old = schtasks(['/Query', '/TN', cli, '/XML'], undefined, 'buffer');
+        if (old.status !== 0) throw new Fail(`작업 ${cli}의 XML을 읽지 못해 바꾸지 않았습니다: ${decodeSchtasksOutput(old.stderr).trim()}`);
+        // UTF-16 with BOM like the XML header says, so `schtasks /Create /XML <backup>` takes it back as is.
+        writeFileSync(join(L.dir, `${cli}.task.bak-install-${when}.xml`), Buffer.from(`﻿${decodeSchtasksOutput(old.stdout)}`, 'utf16le'));
       }
       const next = `${marker}.new`;
-      writeFileSync(next, task);
-      const made = schtasks(['/Create', '/TN', cli, '/XML', next, '/F']);
+      let made;
+      for (const task of variants) {
+        writeFileSync(next, task);
+        made = schtasks(['/Create', '/TN', cli, '/XML', next, '/F']);
+        if (made.status === 0) break;
+        if (/denied|거부/i.test(made.stderr + made.stdout)) break; // a missing right, not the count
+      }
       if (made.status !== 0) {
         rmSync(next, { force: true });
         throw new Fail(`schtasks /Create /TN ${cli} 실패(종료 ${made.status}): ${(made.stderr || made.stdout).trim()}\n`
-          + '  「액세스가 거부되었습니다」면 로그온 트리거 작업을 만들 권한이 없는 것입니다 — 관리자 PowerShell에서 이 명령을 한 번 다시 실행하세요.');
+          + '  「액세스가 거부되었습니다」면 로그온 트리거 작업을 만들 권한이 없는 것입니다 — 이 사용자가 관리자 그룹이면 '
+          + '「관리자로 실행」한 PowerShell에서 이 명령을 한 번 다시 실행하세요(다른 관리자 계정으로 돌리면 그 계정 프로필에 깔립니다).');
       }
+      if (!readFileSync(next).equals(variants[0])) notes.push(`${cli}: 이 Windows가 RestartOnFailure 9999번을 받지 않아 255번으로 만들었습니다`);
       renameSync(next, marker);
       say(`${cli}: 작업 ${cli} ${exists ? `바꿈(전 판 ${cli}.task.bak-install-${when}.xml)` : '만듦'}`);
     }
@@ -295,13 +319,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (opts.noCheck) args.push('--no-check');
     say('teamclaude: 원격 풀 연결(teamclaude remote use)');
     const r = spawnSync(node, args, { stdio: 'inherit', env: { ...env, TEAMCLAUDE_CONFIG: join(home, '.config', POOLS.claude.config) } });
-    if (r.status !== 0) throw new Fail(`teamclaude remote use 실패(종료 ${r.status}) — 위 안내대로 고친 뒤 teamclaude remote use ${opts.remote} 로 다시`);
+    // Never echo --remote's value: a token pasted there would land on the screen (remote-client.js does the same).
+    if (r.status !== 0) throw new Fail(`teamclaude remote use 실패(종료 ${r.status}) — 위 안내대로 고친 뒤 teamclaude remote use <주소> 로 다시`);
   }
 
   if (opts.start && !opts.dryRun) {
     for (const { cli, port } of tasks) {
       if (await isUp(port)) {
-        say(`${cli}: 서버가 이미 :${port}에서 응답합니다 — 그대로 둠(새 작업으로 바꾸려면 ${cli} restart)`);
+        say(`${cli}: 서버가 이미 :${port}에서 응답합니다 — 그대로 둠(작업 밖에서 뜬 서버면 그 창에서 끈 뒤 schtasks /Run /TN ${cli})`);
         continue;
       }
       const r = schtasks(['/Run', '/TN', cli]);
@@ -317,6 +342,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   }
   const where = name => spawnSync('where.exe', [name], { stdio: 'ignore' }).status === 0;
   for (const pool of opts.pools) {
+    // An older wrapper earlier on PATH (e.g. an npm global %APPDATA%\npm\teamcodex.cmd) would shadow the new one.
+    const first = spawnSync('where.exe', [POOLS[pool].cli], { encoding: 'utf8' }).stdout?.split(/\r?\n/)[0]?.trim();
+    const mine = join(bin, `${POOLS[pool].cli}.cmd`);
+    if (first && first.toLowerCase() !== mine.toLowerCase()) notes.push(`${POOLS[pool].cli}: PATH에서 ${first}가 먼저 잡힙니다 — 지우거나 ${bin}을 PATH 앞으로`);
     if (pool === 'claude' && !existsSync(join(bin, 'claude.exe'))) notes.push('Claude Code가 없습니다(%USERPROFILE%\\.local\\bin\\claude.exe) — PowerShell: irm https://claude.ai/install.ps1 | iex');
     if (pool === 'codex') {
       const { resolveCodexCliBin } = await src('codex.js');
