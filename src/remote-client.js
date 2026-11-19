@@ -28,7 +28,10 @@ const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
 /** The pool's origin. https only, except a loopback http address (an SSH tunnel, tests). */
 export function normalizeClientUrl(raw) {
   let url;
-  try { url = new URL(String(raw)); } catch { throw new Error(`주소가 올바르지 않습니다: ${raw}`); }
+  // Never echo the value: a token pasted where the address goes would land on the screen.
+  try { url = new URL(String(raw)); } catch {
+    throw new Error('주소가 아닙니다(https://<기계>.<tailnet>.ts.net:8456 꼴). 토큰을 넣었다면 셸 기록에 남았으니 풀 기계에서 remote token --rotate.');
+  }
   if (url.username || url.password) throw new Error('주소에 사용자 이름·비밀번호를 넣지 마세요.');
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOOPBACK.has(url.hostname))) {
     throw new Error('주소는 https:// 여야 합니다(평문 http는 이 기계의 루프백 주소만).');
@@ -301,15 +304,19 @@ export async function remoteUseCommand(argv, { config, configPath, update, out =
     out(`클라이언트 모드 끔: ${configPath}의 client 칸을 지웠습니다. 이제 이 기계의 로컬 풀을 씁니다.`);
     return 0;
   }
-  const flagValue = flag => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : null; };
-  const tokenFile = flagValue('--token-file');
-  const positional = argv.filter((a, i) => !a.startsWith('-') && argv[i - 1] !== '--token-file');
+  // --token-file PATH or --token-file=PATH.
+  const joined = argv.find(a => a.startsWith('--token-file='));
+  const i = argv.indexOf('--token-file');
+  const next = i >= 0 ? argv[i + 1] : undefined;
+  const tokenFile = joined ? joined.slice('--token-file='.length) || null
+    : next && !next.startsWith('-') ? next : null;
+  const positional = argv.filter((a, n) => !a.startsWith('-') && argv[n - 1] !== '--token-file');
   if (!positional.length) {
     out(current ? `클라이언트 모드: ${current.url} (토큰 있음 — 보이지 않음)` : '클라이언트 모드: 꺼짐');
     out('켜기: teamclaude remote use <https://기계.tailnet.ts.net:8456> (토큰은 표준 입력 또는 --token-file) · 끄기: teamclaude remote use --off');
     return 0;
   }
-  if (argv.includes('--token-file') && !tokenFile) { err('--token-file 뒤에 파일 경로를 주세요.'); return 1; }
+  if ((i >= 0 || joined) && !tokenFile) { err('--token-file 뒤에 파일 경로를 주세요.'); return 1; }
   if (positional.length > 1) {
     err('주소 하나만 줍니다. 토큰은 명령줄에 넣지 않습니다(이미 쳤다면 셸 기록에 남았으니 풀 기계에서 remote token --rotate).');
     return 1;

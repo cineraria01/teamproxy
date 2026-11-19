@@ -240,6 +240,13 @@ test('remote use: token from stdin or --token-file is checked, saved 0600, never
     const fromFile = await cli(['remote', 'use', remote.url, '--token-file', file], box.env);
     assert.equal(fromFile.code, 0, fromFile.stderr);
     noToken(fromFile, 'use --token-file');
+    // --token-file=PATH: the file, not standard input (which holds a wrong token here).
+    const joined = await cli(['remote', 'use', remote.url, `--token-file=${file}`], box.env, { input: 'wrong-token\n' });
+    assert.equal(joined.code, 0, joined.stderr);
+    noToken(joined, 'use --token-file=');
+    const missing = await cli(['remote', 'use', remote.url, '--token-file='], box.env);
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /파일 경로/);
 
     const off = await cli(['remote', 'use', '--off'], box.env);
     assert.equal(off.code, 0);
@@ -283,7 +290,11 @@ test('remote use refuses a config with local accounts, a non-Claude pool, and an
     const typed = await cli(['remote', 'use', codexPool.url, TOKEN], empty.env, { input: TOKEN });
     assert.equal(typed.code, 1);
     assert.match(typed.stderr, /명령줄에 넣지 않습니다/);
-    for (const r of [local, codex, down, nul]) noToken(r, 'refusal');
+    // The token pasted where the address goes: refused without echoing it.
+    const asAddress = await cli(['remote', 'use', TOKEN], empty.env, { input: '' });
+    assert.equal(asAddress.code, 1);
+    assert.match(asAddress.stderr, /주소가 아닙니다.*remote token --rotate/);
+    for (const r of [local, codex, down, nul, asAddress]) noToken(r, 'refusal');
     assert.equal(codexPool.seen.length, 1, 'only the codex-pool check reached the remote');
   } finally {
     await codexPool.close();

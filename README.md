@@ -468,7 +468,8 @@ bash .claude/herdr-verify.sh                           # 착지 검사(hc-lane l
 ```
 
 `.claude/herdr-verify.sh`는 `npx eslint@10.15.0 src/`, `git merge-base HEAD origin/main` 이후 바뀐 `test/*.test.js`와 바뀐 `src/<이름>.js`의
-`test/<이름>.test.js`·`test/<이름>-*.test.js`, `src/hud/`·`test/hud/`가 바뀌었으면 `test/hud/test_*.py`를 돌린다(teamclaude 세션이
+`test/<이름>.test.js`·`test/<이름>-*.test.js`(`src/index.js`는 run-env·run-recovery·remote·config), `src/hud/`·`test/hud/`가
+바뀌었으면 `test/hud/test_*.py`, `statusline/`이 바뀌었으면 `statusline/test_statusline.py`를 돌린다(teamclaude 세션이
 물려준 변수는 빼고). 전체 `npm test`는 환경 탓 실패가 origin/main에도 있어 착지 관문으로 쓰지 않는다.
 
 지킬 것:

@@ -32,6 +32,25 @@ assert statusline.fmt_remaining((now + 90061) * 1000, now) == "1d1h"
 assert statusline.fmt_remaining(now * 1000, now) == "now"
 assert statusline.fmt_remaining(None, now) is None
 
+# Client mode (`teamclaude remote use`): `teamclaude status --json` gives the remote /teamproxy/status shape,
+# mapped onto the local one the rows read; a local status passes through untouched.
+remote = statusline._from_remote({"pool": "claude", "accounts": [
+    {"n": 1, "name": "a@example.com", "enabled": True, "active": True, "priority": None, "state": "busy",
+     "session": {"pct": 20, "resetsAt": "2026-11-19T10:00:00.000Z"}, "weekly": {"pct": 45, "resetsAt": None},
+     "fable": {"pct": 7, "resetsAt": None}, "end": "2026-12-01T00:00:00.000Z", "stale": False},
+    {"n": 2, "name": "b@example.com", "enabled": False, "active": False, "priority": 1, "state": "error",
+     "session": None, "weekly": None, "fable": None, "end": None, "stale": True},
+], "requests": {"active": 1}})
+assert remote["currentAccount"] == "a@example.com"
+first, second = remote["accounts"]
+assert first["quota"] == {"unified5h": 0.2, "unified5hReset": "2026-11-19T10:00:00.000Z", "unified7d": 0.45,
+                          "unified7dReset": None, "unified7dFable": 0.07, "unified7dFableReset": None}
+assert first["subscription"] == {"endsAt": "2026-12-01T00:00:00.000Z"} and first["status"] == "active"
+assert second == {"name": "b@example.com", "enabled": False, "priority": 1, "status": "error", "quota": {}}
+assert statusline._normalize(remote)["accounts"][1]["disabled"] is True
+local = {"currentAccount": "x", "accounts": [{"name": "x", "quota": {"unified5h": 0.5}}]}
+assert statusline._from_remote(local) is local
+
 # Account rows follow the proxy's use-or-lose order: soonest weekly reset first
 # (a known Fable reset does not matter), then soonest 5h reset, then 5h use.
 # Original numbers stay attached so `claude N` keeps selecting account N.

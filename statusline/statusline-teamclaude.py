@@ -179,6 +179,28 @@ def row_color(account_number):
     return ROW_COLORS[(account_number - 1) % len(ROW_COLORS)]
 
 
+def _from_remote(data):
+    """Client mode (`teamclaude remote use`): `teamclaude status --json` prints the remote pool's
+    /teamproxy/status — {pool, accounts: [{n, name, enabled, active, priority, state, session, weekly, fable,
+    end, stale}]}, gauges {pct, resetsAt}. Map it onto the local status shape the rows read; anything else
+    passes through. No age is known, so stale rows are not grayed."""
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    if "pool" not in data or not isinstance(accounts, list) or not all(isinstance(a, dict) and "n" in a for a in accounts):
+        return data
+    out = []
+    for a in accounts:
+        q = {}
+        for field, key in (("session", "unified5h"), ("weekly", "unified7d"), ("fable", "unified7dFable")):
+            gauge = a.get(field)
+            if isinstance(gauge, dict) and isinstance(gauge.get("pct"), (int, float)):
+                q[key], q[key + "Reset"] = gauge["pct"] / 100, gauge.get("resetsAt")
+        out.append({"name": a.get("name"), "enabled": a.get("enabled") is not False, "priority": a.get("priority"),
+                    "status": "error" if a.get("state") == "error" else "active", "quota": q,
+                    **({"subscription": {"endsAt": a["end"]}} if a.get("end") else {})})
+    current = next((a.get("name") for a in accounts if a.get("active")), None)
+    return {"currentAccount": current, "accounts": out}
+
+
 def _normalize(data):
     """Map fields from teamclaude builds whose status JSON predates the
     unified7dFable/disabled naming (e.g. the 1.3.x proxy endpoint)."""
@@ -313,7 +335,7 @@ def load_status():
                 capture_output=True, text=True, timeout=5,
             )
             if out.returncode == 0:
-                data = json.loads(out.stdout)
+                data = _from_remote(json.loads(out.stdout))
         except FileNotFoundError:
             return "missing"
         except Exception:

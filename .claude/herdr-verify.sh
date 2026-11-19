@@ -3,8 +3,9 @@
 # The full `npm test` is not the gate: 41~48 environment-bound failures exist on origin/main too. So:
 #   1. npx eslint@10.15.0 src/
 #   2. node --test on what changed since `git merge-base HEAD origin/main`: changed test/*.test.js, plus
-#      test/<name>.test.js and test/<name>-*.test.js for each changed src/<name>.js
-#   3. python3 test/hud/test_*.py when src/hud/ or test/hud/ changed
+#      test/<name>.test.js and test/<name>-*.test.js for each changed src/<name>.js (src/index.js, which has none:
+#      run-env, run-recovery, remote, config)
+#   3. python3 test/hud/test_*.py when src/hud/ or test/hud/ changed; statusline/test_statusline.py when statusline/ did
 # Tests run without the variables a teamclaude session hands down (run-env/run-recovery fail under them).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -17,10 +18,14 @@ npx --yes eslint@10.15.0 src/
 
 tests=()
 hud=0
+statusline=0
 while IFS= read -r f; do
   case $f in
     test/hud/*|src/hud/*) hud=1 ;;
+    statusline/*) statusline=1 ;;
     test/*.test.js) [ -f "$f" ] && tests+=("$f") ;;
+    # No test/index*.test.js: the CLI dispatcher's own suites.
+    src/index.js) tests+=(test/run-env.test.js test/run-recovery.test.js test/remote.test.js test/config.test.js) ;;
     src/*.js)
       name=$(basename "$f" .js)
       for t in "test/$name.test.js" test/"$name"-*.test.js; do [ -f "$t" ] && tests+=("$t"); done ;;
@@ -43,5 +48,9 @@ if [ "$hud" = 1 ]; then
     echo "[herdr-verify] python3 $t"
     "${clean[@]}" python3 "$t"
   done
+fi
+if [ "$statusline" = 1 ]; then
+  echo "[herdr-verify] python3 statusline/test_statusline.py"
+  "${clean[@]}" python3 statusline/test_statusline.py
 fi
 echo "[herdr-verify] ok"

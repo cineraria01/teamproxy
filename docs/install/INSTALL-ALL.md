@@ -649,7 +649,7 @@ teamclaude remote use          # 지금 설정 보기 (토큰은 안 보임)
 teamclaude remote use --off    # 끄기 = 되돌리기 (설정의 client 칸을 지움)
 ```
 
-- 설정은 `teamclaude.json`의 `"client": {"url", "token"}`(유닉스 0600, Windows는 `%USERPROFILE%` 아래 그 사용자 전용). 주소는
+- 설정은 `teamclaude.json`의 `"client": {"url", "token"}`(유닉스 0600. Windows는 0600이 무시되고 `%USERPROFILE%\.config`의 상속 ACL — 그 사용자·SYSTEM·Administrators — 을 따른다). 주소는
   `https://` 원점만(경로 없음. 평문 `http://`는 루프백만). 로컬 계정이 있는 설정·Claude 풀이 아닌 주소(`:8457` 등)·
   안 닿는 주소는 거절하고 저장하지 않는다(연결 전에 저장만 하려면 `--no-check`).
 - 쓰기: `teamclaude`(대화형) · `teamclaude -p "…"`·`--model …` 등 Claude 옵션 · `teamclaude -- mcp list`(Claude 하위 명령).
@@ -661,7 +661,10 @@ teamclaude remote use --off    # 끄기 = 되돌리기 (설정의 client 칸을 
 - 여기서 못 하는 것(`login`·`logout`·`import`·`remove`·`update`·`server`·`stop`·`env`·`remote on|off|token` …)은 한국어 안내와
   종료 1. 원격에 못 닿으면 한 줄(연결 실패·401 토큰·403 허용 로그인·원격 꺼짐)과 종료 1.
 - 맥·리눅스 sh 래퍼(§1-2)는 그대로 쓴다. 하단 줄(Herdr 분할)은 읽을 로컬 서버가 없어 클라이언트 모드에서는 조용히 띄우지
-  않는다(원격 표는 `teamclaude status`). 이 기계에 `statusline/`의 Claude 상태줄을 깔았으면 그 줄은 로컬 풀 기준이라 비어 보일 수 있다.
+  않는다(원격 표는 `teamclaude status`). 이 기계에 `statusline/`의 Claude 상태줄을 깔았으면, 로컬 서버가 없을 때 쓰는 `teamclaude status --json`이 원격 응답을
+  주고 상태줄이 그 모양을 알아본다(5h·주간·Fable·구독 끝·지금 계정, 오래된 값의 나이는 모름). 그리기마다 원격을 한 번 부른다(캐시 TTL 안이면 안 부름).
+- 토큰은 Claude Code 자식 환경의 `ANTHROPIC_API_KEY`로 Claude가 띄우는 도구·MCP 서버·셸에 그대로 물려진다(API 키 모드의 성질).
+  Claude가 `env`를 돌리면 대화 기록에 남을 수 있으니, 새면 풀 기계에서 `remote token --rotate` 뒤 `remote use`로 다시 넣는다.
 
 - 손으로 넣어 둔 Claude Code `settings.json`의 `env.ANTHROPIC_BASE_URL`·`env.ANTHROPIC_API_KEY`가 있으면 그 값이 이 명령보다 이긴다.
   클라이언트 모드로 옮길 때 그 두 칸을 지운다.
