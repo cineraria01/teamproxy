@@ -95,6 +95,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   'proxy-authorization', 'proxy-authenticate',
 ]);
 const CODEX_ERROR_INSPECTION_MAX_BYTES = 16 * 1024;
+// How long an Anthropic account that answered "model: <id>" 404 is skipped for
+// that model. Entitlements change rarely; the TTL lets a new grant show up.
+const ANTHROPIC_MODEL_NOT_FOUND_TTL_MS = 6 * 60 * 60 * 1000;
 // [local patch: client-credential paths] see the relayRaw branch in the request
 // handler. Anthropic mode only.
 const CLIENT_CREDENTIAL_PATHS = ['/v1/code/', '/api/oauth/files/', '/api/oauth/file_upload', '/api/oauth/validate'];
@@ -3339,6 +3342,20 @@ function isClaudeSubscriptionAccessDisabled(body) {
   }
 }
 
+// An account not entitled to a model answers exactly this (measured
+// 2026-11-21: claude-mythos-5-2 on five of six accounts). The upstream never
+// knows a bracket suffix ("[1m]"), so compare against the stripped model.
+function isAnthropicModelNotFound(body, model) {
+  if (typeof model !== 'string' || !model) return false;
+  try {
+    const payload = JSON.parse(body.toString());
+    return payload?.error?.type === 'not_found_error'
+      && payload.error.message === `model: ${model.replace(/\[[^\]]*\]$/, '')}`;
+  } catch {
+    return false;
+  }
+}
+
 function logTimestamp() {
   const d = new Date();
   const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -3952,6 +3969,17 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
         : grokExhaustedBody(retryAfter)));
       return;
     }
+    // Anthropic: every account answered "model: <id>" 404 within the TTL — the
+    // model is not available on this pool, which is a 404, not a usage limit.
+    if (ctx.provider === 'anthropic' && fleetModelQuarantined()) {
+      ctx.status = 404;
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        type: 'error',
+        error: { type: 'not_found_error', message: `model: ${ctx.model.replace(/\[[^\]]*\]$/, '')}` },
+      }));
+      return;
+    }
     const deadlineExpired = ctx.continuity.maxWaitMs > 0
       && ctx.continuityDeadlineAt != null
       && Date.now() >= ctx.continuityDeadlineAt;
@@ -4447,6 +4475,63 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
         flushRequestLog(logDir, reqId, logSections, hooks);
       }
       if (!res.headersSent) res.writeHead(403, responseHeaders);
+      res.end(responseBody.length > 0 ? responseBody : undefined);
+      return;
+    }
+
+    // Anthropic 404 "model: <requested>" = this account is not entitled to the
+    // model. Nothing was generated, so the request replays on an account not
+    // yet marked; with none left the last 404 passes through unchanged. Any
+    // other 404 is passed through untouched (no mark, no replay).
+    if (ctx.provider === 'anthropic' && upstreamRes.status === 404) {
+      const responseBody = await readBodyBounded(
+        upstreamRes.body,
+        ctx.maxResponseBytes,
+        ctx.reserveResponseBytes,
+        ctx.releaseReservedResponseBytes,
+      );
+      if (responseBody === null) {
+        ctx.status = 502;
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'error',
+            error: { type: 'proxy_error', message: 'Upstream 404 response exceeded the proxy limit.' },
+          }));
+        }
+        return;
+      }
+      const modelNotFound = isAnthropicModelNotFound(responseBody, ctx.model);
+      if (modelNotFound) {
+        accountManager.markModelUnsupported(account, ctx.model, ANTHROPIC_MODEL_NOT_FOUND_TTL_MS);
+      }
+      if (logDir) {
+        appendLogSection(`=== RESPONSE 404${modelNotFound ? ' — model not available on this account' : ''} ===\n${formatHeaders(upstreamRes.headers, metadataOnlyLog)}`);
+        if (!metadataOnlyLog) appendLogSection(formatLogBody('=== RESPONSE BODY', responseBody));
+        flushRequestLog(logDir, reqId, logSections, hooks);
+      }
+      if (res.destroyed) return;
+      // A recovery-pinned request must stay on its account: no replay.
+      if (modelNotFound && ctx.preferredAccountUuid == null && retryCount < maxRetries
+          && (hasUsable(null) || hasCapped(null))) {
+        console.log(`[TeamClaude] 404 model ${ctx.model} not available on "${account.name}" — marked, switching account`);
+        releaseHeld();
+        return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir);
+      }
+      if (modelNotFound) {
+        console.log(`[TeamClaude] 404 model ${ctx.model} not available on "${account.name}" — no other account serves it`);
+      }
+
+      ctx.status = 404;
+      const responseHeaders = {};
+      const responseConnectionHeaders = connectionHeaderNames(upstreamRes.headers.get('connection'));
+      for (const [key, value] of upstreamRes.headers.entries()) {
+        if (HOP_BY_HOP_HEADERS.has(key) || responseConnectionHeaders.has(key)) continue;
+        if (key === CODEX_RECOVERY_SESSION_HEADER) continue;
+        if (key === 'content-encoding' || key === 'content-length') continue;
+        responseHeaders[key] = value;
+      }
+      if (!res.headersSent) res.writeHead(404, responseHeaders);
       res.end(responseBody.length > 0 ? responseBody : undefined);
       return;
     }

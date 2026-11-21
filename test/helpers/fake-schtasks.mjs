@@ -7,6 +7,8 @@ import { join } from 'node:path';
 
 const dir = process.env.FAKE_SCHTASKS_DIR;
 const args = process.argv.slice(2);
+// `node --test` (npm test) picks up every file under test/ and runs this one bare: not a call, nothing to do.
+if (!dir && args.length === 0) process.exit(0);
 appendFileSync(join(dir, 'calls.log'), `${JSON.stringify(args)}\n`);
 const name = args[args.indexOf('/TN') + 1];
 const file = join(dir, 'tasks', `${name}.xml`);
